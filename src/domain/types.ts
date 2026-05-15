@@ -1,0 +1,182 @@
+// Core domain types for the 2D FPS manager.
+// Designed to support a "full personality sim": stats + traits + mood drive sim outcomes.
+
+export type Side = "CT" | "T";
+
+export type Role = "entry" | "awper" | "support" | "igl" | "lurker";
+
+// 0-100 attribute scale across the board for legibility.
+export interface PlayerStats {
+  aim: number;        // raw accuracy
+  reflexes: number;   // reaction time
+  gameSense: number;  // positioning, anticipation
+  nerve: number;      // resistance to pressure (clutch, ecos)
+  utility: number;    // grenade lineups, smoke quality
+  movement: number;   // peek/strafe quality
+}
+
+export type Trait =
+  | "clutch"           // performs better when last alive
+  | "tilts-easy"       // performance drops when behind
+  | "smoke-savant"     // utility +
+  | "rifler"           // bonus with rifles, malus with awp
+  | "awp-prodigy"      // bonus with awp
+  | "shaky-eco"        // nerve drops on eco rounds
+  | "loyal"            // morale boost from teammates
+  | "entry-fragger";   // bonus when taking first contact
+
+export interface Player {
+  id: string;
+  name: string;
+  role: Role;
+  stats: PlayerStats;
+  traits: Trait[];
+
+  // Dynamic state — updated round to round.
+  mood: number;        // 0-100, drifts based on outcomes
+  morale: number;      // 0-100, longer-term
+  // Relationships keyed by other player id (-100 to 100).
+  relationships: Record<string, number>;
+}
+
+export type WeaponId =
+  | "knife"
+  | "pistol"
+  | "smg"
+  | "rifle"
+  | "awp";
+
+export interface Weapon {
+  id: WeaponId;
+  name: string;
+  cost: number;
+  damage: number;      // per hit, before falloff
+  fireRate: number;    // shots per second
+  accuracy: number;    // 0-1 base, modulated by player stats
+  range: number;       // effective range in world units
+}
+
+export type UtilityId = "smoke" | "flash" | "he" | "molotov";
+
+export interface Utility {
+  id: UtilityId;
+  name: string;
+  cost: number;
+}
+
+export interface Loadout {
+  weapon: WeaponId;
+  utility: UtilityId[];
+  armor: boolean;
+  // Items the player already owns at the start of the buy phase (free).
+  keptWeapon: WeaponId | null;
+  keptArmor: boolean;
+}
+
+export interface DroppedWeapon {
+  pos: Vec2;
+  weapon: WeaponId;
+}
+
+export interface MatchStats {
+  kills: number;
+  deaths: number;
+  damage: number;       // total damage dealt this match
+  roundsPlayed: number;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  side: Side;          // current side this half
+  players: Player[];
+  money: number;       // team-shared bankroll for buy phase; per-player money can come later
+  roundsWon: number;
+  // Per-player current loadout for the upcoming round.
+  loadouts: Record<string, Loadout>;
+  // Per-player rolling stats for the current match.
+  matchStats: Record<string, MatchStats>;
+}
+
+// World / map representation — grid-based for the minimal sim.
+export interface GameMap {
+  name: string;
+  width: number;       // tiles
+  height: number;      // tiles
+  tileSize: number;    // pixels per tile
+  walls: boolean[];    // length = width*height
+  ctSpawns: Vec2[];
+  tSpawns: Vec2[];
+  bombsites: { id: "A" | "B"; center: Vec2; radius: number }[];
+  // Default smoke spots agents can throw to (tile coords). Index by side.
+  smokeSpots: { side: Side; tile: Vec2 }[];
+}
+
+export interface Vec2 { x: number; y: number; }
+
+export type SiteAssignment = "A" | "B" | "mid";
+
+// A single agent in the sim — bound to a Player but with runtime state.
+export interface Agent {
+  playerId: string;
+  side: Side;
+  pos: Vec2;
+  facing: number;       // radians
+  hp: number;
+  armor: number;
+  weapon: WeaponId;
+  utility: UtilityId[];
+  alive: boolean;
+  lastShotAt: number;   // sim time (ms)
+  target: Vec2 | null;  // current move target (final destination)
+  path: Vec2[];         // remaining waypoints to target (world coords)
+  // Per-enemy first-spotted timestamps for reaction-delay gating.
+  spotted: Record<string, number>;
+  holdAngle: number | null;
+  // Tactical assignment for the round.
+  assignedSite: SiteAssignment;
+  nextThinkAt: number;
+  dirty: boolean;
+  moveMode: "walk" | "run";
+  // Scanning: agent rotates 'facing' toward direction(of lookTarget). Updated periodically.
+  lookTarget: Vec2 | null;
+  lookChangeAt: number;
+  // Decision on what to do when an enemy is acquired.
+  stance: "none" | "hold" | "rush" | "disengage";
+  stanceUntil: number;
+}
+
+export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";
+
+export interface Smoke {
+  pos: Vec2;
+  radius: number;        // world units
+  expiresAt: number;     // sim ms
+  side: Side;            // who threw it (for stats later)
+}
+
+export type RoundOutcome = "ct-elim" | "t-elim" | "bomb-detonated" | "bomb-defused" | "time-expired";
+
+export interface RoundResult {
+  outcome: RoundOutcome;
+  winningSide: Side;
+  durationMs: number;
+  events: SimEvent[];
+}
+
+export type SimEvent =
+  | { t: number; kind: "kill"; killer: string; victim: string; weapon: WeaponId }
+  | { t: number; kind: "bomb-plant"; planter: string }
+  | { t: number; kind: "bomb-defuse"; defuser: string }
+  | { t: number; kind: "bomb-detonate" }
+  | { t: number; kind: "round-start" }
+  | { t: number; kind: "round-end"; winner: Side };
+
+export interface MatchState {
+  ct: Team;
+  t: Team;
+  map: GameMap;
+  roundNumber: number;
+  maxRounds: number;       // e.g. 16 (first to 9 wins) for a short demo match
+  history: RoundResult[];
+}
