@@ -855,9 +855,19 @@ export class RoundSim {
   }
 
   private ctGoal(a: Agent): Vec2 | null {
-    // Bomb planted: rotate to the bomb's actual location, regardless of original assignment.
+    // Bomb planted: designated defuser routes exactly to the bomb; others orbit for cover.
     if (this.bombPlanted && this.bombPlantedAt) {
-      return jitter(this.bombPlantedAt, 80, this.rng);
+      const cts = this.agents.filter(x => x.side === "CT" && x.alive);
+      let defuser = cts[0];
+      let bestD = Infinity;
+      for (const c of cts) {
+        const d = dist(c.pos, this.bombPlantedAt);
+        if (d < bestD) { bestD = d; defuser = c; }
+      }
+      if (defuser && a.playerId === defuser.playerId) {
+        return { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y };
+      }
+      return jitter(this.bombPlantedAt, 70, this.rng);
     }
     // Intel-driven rotation: prefer the site with decisively more enemy activity.
     const player = this.players(a.playerId)!;

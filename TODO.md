@@ -7,10 +7,10 @@
 - [x] Add headshots, kevlar+helmet
 - [x] Figure out how CT smokes are effective
 - [x] Flashes
-- [ ] Molotovs
-- [ ] HE
+- [x] Molotovs
+- [x] HE
 - [ ] Grenades are thrown by players, show them leaving their hand and their trajectory. Grenade skills should affect both target choice and accuracy
-- [ ] Ammo, reloads
+- [x] Ammo, reloads
 - [ ] Different T and CT guns
 - [ ] Upgraded pistols (deagles,)
 - [ ] Agents should be aware of how many players are left

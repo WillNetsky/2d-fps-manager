@@ -137,23 +137,34 @@ function aiBuyForAway() {
     const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
 
     let weapon: WId = kept ?? "pistol";
+    let spent = 0;
+    let armor = keptArmor;
+    let helmet = keptHelmet;
+    const util: UId[] = [];
+    const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
+
     if (isPistolRound(roundNumber)) {
       weapon = "pistol";
+      helmet = false; // helmet locked on pistol round
+      // Each player picks vest OR util, not both. ~40% take vest.
+      const wantsVest = Math.random() < 0.4;
+      if (wantsVest && share >= VEST) {
+        armor = true;
+        spent += VEST;
+      } else if (share >= UPRICE[want]) {
+        util.push(want);
+        spent += UPRICE[want];
+      }
     } else {
       if (p.role === "awper" && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
       else if (weapon !== "rifle" && weapon !== "awp" && share >= wCost("rifle")) weapon = "rifle";
       else if (weapon === "pistol" && share >= wCost("smg")) weapon = "smg";
+
+      spent = wCost(weapon);
+      if (!armor && weapon !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
+      if (armor && !helmet && weapon !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
+      if (share - spent >= UPRICE[want]) { util.push(want); spent += UPRICE[want]; }
     }
-
-    let spent = wCost(weapon);
-    let armor = keptArmor;
-    let helmet = keptHelmet;
-    if (!armor && weapon !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
-    if (armor && !helmet && weapon !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
-
-    const util: UId[] = [];
-    const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
-    if (share - spent >= UPRICE[want]) { util.push(want); spent += UPRICE[want]; }
 
     away.loadouts[p.id] = {
       weapon, utility: util, armor, helmet,

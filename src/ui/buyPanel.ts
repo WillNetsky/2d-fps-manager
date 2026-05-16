@@ -29,11 +29,13 @@ export class BuyPanel {
 
   setRound(n: number) {
     this.roundNumber = n;
-    // Force pistols on the first round of each half.
+    // Force pistols + clear helmet on the first round of each half.
+    // Vest XOR util is enforced through UI disabled state, not here — let the player choose.
     if (n === 1 || n === 13) {
       for (const p of this.team.players) {
         const l = this.team.loadouts[p.id];
         if (l.weapon !== "pistol") l.weapon = "pistol";
+        l.helmet = false;
       }
     }
     this.render();
@@ -140,13 +142,19 @@ export class BuyPanel {
         onClick: () => this.setLoadout(p, ll => { ll.weapon = w; }),
       }))));
 
+      // On pistol rounds, each player picks vest OR util (not both); helmet is locked off.
+      const hasArmor = l.armor;
+      const hasUtil = l.utility.length > 0;
+      const utilDisabled = pistolRound && hasArmor;
+      const vestDisabled = pistolRound && hasUtil;
+
       // Utility row (multi-select toggle)
       buy.appendChild(this.makeRow("Util", UTILITY_OPTIONS.map(u => ({
         label: UTILITIES[u].name,
         cost: UTILITIES[u].cost,
         active: l.utility.includes(u),
         free: false,
-        disabled: false,
+        disabled: utilDisabled,
         onClick: () => this.setLoadout(p, ll => {
           const idx = ll.utility.indexOf(u);
           if (idx >= 0) ll.utility.splice(idx, 1);
@@ -154,17 +162,17 @@ export class BuyPanel {
         }),
       }))));
 
-      // Armor row: vest + helmet (helmet requires vest)
+      // Armor row: vest + helmet (helmet requires vest, both locked on pistol rounds)
       buy.appendChild(this.makeRow("Armor", [
         {
           label: "Vest",
           cost: VEST_COST,
           active: l.armor,
           free: l.keptArmor,
-          disabled: false,
+          disabled: vestDisabled,
           onClick: () => this.setLoadout(p, ll => {
             ll.armor = !ll.armor;
-            if (!ll.armor) ll.helmet = false; // can't have helmet without vest
+            if (!ll.armor) ll.helmet = false;
           }),
         },
         {
@@ -172,10 +180,10 @@ export class BuyPanel {
           cost: HELMET_UPGRADE_COST,
           active: l.helmet,
           free: l.keptHelmet,
-          disabled: false,
+          disabled: pistolRound,
           onClick: () => this.setLoadout(p, ll => {
             ll.helmet = !ll.helmet;
-            if (ll.helmet) ll.armor = true; // helmet auto-enables vest
+            if (ll.helmet) ll.armor = true;
           }),
         },
       ]));
