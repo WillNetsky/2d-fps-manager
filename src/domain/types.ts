@@ -153,6 +153,7 @@ export interface GameMap {
   bombsites: { id: "A" | "B"; center: Vec2; radius: number }[];
   // Default smoke spots agents can throw to (tile coords). Index by side.
   smokeSpots: { side: Side; tile: Vec2 }[];
+  flashSpots: { side: Side; tile: Vec2 }[];
 }
 
 export interface Vec2 { x: number; y: number; }
@@ -191,6 +192,8 @@ export interface Agent {
   // Decision on what to do when an enemy is acquired.
   stance: "none" | "hold" | "rush" | "disengage";
   stanceUntil: number;
+  // Flash effect — agent can't acquire targets or move while blinded.
+  blindedUntil: number;
 }
 
 export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";
@@ -200,6 +203,12 @@ export interface Smoke {
   radius: number;        // world units
   expiresAt: number;     // sim ms
   side: Side;            // who threw it (for stats later)
+}
+
+export interface Flash {
+  pos: Vec2;
+  detonatesAt: number;   // sim ms when blind effect fires
+  side: Side;
 }
 
 export type RoundOutcome = "ct-elim" | "t-elim" | "bomb-detonated" | "bomb-defused" | "time-expired";

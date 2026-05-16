@@ -1,5 +1,5 @@
 import type {
-  Agent, DroppedWeapon, GameMap, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
+  Agent, DroppedWeapon, Flash, GameMap, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
@@ -12,6 +12,12 @@ const DEFUSE_TIME_MS = 5000;
 
 const SMOKE_DURATION_MS = 14_000;
 const SMOKE_RADIUS_WORLD = 80; // ~2.8 tiles — wide enough to fully plug a 4-tile choke
+
+const FLASH_FUSE_MS = 1500;
+const FLASH_RANGE = 320;
+const FLASH_MAX_DURATION_MS = 3500;
+const FLASH_MIN_DURATION_MS = 600;
+const FLASH_CONE_HALF = Math.PI / 2; // ±90°
 
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
@@ -70,6 +76,7 @@ export interface AgentSnapshot {
   weapon: import("../domain/types.ts").WeaponId;
   ammo: number;
   reloadingUntil: number;
+  blindedUntil: number;
   moveMode: "walk" | "run";
 }
 
@@ -77,6 +84,8 @@ export interface RoundSnapshot {
   t: number;
   agents: AgentSnapshot[];
   smokes: Smoke[];
+  flashes: Flash[];
+  tickFlashes: { pos: Vec2; side: Side }[];
   drops: import("../domain/types.ts").DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -88,6 +97,8 @@ export interface RoundSnapshot {
 export class RoundSim {
   agents: Agent[] = [];
   smokes: Smoke[] = [];
+  flashes: Flash[] = [];      // in-flight grenades waiting on fuse
+  tickFlashes: { pos: Vec2; side: Side }[] = []; // detonation events this tick
   drops: DroppedWeapon[] = [];
   t = 0;
   events: SimEvent[] = [];
@@ -114,6 +125,7 @@ export class RoundSim {
   private tThreatFocus: Vec2;
   private tradeMarks: TradeMark[] = [];
   private smokeQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
+  private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -153,6 +165,7 @@ export class RoundSim {
     this.assignBombCarrier();
     this.assignSites();
     this.scheduleSmokes();
+    this.scheduleFlashes();
     this.push({ t: 0, kind: "round-start" });
   }
 
@@ -256,6 +269,7 @@ export class RoundSim {
         lookChangeAt: 0,
         stance: "none",
         stanceUntil: -Infinity,
+        blindedUntil: -Infinity,
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
@@ -301,8 +315,10 @@ export class RoundSim {
     if (this.finished) return;
     this.t += TICK_MS;
     this.tickShots.length = 0;
+    this.tickFlashes.length = 0;
 
     this.tickSmokes();
+    this.tickFlashesUpdate();
     this.updateIntel();
 
     for (const a of this.agents) if (a.alive) this.think(a);
@@ -328,9 +344,12 @@ export class RoundSim {
         pos: { x: a.pos.x, y: a.pos.y }, facing: a.facing,
         hp: a.hp, armor: a.armor, helmet: a.helmet, alive: a.alive,
         weapon: a.weapon, ammo: a.ammo, reloadingUntil: a.reloadingUntil,
+        blindedUntil: a.blindedUntil,
         moveMode: a.moveMode,
       })),
       smokes: this.smokes.map(s => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
+      flashes: this.flashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, detonatesAt: f.detonatesAt, side: f.side })),
+      tickFlashes: this.tickFlashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, side: f.side })),
       drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
@@ -389,6 +408,85 @@ export class RoundSim {
       if (d < bd) { bd = d; best = s.id; }
     }
     return best;
+  }
+
+  // ---- Flashes ----
+  private scheduleFlashes() {
+    const usedSpots = new Set<number>();
+    const sortedSpots = (side: Side) => this.map.flashSpots
+      .map((sp, idx) => ({ sp, idx }))
+      .filter(({ sp }) => sp.side === side);
+    for (const a of this.agents) {
+      if (!a.utility.includes("flash")) continue;
+      const spots = sortedSpots(a.side);
+      if (!spots.length) continue;
+      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
+      for (const { sp, idx } of spots) {
+        if (usedSpots.has(idx)) continue;
+        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
+        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
+        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
+        if (!best || d < best.d) best = { sp, idx, d };
+      }
+      if (!best) continue;
+      usedSpots.add(best.idx);
+      // Aggressive players throw earlier (pre-push); cautious throw later.
+      const player = this.players(a.playerId)!;
+      const earliness = (player.stats.aggression - 50) / 100; // -0.5..0.5
+      const baseThrow = 4500 - earliness * 2000;
+      this.flashQueue.push({
+        thrower: a.playerId,
+        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        throwAt: baseThrow + this.rng() * 1500,
+      });
+    }
+  }
+
+  private tickFlashesUpdate() {
+    // Deploy queued (throws)
+    for (let i = this.flashQueue.length - 1; i >= 0; i--) {
+      const q = this.flashQueue[i];
+      if (this.t >= q.throwAt) {
+        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
+        if (thrower) {
+          this.flashes.push({
+            pos: { ...q.spot },
+            detonatesAt: this.t + FLASH_FUSE_MS,
+            side: thrower.side,
+          });
+          const idx = thrower.utility.indexOf("flash");
+          if (idx >= 0) thrower.utility.splice(idx, 1);
+        }
+        this.flashQueue.splice(i, 1);
+      }
+    }
+    // Detonate
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      const f = this.flashes[i];
+      if (this.t >= f.detonatesAt) {
+        this.tickFlashes.push({ pos: { ...f.pos }, side: f.side });
+        this.applyFlashBlind(f);
+        this.flashes.splice(i, 1);
+      }
+    }
+  }
+
+  private applyFlashBlind(f: Flash) {
+    for (const a of this.agents) {
+      if (!a.alive) continue;
+      const dx = f.pos.x - a.pos.x, dy = f.pos.y - a.pos.y;
+      const d = Math.hypot(dx, dy);
+      if (d > FLASH_RANGE) continue;
+      if (!this.hasLineOfSight(a.pos, f.pos)) continue;
+      const flashDir = Math.atan2(dy, dx);
+      let angDiff = Math.abs(flashDir - a.facing);
+      while (angDiff > Math.PI) angDiff = Math.PI * 2 - angDiff;
+      if (angDiff > FLASH_CONE_HALF) continue;
+      const facingFactor = 1 - angDiff / FLASH_CONE_HALF;
+      const distFactor = 1 - d / FLASH_RANGE;
+      const duration = FLASH_MIN_DURATION_MS + (FLASH_MAX_DURATION_MS - FLASH_MIN_DURATION_MS) * facingFactor * distFactor;
+      a.blindedUntil = Math.max(a.blindedUntil, this.t + duration);
+    }
   }
 
   // ---- Pickups ----
@@ -590,6 +688,7 @@ export class RoundSim {
 
   // ---- Movement (waypoint-based) ----
   private move(a: Agent) {
+    if (this.t < a.blindedUntil) return; // can't see, freeze
     if (a.stance === "hold" && this.t < a.stanceUntil) return;
     if (a.path.length === 0) {
       if (a.holdAngle !== null) a.facing = a.holdAngle;
@@ -980,6 +1079,11 @@ export class RoundSim {
   // Target acquisition with reaction delay.
   // The agent must have LOS to an enemy for at least reactionMs before they can fire.
   private acquireTarget(a: Agent, reactionMs: number): Agent | null {
+    if (this.t < a.blindedUntil) {
+      // Blinded — can't see anything, forget all prior sightings.
+      for (const id of Object.keys(a.spotted)) delete a.spotted[id];
+      return null;
+    }
     const visibleEnemies: { e: Agent; d: number }[] = [];
     const stillSeen = new Set<string>();
 

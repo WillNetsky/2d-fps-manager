@@ -81,6 +81,8 @@ export class ReplayPlayer {
       map: this.recorded.map,
       agents: snap.agents,
       smokes: snap.smokes,
+      flashes: snap.flashes,
+      tickFlashes: snap.tickFlashes,
       drops: snap.drops,
       bombPlanted: snap.bombPlanted,
       bombPlantedAt: snap.bombPlantedAt,

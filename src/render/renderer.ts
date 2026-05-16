@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Text } from "pixi.js";
-import type { DroppedWeapon, GameMap, Side, Smoke, Vec2, WeaponId } from "../domain/types.ts";
+import type { DroppedWeapon, Flash, GameMap, Side, Smoke, Vec2, WeaponId } from "../domain/types.ts";
 import type { TickShot } from "../sim/round.ts";
 
 // Subset of state the renderer reads — satisfied by both live RoundSim and a replay snapshot.
@@ -10,9 +10,12 @@ export interface SimView {
     playerId: string; side: Side; pos: Vec2; facing: number;
     hp: number; armor: number; helmet: boolean; alive: boolean;
     weapon: WeaponId; ammo: number; reloadingUntil: number;
+    blindedUntil: number;
     moveMode: "walk" | "run";
   }>;
   smokes: Smoke[];
+  flashes: Flash[];
+  tickFlashes: { pos: Vec2; side: Side }[];
   drops: DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -49,6 +52,7 @@ export class Renderer {
   private siteText: Text | null = null;
   private map!: GameMap;
   private lastShots: { from: { x: number; y: number }; to: { x: number; y: number }; side: "CT" | "T"; t: number; hit: boolean }[] = [];
+  private lastFlashes: { pos: { x: number; y: number }; t: number }[] = [];
   private timeText: Text;
 
   constructor() {
@@ -147,11 +151,11 @@ export class Renderer {
   // Clear transient render state (used when switching between live and replay).
   clearTransient() {
     this.lastShots.length = 0;
+    this.lastFlashes.length = 0;
     this.fxLayer.removeChildren();
   }
 
   syncAgents(sim: SimView) {
-    // Drain new shots from sim → render buffer
     const now = performance.now();
     for (const s of sim.tickShots) {
       this.lastShots.push({
@@ -161,6 +165,10 @@ export class Renderer {
         t: now,
         hit: s.hit,
       });
+    }
+    // Drain new flash detonations
+    for (const f of sim.tickFlashes) {
+      this.lastFlashes.push({ pos: { x: f.pos.x, y: f.pos.y }, t: now });
     }
 
     for (const a of sim.agents) {
@@ -210,10 +218,15 @@ export class Renderer {
         g.circle(a.pos.x, a.pos.y, radius).stroke({ color, width: 1.5, alpha });
       }
       // Armor indicator: outer ring whose opacity tracks remaining armor.
-      // Helmet shows as a gold-tinted ring; vest-only is light gray.
       if (a.armor > 0) {
         const ringColor = a.helmet ? 0xe3a857 : 0xd2d5db;
         g.circle(a.pos.x, a.pos.y, 9.5).stroke({ color: ringColor, width: 1.5, alpha: Math.min(1, a.armor / 100) });
+      }
+      // Blinded indicator: pulsing bright white outer ring.
+      if (a.blindedUntil > sim.t) {
+        const phase = (performance.now() % 350) / 350;
+        const alpha = 0.5 + 0.4 * Math.sin(phase * Math.PI * 2);
+        g.circle(a.pos.x, a.pos.y, 12).stroke({ color: 0xffffff, width: 2, alpha });
       }
       // body
       g.circle(a.pos.x, a.pos.y, 7).fill(color).stroke({ color: 0x111418, width: 1.5 });
@@ -252,6 +265,26 @@ export class Renderer {
         .fill({ color: 0xd2d5db, alpha: baseAlpha * 0.6 });
     }
     this.smokeLayer.addChild(smokeGfx);
+
+    // Pending flashes (pre-detonation grenades) — small pulsing white dot.
+    const inFlightGfx = new Graphics();
+    for (const f of sim.flashes) {
+      const phase = (performance.now() % 300) / 300;
+      const radius = 3 + Math.sin(phase * Math.PI * 2) * 1.5;
+      inFlightGfx.circle(f.pos.x, f.pos.y, radius).fill(0xfff8df).stroke({ color: 0x666666, width: 0.6 });
+    }
+    this.smokeLayer.addChild(inFlightGfx);
+
+    // Detonation bursts — expanding white circle over ~400ms.
+    this.lastFlashes = this.lastFlashes.filter(f => now - f.t < 450);
+    const flashFxGfx = new Graphics();
+    for (const f of this.lastFlashes) {
+      const age = (now - f.t) / 450;
+      const radius = 30 + age * 320;
+      const alpha = 0.85 * (1 - age);
+      flashFxGfx.circle(f.pos.x, f.pos.y, radius).fill({ color: 0xffffff, alpha });
+    }
+    this.fxLayer.addChild(flashFxGfx);
 
     // Dropped weapons
     const dropGfx = new Graphics();

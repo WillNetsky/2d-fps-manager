@@ -273,5 +273,15 @@ export function makeMap(): GameMap {
       { side: "CT", tile: { x: 26, y: 9 } },  // long upper choke gap
       { side: "CT", tile: { x: 5, y: 9 } },   // B tunnels upper choke gap
     ],
+    flashSpots: [
+      // T flashes — pop into the CT side of each choke, blinding the defender just before pushing.
+      { side: "T", tile: { x: 15, y: 6 } },   // mid → blinds CT mid hold
+      { side: "T", tile: { x: 27, y: 4 } },   // long → blinds A site
+      { side: "T", tile: { x: 4, y: 4 } },    // B doors → blinds B site
+      // CT flashes — pop into the T side of each choke, blinding pushers.
+      { side: "CT", tile: { x: 15, y: 10 } }, // mid push
+      { side: "CT", tile: { x: 28, y: 12 } }, // long push
+      { side: "CT", tile: { x: 4, y: 12 } },  // B tunnels push
+    ],
   };
 }
