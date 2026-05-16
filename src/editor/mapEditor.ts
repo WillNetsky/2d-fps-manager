@@ -8,9 +8,38 @@ type Tool =
   | "eraser";
 
 const CUSTOM_MAP_KEY = "2d-fps-manager-custom-map";
+const SAVED_MAPS_KEY = "2d-fps-manager-saved-maps";
+
+function loadSavedMaps(): Record<string, GameMap> {
+  const raw = localStorage.getItem(SAVED_MAPS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch { return {}; }
+}
+
+function writeSavedMaps(maps: Record<string, GameMap>) {
+  localStorage.setItem(SAVED_MAPS_KEY, JSON.stringify(maps));
+}
+
+function makeBlankMap(): GameMap {
+  const base = makeMap();
+  return {
+    name: "Untitled",
+    width: base.width,
+    height: base.height,
+    tileSize: base.tileSize,
+    walls: new Array(base.width * base.height).fill(true),
+    ctSpawns: [],
+    tSpawns: [],
+    bombsites: [],
+  };
+}
 
 export class MapEditor {
   private map: GameMap;
+  private currentName: string;
   private currentTool: Tool = "wall";
   private wallPaintMode: "set" | "clear" = "set"; // determined on mousedown for drag-paint
   private canvas!: HTMLCanvasElement;
@@ -18,9 +47,11 @@ export class MapEditor {
   private isMouseDown = false;
   private lastTile: Vec2 | null = null;
   private root: HTMLElement;
+  private nameLabel!: HTMLElement;
 
   constructor(parent: HTMLElement) {
     this.map = loadCustomMap() ?? makeMap();
+    this.currentName = this.map.name || "Untitled";
     this.root = parent;
     parent.innerHTML = "";
     this.buildUI();
@@ -89,13 +120,26 @@ export class MapEditor {
       return b;
     };
     mkBtn("Play this map", "primary", () => this.playMap());
-    mkBtn("Reset to default", "", () => { this.map = makeMap(); this.draw(); });
-    mkBtn("Clear (all walls)", "", () => { this.clearMap(); this.draw(); });
-    mkBtn("Use default (clear save)", "", () => {
-      localStorage.removeItem(CUSTOM_MAP_KEY);
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "editor-name-row";
+    nameRow.style.cssText = "margin:8px 0;font-size:12px;opacity:0.8;";
+    this.nameLabel = document.createElement("span");
+    this.updateNameLabel();
+    nameRow.appendChild(this.nameLabel);
+    sidebar.appendChild(nameRow);
+
+    mkBtn("New", "", () => this.newMap());
+    mkBtn("Save", "", () => this.saveMap(false));
+    mkBtn("Save As…", "", () => this.saveMap(true));
+    mkBtn("Load…", "", () => this.loadMapDialog());
+    mkBtn("Reset to default", "", () => {
       this.map = makeMap();
+      this.currentName = this.map.name || "Default";
+      this.updateNameLabel();
       this.draw();
     });
+    mkBtn("Clear (all walls)", "", () => { this.clearMap(); this.draw(); });
     mkBtn("Back to game", "", () => { window.location.hash = ""; window.location.reload(); });
     sidebar.appendChild(actions);
 
@@ -220,6 +264,65 @@ export class MapEditor {
     this.map.ctSpawns = [];
     this.map.tSpawns = [];
     this.map.bombsites = [];
+  }
+
+  private updateNameLabel() {
+    if (this.nameLabel) this.nameLabel.textContent = `Current: ${this.currentName}`;
+  }
+
+  private newMap() {
+    if (!confirm("Discard current map and start a new blank one?")) return;
+    this.map = makeBlankMap();
+    this.currentName = "Untitled";
+    this.map.name = this.currentName;
+    this.updateNameLabel();
+    this.draw();
+  }
+
+  private saveMap(saveAs: boolean) {
+    let name = this.currentName;
+    if (saveAs || !name || name === "Untitled") {
+      const input = prompt("Save map as:", name === "Untitled" ? "" : name);
+      if (!input) return;
+      name = input.trim();
+      if (!name) return;
+    }
+    const maps = loadSavedMaps();
+    if (saveAs && maps[name] && !confirm(`Overwrite existing map "${name}"?`)) return;
+    this.map.name = name;
+    maps[name] = this.map;
+    writeSavedMaps(maps);
+    this.currentName = name;
+    this.updateNameLabel();
+    alert(`Saved "${name}".`);
+  }
+
+  private loadMapDialog() {
+    const maps = loadSavedMaps();
+    const names = Object.keys(maps).sort();
+    if (!names.length) { alert("No saved maps yet. Use Save As… first."); return; }
+    const list = names.map((n, i) => `${i + 1}. ${n}`).join("\n");
+    const choice = prompt(`Load which map? (enter number or name)\n\n${list}\n\nType 'del N' to delete entry N.`);
+    if (!choice) return;
+    const trimmed = choice.trim();
+    if (/^del\s+/i.test(trimmed)) {
+      const rest = trimmed.replace(/^del\s+/i, "").trim();
+      const idx = Number(rest);
+      const target = !isNaN(idx) && idx >= 1 && idx <= names.length ? names[idx - 1] : (maps[rest] ? rest : null);
+      if (!target) { alert("No matching map to delete."); return; }
+      if (!confirm(`Delete "${target}"?`)) return;
+      delete maps[target];
+      writeSavedMaps(maps);
+      return;
+    }
+    const asNum = Number(trimmed);
+    const name = !isNaN(asNum) && asNum >= 1 && asNum <= names.length ? names[asNum - 1] : (maps[trimmed] ? trimmed : null);
+    if (!name) { alert("No matching map."); return; }
+    this.map = JSON.parse(JSON.stringify(maps[name])) as GameMap;
+    this.currentName = name;
+    this.map.name = name;
+    this.updateNameLabel();
+    this.draw();
   }
 
   private playMap() {

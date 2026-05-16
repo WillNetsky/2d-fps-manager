@@ -1311,10 +1311,43 @@ export class RoundSim {
       const d = dist(a.pos, e.pos);
       if (d > HEARING_RANGE) continue;
       if (this.hasLineOfSight(a.pos, e.pos)) continue; // direct LOS handled by acquireTarget
+      if (this.wallOnLine(a.pos, e.pos)) continue;    // walls block bullets even through smoke
       if (!this.smokeOnLine(a.pos, e.pos)) continue;
       return e;
     }
     return null;
+  }
+
+  private wallOnLine(p1: Vec2, p2: Vec2): boolean {
+    const ts = this.map.tileSize;
+    const W = this.map.width, H = this.map.height;
+    let tx = Math.floor(p1.x / ts);
+    let ty = Math.floor(p1.y / ts);
+    const ex = Math.floor(p2.x / ts);
+    const ey = Math.floor(p2.y / ts);
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+    const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+    const invDx = dx !== 0 ? 1 / dx : Infinity;
+    const invDy = dy !== 0 ? 1 / dy : Infinity;
+    const nextBoundaryX = (tx + (stepX > 0 ? 1 : 0)) * ts;
+    const nextBoundaryY = (ty + (stepY > 0 ? 1 : 0)) * ts;
+    let tMaxX = dx !== 0 ? (nextBoundaryX - p1.x) * invDx : Infinity;
+    let tMaxY = dy !== 0 ? (nextBoundaryY - p1.y) * invDy : Infinity;
+    const tDeltaX = dx !== 0 ? Math.abs(ts * invDx) : Infinity;
+    const tDeltaY = dy !== 0 ? Math.abs(ts * invDy) : Infinity;
+    const startTx = tx, startTy = ty;
+    let safety = (W + H) * 2;
+    while (safety-- > 0) {
+      if (tx < 0 || ty < 0 || tx >= W || ty >= H) return true;
+      if (!(tx === startTx && ty === startTy)) {
+        if (this.map.walls[ty * W + tx]) return true;
+      }
+      if (tx === ex && ty === ey) return false;
+      if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
+      else                { ty += stepY; tMaxY += tDeltaY; }
+    }
+    return false;
   }
 
   private smokeOnLine(p1: Vec2, p2: Vec2): boolean {
@@ -1411,33 +1444,59 @@ export class RoundSim {
   }
 
   private hasLineOfSight(a: Vec2, b: Vec2): boolean {
-    const distAB = Math.hypot(a.x - b.x, a.y - b.y);
-    const steps = Math.ceil(distAB / (this.map.tileSize * 0.5));
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      const x = a.x + (b.x - a.x) * t;
-      const y = a.y + (b.y - a.y) * t;
-      if (this.solidAtWorld(x, y)) return false;
-      // Smoke blocks LOS — unless this point is inside a fresh smoke hole punched by an HE.
+    // Grid traversal (Amanatides–Woo) — visits every tile the segment touches.
+    const ts = this.map.tileSize;
+    const W = this.map.width, H = this.map.height;
+    let tx = Math.floor(a.x / ts);
+    let ty = Math.floor(a.y / ts);
+    const ex = Math.floor(b.x / ts);
+    const ey = Math.floor(b.y / ts);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+    const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+    const invDx = dx !== 0 ? 1 / dx : Infinity;
+    const invDy = dy !== 0 ? 1 / dy : Infinity;
+    const nextBoundaryX = (tx + (stepX > 0 ? 1 : 0)) * ts;
+    const nextBoundaryY = (ty + (stepY > 0 ? 1 : 0)) * ts;
+    let tMaxX = dx !== 0 ? (nextBoundaryX - a.x) * invDx : Infinity;
+    let tMaxY = dy !== 0 ? (nextBoundaryY - a.y) * invDy : Infinity;
+    const tDeltaX = dx !== 0 ? Math.abs(ts * invDx) : Infinity;
+    const tDeltaY = dy !== 0 ? Math.abs(ts * invDy) : Infinity;
+
+    const checkSmoke = (px: number, py: number): boolean => {
       for (const sm of this.smokes) {
-        const dx = x - sm.pos.x, dy = y - sm.pos.y;
-        if (dx * dx + dy * dy >= sm.radius * sm.radius) continue;
+        const sdx = px - sm.pos.x, sdy = py - sm.pos.y;
+        if (sdx * sdx + sdy * sdy >= sm.radius * sm.radius) continue;
         let inHole = false;
         for (const h of this.smokeHoles) {
-          const hdx = x - h.pos.x, hdy = y - h.pos.y;
+          const hdx = px - h.pos.x, hdy = py - h.pos.y;
           if (hdx * hdx + hdy * hdy < h.radius * h.radius) { inHole = true; break; }
         }
-        if (!inHole) return false;
+        if (!inHole) return true; // blocked by smoke
       }
+      return false;
+    };
+
+    // Walk tiles along the segment. Bail if we hit a wall or smoke.
+    let safety = (W + H) * 2;
+    while (safety-- > 0) {
+      if (tx < 0 || ty < 0 || tx >= W || ty >= H) return false;
+      // Skip the start tile (shooter/eye is inside it).
+      if (!(tx === Math.floor(a.x / ts) && ty === Math.floor(a.y / ts))) {
+        if (this.map.walls[ty * W + tx]) return false;
+      }
+      // Sample point near the entry into this tile for smoke check.
+      const tAlong = Math.min(tMaxX, tMaxY);
+      const px = a.x + dx * Math.min(1, Math.max(0, tAlong));
+      const py = a.y + dy * Math.min(1, Math.max(0, tAlong));
+      if (checkSmoke(px, py)) return false;
+
+      if (tx === ex && ty === ey) return true;
+      if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
+      else                { ty += stepY; tMaxY += tDeltaY; }
     }
     return true;
-  }
-
-  private solidAtWorld(x: number, y: number): boolean {
-    const tx = Math.floor(x / this.map.tileSize);
-    const ty = Math.floor(y / this.map.tileSize);
-    if (tx < 0 || ty < 0 || tx >= this.map.width || ty >= this.map.height) return true;
-    return this.map.walls[ty * this.map.width + tx];
   }
 
   private lastAliveOnSide(side: Side) {
