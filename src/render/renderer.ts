@@ -28,6 +28,8 @@ export interface SimView {
   bombCarrier: string | null;
   bombDropped: Vec2 | null;
   bombPlantedTime: number;
+  bombDefuseProgress: number;
+  defuseTimeMs: number;
   tickShots: TickShot[];
 }
 
@@ -396,6 +398,25 @@ export class Renderer {
     if (sim.bombPlanted && sim.bombPlantedAt) {
       const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
       this.bombGfx.circle(sim.bombPlantedAt.x, sim.bombPlantedAt.y, 6).fill({ color: COLORS.bomb, alpha: pulse });
+      // Defuse progress ring
+      if (sim.bombDefuseProgress > 0) {
+        const frac = Math.min(1, sim.bombDefuseProgress / sim.defuseTimeMs);
+        const ringR = 16;
+        this.bombGfx.circle(sim.bombPlantedAt.x, sim.bombPlantedAt.y, ringR)
+          .stroke({ color: 0x4a90e2, width: 2, alpha: 0.4 });
+        // Filled arc as a wedge of small dots — Pixi Graphics has arc() in v8.
+        this.bombGfx.arc(sim.bombPlantedAt.x, sim.bombPlantedAt.y, ringR, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2)
+          .stroke({ color: 0x4a90e2, width: 3 });
+        const remaining = Math.max(0, (sim.defuseTimeMs - sim.bombDefuseProgress) / 1000);
+        const label = new Text({
+          text: remaining.toFixed(1),
+          style: { fill: 0xffffff, fontSize: 11, fontWeight: "bold", fontFamily: "ui-sans-serif" },
+        });
+        label.anchor.set(0.5);
+        label.x = sim.bombPlantedAt.x;
+        label.y = sim.bombPlantedAt.y - 26;
+        this.smokeLayer.addChild(label);
+      }
     } else if (sim.bombDropped) {
       const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
       this.bombGfx.circle(sim.bombDropped.x, sim.bombDropped.y, 22).fill({ color: 0xf5c842, alpha: 0.18 * pulse });

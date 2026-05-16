@@ -11,11 +11,11 @@
 - [x] HE
 - [x] Grenades are thrown by players, show them leaving their hand and their trajectory. Grenade skills should affect both target choice and accuracy
 - [x] Ammo, reloads
-- [ ] Different T and CT guns
-- [ ] Upgraded pistols (deagles,)
-- [ ] Agents should be aware of how many players are left
-- [ ] Agents should think about saving their gun
-- [ ] Agents should take cover and peek corners
+- [x] Different T and CT guns
+- [x] Upgraded pistols (deagles,)
+- [x] Agents should be aware of how many players are left
+- [x] Agents should think about saving their gun
+- [x] Agents should take cover and peek corners
 
 ## Match Logic
 - [ ] CT side needs to be able to choose strategies, and place players
@@ -36,8 +36,8 @@
 - [x] Save as new map
 
 ## Issues
-- [ ] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
-
+- [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
+- [ ] It appears that sometimes CTs try to save by sitting in spawn, but they're found and they dont fight back and just get killed
 
 ## Thoughts
-- [ ] Pistol rounds don't feel right, there should be the option to buy kevlar OR util for each player, and util should be more effective in those rounds
+- [x] Pistol rounds don't feel right, there should be the option to buy kevlar OR util for each player, and util should be more effective in those rounds

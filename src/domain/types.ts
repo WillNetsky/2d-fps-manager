@@ -76,6 +76,8 @@ export interface Player {
   morale: number;      // 0-100, longer-term
   // Relationships keyed by other player id (-100 to 100).
   relationships: Record<string, number>;
+  // Coach-set CT-side placement. "auto" means RoundSim picks based on setup.
+  ctAssignment: "A" | "B" | "mid" | "auto";
 }
 
 export type WeaponId =

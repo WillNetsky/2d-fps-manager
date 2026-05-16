@@ -133,6 +133,7 @@ export function makePlayer(role: Role): Player {
     mood: 65,
     morale: 65,
     relationships: {},
+    ctAssignment: "auto",
   };
 }
 

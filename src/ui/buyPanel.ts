@@ -109,6 +109,34 @@ export class BuyPanel {
     spent.innerHTML = `<span>Spending</span><strong style="color:${anyOver ? "var(--bad)" : "var(--text)"}">$${totalCost}</strong>`;
     this.el.appendChild(spent);
 
+    // CT strategy presets (only visible when this team is on CT side).
+    if (this.team.side === "CT") {
+      const stratRow = document.createElement("div");
+      stratRow.className = "buy-toggle-row";
+      const lab = document.createElement("div");
+      lab.className = "buy-toggle-label";
+      lab.textContent = "Setup";
+      stratRow.appendChild(lab);
+      const btns = document.createElement("div");
+      btns.className = "buy-toggle-btns";
+      const presets: { label: string; assign: (players: Player[]) => void }[] = [
+        { label: "Auto",     assign: ps => ps.forEach(p => p.ctAssignment = "auto") },
+        { label: "2A/2B/1M", assign: ps => assignByPattern(ps, ["A","A","B","B","mid"]) },
+        { label: "A heavy",  assign: ps => assignByPattern(ps, ["A","A","A","B","mid"]) },
+        { label: "B heavy",  assign: ps => assignByPattern(ps, ["A","B","B","B","mid"]) },
+        { label: "Stack A",  assign: ps => ps.forEach(p => p.ctAssignment = p.role === "lurker" ? "B" : "A") },
+        { label: "Stack B",  assign: ps => ps.forEach(p => p.ctAssignment = p.role === "lurker" ? "A" : "B") },
+      ];
+      for (const preset of presets) {
+        const b = document.createElement("button");
+        b.className = "buy-btn";
+        b.innerHTML = `<span class="b-name">${preset.label}</span>`;
+        b.onclick = () => { preset.assign(this.team.players); this.render(); };
+        btns.appendChild(b);
+      }
+      stratRow.appendChild(btns);
+      this.el.appendChild(stratRow);
+    }
     for (const p of this.team.players) {
       const l = this.team.loadouts[p.id];
       const row = document.createElement("div");
@@ -153,6 +181,29 @@ export class BuyPanel {
 
       const buy = document.createElement("div");
       buy.className = "buy-grid";
+
+      // CT site picker (per-player) — only when this team is currently on CT.
+      if (this.team.side === "CT") {
+        const siteRow = document.createElement("div");
+        siteRow.className = "buy-toggle-row";
+        const lab = document.createElement("div");
+        lab.className = "buy-toggle-label";
+        lab.textContent = "Site";
+        siteRow.appendChild(lab);
+        const btns = document.createElement("div");
+        btns.className = "buy-toggle-btns";
+        for (const opt of ["A", "B", "mid", "auto"] as const) {
+          const b = document.createElement("button");
+          const cls = ["buy-btn"];
+          if (p.ctAssignment === opt) cls.push("active");
+          b.className = cls.join(" ");
+          b.innerHTML = `<span class="b-name">${opt}</span>`;
+          b.onclick = () => { p.ctAssignment = opt; this.render(); };
+          btns.appendChild(b);
+        }
+        siteRow.appendChild(btns);
+        buy.appendChild(siteRow);
+      }
 
       // Weapons row — filter to this team's faction (universal weapons always shown).
       const pistolRound = this.roundNumber === 1 || this.roundNumber === 13;
@@ -293,4 +344,11 @@ export class BuyPanel {
   }
 
   refresh() { this.render(); }
+}
+
+// Assign by pattern — order CTs by role priority then map onto the pattern.
+function assignByPattern(players: Player[], pattern: ("A" | "B" | "mid")[]) {
+  const ROLE_ORDER: Record<string, number> = { awper: 0, igl: 1, support: 2, entry: 3, lurker: 4 };
+  const sorted = [...players].sort((a, b) => (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9));
+  sorted.forEach((p, i) => { p.ctAssignment = pattern[i] ?? "auto"; });
 }

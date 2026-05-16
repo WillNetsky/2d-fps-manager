@@ -106,6 +106,8 @@ export class ReplayPlayer {
       bombPlantedAt: snap.bombPlantedAt,
       bombCarrier: snap.bombCarrier,
       bombDropped: snap.bombDropped,
+      bombDefuseProgress: snap.bombDefuseProgress,
+      defuseTimeMs: snap.defuseTimeMs,
       bombPlantedTime: snap.bombPlantedTime,
       tickShots: snap.tickShots,
     };

@@ -112,6 +112,8 @@ export interface RoundSnapshot {
   bombCarrier: string | null;
   bombDropped: Vec2 | null;
   bombPlantedTime: number;
+  bombDefuseProgress: number;
+  defuseTimeMs: number;
   tickShots: TickShot[];
 }
 
@@ -137,6 +139,7 @@ export class RoundSim {
 
   bombCarrier: string | null = null;
   bombDropped: Vec2 | null = null;
+  defuseTimeMs = DEFUSE_TIME_MS;
   bombPlanted = false;
   bombPlantedAt: Vec2 | null = null;
   bombPlantedTime = 0;
@@ -220,7 +223,7 @@ export class RoundSim {
 
   // Assign each agent a SiteAssignment based on strategy/setup.
   private assignSites() {
-    // CTs: distribute by ctSetup. IGL gets mid if available, else a site.
+    // CTs: coach-set placements first, then ctSetup fills remaining.
     const cts = this.agents.filter(a => a.side === "CT");
     const tA = this.ctSetup.A, tB = this.ctSetup.B, tMid = this.ctSetup.mid;
     const slots: SiteAssignment[] = [
@@ -228,12 +231,22 @@ export class RoundSim {
       ...Array(tB).fill("B" as SiteAssignment),
       ...Array(tMid).fill("mid" as SiteAssignment),
     ];
-    // Order CTs by role priority: AWPer prefers long angles (A), IGL prefers mid.
-    cts.sort((x, y) => {
-      const px = this.priority(x), py = this.priority(y);
-      return px - py;
-    });
-    cts.forEach((a, i) => { a.assignedSite = slots[i] ?? "A"; });
+    // Apply coach overrides; subtract those from the slot pool.
+    const autoCts: Agent[] = [];
+    for (const a of cts) {
+      const player = this.players(a.playerId)!;
+      const fixed = player.ctAssignment;
+      if (fixed === "A" || fixed === "B" || fixed === "mid") {
+        a.assignedSite = fixed;
+        const idx = slots.indexOf(fixed);
+        if (idx >= 0) slots.splice(idx, 1);
+      } else {
+        autoCts.push(a);
+      }
+    }
+    // Order remaining autos by role priority.
+    autoCts.sort((x, y) => this.priority(x) - this.priority(y));
+    autoCts.forEach((a, i) => { a.assignedSite = slots[i] ?? "A"; });
 
     // Ts: based on strategy.
     const ts = this.agents.filter(a => a.side === "T");
@@ -465,6 +478,8 @@ export class RoundSim {
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
       bombCarrier: this.bombCarrier,
       bombDropped: this.bombDropped ? { x: this.bombDropped.x, y: this.bombDropped.y } : null,
+      bombDefuseProgress: this.bombDefuseProgress,
+      defuseTimeMs: DEFUSE_TIME_MS,
       bombPlantedTime: this.bombPlantedTime,
       tickShots: this.tickShots.map(s => ({
         from: { x: s.from.x, y: s.from.y }, to: { x: s.to.x, y: s.to.y },
