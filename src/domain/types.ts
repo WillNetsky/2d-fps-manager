@@ -68,9 +68,11 @@ export interface Loadout {
   weapon: WeaponId;
   utility: UtilityId[];
   armor: boolean;
+  helmet: boolean;
   // Items the player already owns at the start of the buy phase (free).
   keptWeapon: WeaponId | null;
   keptArmor: boolean;
+  keptHelmet: boolean;
 }
 
 export interface DroppedWeapon {
@@ -124,6 +126,7 @@ export interface Agent {
   facing: number;       // radians
   hp: number;
   armor: number;
+  helmet: boolean;      // halves HS damage; breaks after first HS taken
   weapon: WeaponId;
   utility: UtilityId[];
   alive: boolean;
@@ -165,7 +168,7 @@ export interface RoundResult {
 }
 
 export type SimEvent =
-  | { t: number; kind: "kill"; killer: string; victim: string; weapon: WeaponId }
+  | { t: number; kind: "kill"; killer: string; victim: string; weapon: WeaponId; headshot: boolean }
   | { t: number; kind: "bomb-plant"; planter: string }
   | { t: number; kind: "bomb-defuse"; defuser: string }
   | { t: number; kind: "bomb-detonate" }

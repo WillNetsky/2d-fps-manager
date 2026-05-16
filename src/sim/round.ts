@@ -1,7 +1,7 @@
 import type {
   Agent, DroppedWeapon, GameMap, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
 } from "../domain/types.ts";
-import { WEAPONS } from "../domain/weapons.ts";
+import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
 
 const TICK_MS = 50;
@@ -65,6 +65,7 @@ export interface AgentSnapshot {
   facing: number;
   hp: number;
   armor: number;
+  helmet: boolean;
   alive: boolean;
   weapon: import("../domain/types.ts").WeaponId;
   moveMode: "walk" | "run";
@@ -232,6 +233,7 @@ export class RoundSim {
         facing: Math.atan2(focus.y - sy, focus.x - sx),
         hp: 100,
         armor: loadout.armor ? 100 : 0,
+        helmet: loadout.helmet,
         weapon: loadout.weapon,
         utility: [...loadout.utility],
         alive: true,
@@ -318,7 +320,7 @@ export class RoundSim {
       agents: this.agents.map(a => ({
         playerId: a.playerId, side: a.side,
         pos: { x: a.pos.x, y: a.pos.y }, facing: a.facing,
-        hp: a.hp, armor: a.armor, alive: a.alive,
+        hp: a.hp, armor: a.armor, helmet: a.helmet, alive: a.alive,
         weapon: a.weapon, moveMode: a.moveMode,
       })),
       smokes: this.smokes.map(s => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
@@ -697,20 +699,32 @@ export class RoundSim {
     if (!hit) return;
 
     let dmg = weapon.damage * (0.85 + this.rng() * 0.3);
-    if (enemy.armor > 0) dmg *= 0.65;
+
+    // Headshot roll: base by weapon + aim contribution. Clamped so even bad aim has some chance.
+    const hsBase = HEADSHOT_BASE[a.weapon];
+    const hsChance = clamp(hsBase + (player.stats.aim - 50) / 400, 0.03, 0.55);
+    const isHeadshot = this.rng() < hsChance;
+    if (isHeadshot) {
+      dmg *= HEADSHOT_MULTIPLIER;
+      if (enemy.helmet) {
+        dmg *= HELMET_HS_REDUCTION;
+        enemy.helmet = false; // helmet breaks after first HS
+      }
+    } else if (enemy.armor > 0) {
+      dmg *= 0.65;
+      enemy.armor = Math.max(0, enemy.armor - dmg * 0.5);
+    }
     const applied = Math.min(enemy.hp, dmg);
     enemy.hp -= dmg;
-    enemy.armor = Math.max(0, enemy.armor - dmg * 0.5);
     this.addDamage(a.playerId, applied);
 
     if (enemy.hp <= 0) {
       enemy.alive = false;
       enemy.hp = 0;
-      // Drop the victim's primary weapon for pickup.
       if (enemy.weapon !== "knife") {
         this.drops.push({ pos: { ...enemy.pos }, weapon: enemy.weapon });
       }
-      this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: enemy.playerId, weapon: a.weapon });
+      this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: enemy.playerId, weapon: a.weapon, headshot: isHeadshot });
       const killer = this.players(a.playerId)!;
       killer.mood = clamp(killer.mood + 4, 0, 100);
       const victim = this.players(enemy.playerId)!;

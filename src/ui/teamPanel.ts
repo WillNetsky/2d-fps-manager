@@ -79,8 +79,9 @@ export class TeamPanel {
       card.className = "player-card" + (dead ? " dead" : "");
 
       const l = this.team.loadouts[p.id];
+      const armorTag = l && l.armor ? (l.helmet ? "armor+hlm" : "armor") : null;
       const loadoutLine = l
-        ? [l.weapon.toUpperCase(), l.armor ? "armor" : null, ...l.utility].filter(Boolean).join(" · ")
+        ? [l.weapon.toUpperCase(), armorTag, ...l.utility].filter(Boolean).join(" · ")
         : "—";
 
       let body: string;

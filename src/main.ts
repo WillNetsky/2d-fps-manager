@@ -43,8 +43,8 @@ const tSideTeam = (): Team => homeIsCt ? away : home;
 // Initial loadouts
 for (const team of [home, away]) for (const p of team.players) {
   team.loadouts[p.id] = {
-    weapon: "pistol", utility: [], armor: false,
-    keptWeapon: null, keptArmor: false,
+    weapon: "pistol", utility: [], armor: false, helmet: false,
+    keptWeapon: null, keptArmor: false, keptHelmet: false,
   };
 }
 
@@ -119,7 +119,8 @@ function aiBuyForAway() {
   type WId = import("./domain/types.ts").WeaponId;
   type UId = import("./domain/types.ts").UtilityId;
   const WPRICE: Record<WId, number> = { knife: 0, pistol: 0, smg: 1250, rifle: 2700, awp: 4750 };
-  const ARMOR = 1000;
+  const VEST = 650;
+  const HELMET = 350;
   const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
 
   let budget = away.money;
@@ -130,6 +131,7 @@ function aiBuyForAway() {
     const existing = away.loadouts[p.id];
     const kept = existing.keptWeapon;
     const keptArmor = existing.keptArmor;
+    const keptHelmet = existing.keptHelmet;
     const remaining = players.length - i;
     const share = Math.floor(budget / remaining);
     const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
@@ -145,16 +147,17 @@ function aiBuyForAway() {
 
     let spent = wCost(weapon);
     let armor = keptArmor;
-    const armorCost = keptArmor ? 0 : ARMOR;
-    if (!armor && weapon !== "pistol" && share - spent >= armorCost) { armor = true; spent += armorCost; }
+    let helmet = keptHelmet;
+    if (!armor && weapon !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
+    if (armor && !helmet && weapon !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
 
     const util: UId[] = [];
     const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
     if (share - spent >= UPRICE[want]) { util.push(want); spent += UPRICE[want]; }
 
     away.loadouts[p.id] = {
-      weapon, utility: util, armor,
-      keptWeapon: kept, keptArmor,
+      weapon, utility: util, armor, helmet,
+      keptWeapon: kept, keptArmor, keptHelmet,
     };
     budget -= spent;
   }
@@ -172,8 +175,8 @@ function halftimeSwap() {
   for (const team of [home, away]) {
     for (const p of team.players) {
       team.loadouts[p.id] = {
-        weapon: "pistol", utility: [], armor: false,
-        keptWeapon: null, keptArmor: false,
+        weapon: "pistol", utility: [], armor: false, helmet: false,
+        keptWeapon: null, keptArmor: false, keptHelmet: false,
       };
     }
   }
@@ -211,7 +214,8 @@ function tickRound() {
     if (e.kind === "kill") {
       const k = playerLookup(e.killer);
       const v = playerLookup(e.victim);
-      oppPanel.log(`${shortName(k)} [${e.weapon}] → ${shortName(v)}`);
+      const hs = e.headshot ? " 🎯" : "";
+      oppPanel.log(`${shortName(k)} [${e.weapon}]${hs} → ${shortName(v)}`);
     } else if (e.kind === "bomb-plant") {
       const planter = playerLookup(e.planter);
       const site = nearestSiteLetter(sim);
@@ -245,21 +249,24 @@ function tickRound() {
     lossStreaks = applyRoundReward(ctSideTeam(), tSideTeam(), r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
     oppPanel.log(`Round ${roundNumber} → ${winningTeam.name} wins (${r.outcome})`);
 
-    // Carry over kept weapons/armor
+    // Carry over kept weapons/armor/helmet
     for (const ag of sim.agents) {
       const team = home.players.some(p => p.id === ag.playerId) ? home : away;
       if (ag.alive) {
+        const hasVest = ag.armor > 30;
         team.loadouts[ag.playerId] = {
           weapon: ag.weapon,
           utility: [],
-          armor: ag.armor > 30,
+          armor: hasVest,
+          helmet: ag.helmet,
           keptWeapon: ag.weapon === "knife" ? null : ag.weapon,
-          keptArmor: ag.armor > 30,
+          keptArmor: hasVest,
+          keptHelmet: ag.helmet,
         };
       } else {
         team.loadouts[ag.playerId] = {
-          weapon: "pistol", utility: [], armor: false,
-          keptWeapon: null, keptArmor: false,
+          weapon: "pistol", utility: [], armor: false, helmet: false,
+          keptWeapon: null, keptArmor: false, keptHelmet: false,
         };
       }
     }

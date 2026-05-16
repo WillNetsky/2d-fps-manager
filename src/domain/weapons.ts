@@ -15,4 +15,17 @@ export const UTILITIES: Record<UtilityId, Utility> = {
   molotov: { id: "molotov", name: "Molotov", cost: 400 },
 };
 
-export const ARMOR_COST = 1000;
+export const VEST_COST = 650;
+export const HELMET_UPGRADE_COST = 350;
+
+// Base headshot chance per weapon (modulated by aim stat at shoot time).
+export const HEADSHOT_BASE: Record<WeaponId, number> = {
+  knife: 0,
+  pistol: 0.10,
+  smg: 0.12,
+  rifle: 0.18,
+  awp: 0.30,
+};
+
+export const HEADSHOT_MULTIPLIER = 4;
+export const HELMET_HS_REDUCTION = 0.5;

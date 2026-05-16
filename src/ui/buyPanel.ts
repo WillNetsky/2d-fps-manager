@@ -1,5 +1,5 @@
 import type { Loadout, Player, Team, UtilityId, WeaponId } from "../domain/types.ts";
-import { ARMOR_COST, UTILITIES, WEAPONS } from "../domain/weapons.ts";
+import { HELMET_UPGRADE_COST, UTILITIES, VEST_COST, WEAPONS } from "../domain/weapons.ts";
 
 const WEAPON_OPTIONS: WeaponId[] = ["pistol", "smg", "rifle", "awp"];
 const UTILITY_OPTIONS: UtilityId[] = ["smoke", "flash", "he", "molotov"];
@@ -43,7 +43,8 @@ export class BuyPanel {
     for (const p of this.team.players) {
       const l = this.team.loadouts[p.id];
       if (l.weapon !== l.keptWeapon) total += WEAPONS[l.weapon].cost;
-      if (l.armor && !l.keptArmor) total += ARMOR_COST;
+      if (l.armor && !l.keptArmor) total += VEST_COST;
+      if (l.helmet && !l.keptHelmet) total += HELMET_UPGRADE_COST;
       total += l.utility.reduce((s, u) => s + UTILITIES[u].cost, 0);
     }
     return total;
@@ -151,15 +152,31 @@ export class BuyPanel {
         }),
       }))));
 
-      // Armor row (single toggle)
-      buy.appendChild(this.makeRow("Armor", [{
-        label: "Vest",
-        cost: ARMOR_COST,
-        active: l.armor,
-        free: l.keptArmor,
-        disabled: false,
-        onClick: () => this.setLoadout(p, ll => { ll.armor = !ll.armor; }),
-      }]));
+      // Armor row: vest + helmet (helmet requires vest)
+      buy.appendChild(this.makeRow("Armor", [
+        {
+          label: "Vest",
+          cost: VEST_COST,
+          active: l.armor,
+          free: l.keptArmor,
+          disabled: false,
+          onClick: () => this.setLoadout(p, ll => {
+            ll.armor = !ll.armor;
+            if (!ll.armor) ll.helmet = false; // can't have helmet without vest
+          }),
+        },
+        {
+          label: "Helmet",
+          cost: HELMET_UPGRADE_COST,
+          active: l.helmet,
+          free: l.keptHelmet,
+          disabled: false,
+          onClick: () => this.setLoadout(p, ll => {
+            ll.helmet = !ll.helmet;
+            if (ll.helmet) ll.armor = true; // helmet auto-enables vest
+          }),
+        },
+      ]));
 
       row.appendChild(buy);
       this.el.appendChild(row);

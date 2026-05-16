@@ -8,7 +8,7 @@ export interface SimView {
   map: GameMap;
   agents: Array<{
     playerId: string; side: Side; pos: Vec2; facing: number;
-    hp: number; armor: number; alive: boolean;
+    hp: number; armor: number; helmet: boolean; alive: boolean;
     weapon: WeaponId; moveMode: "walk" | "run";
   }>;
   smokes: Smoke[];
@@ -209,8 +209,10 @@ export class Renderer {
         g.circle(a.pos.x, a.pos.y, radius).stroke({ color, width: 1.5, alpha });
       }
       // Armor indicator: outer ring whose opacity tracks remaining armor.
+      // Helmet shows as a gold-tinted ring; vest-only is light gray.
       if (a.armor > 0) {
-        g.circle(a.pos.x, a.pos.y, 9.5).stroke({ color: 0xd2d5db, width: 1.5, alpha: Math.min(1, a.armor / 100) });
+        const ringColor = a.helmet ? 0xe3a857 : 0xd2d5db;
+        g.circle(a.pos.x, a.pos.y, 9.5).stroke({ color: ringColor, width: 1.5, alpha: Math.min(1, a.armor / 100) });
       }
       // body
       g.circle(a.pos.x, a.pos.y, 7).fill(color).stroke({ color: 0x111418, width: 1.5 });
