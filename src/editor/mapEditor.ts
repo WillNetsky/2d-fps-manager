@@ -331,9 +331,56 @@ export class MapEditor {
     if (this.map.tSpawns.length < 5) return alert("Need at least 5 T spawns.");
     if (!this.map.bombsites.find(s => s.id === "A")) return alert("Place bombsite A.");
     if (!this.map.bombsites.find(s => s.id === "B")) return alert("Place bombsite B.");
+
+    // Reject spawn tiles painted on walls.
+    const onWall = (t: Vec2) => this.map.walls[t.y * this.map.width + t.x];
+    if (this.map.ctSpawns.some(onWall)) return alert("Some CT spawn tiles are on walls — clear the floor under them.");
+    if (this.map.tSpawns.some(onWall)) return alert("Some T spawn tiles are on walls — clear the floor under them.");
+    for (const s of this.map.bombsites) {
+      if (onWall(s.center)) return alert(`Bombsite ${s.id} is on a wall — move it to a floor tile.`);
+    }
+
+    // Connectivity check: every spawn must reach every bombsite.
+    const issue = this.checkConnectivity();
+    if (issue) return alert(issue);
+
     localStorage.setItem(CUSTOM_MAP_KEY, JSON.stringify(this.map));
     window.location.hash = "";
     window.location.reload();
+  }
+
+  private checkConnectivity(): string | null {
+    // BFS over floor tiles from each spawn; the bombsites must be reachable.
+    const W = this.map.width, H = this.map.height;
+    const idx = (x: number, y: number) => y * W + x;
+    const reachableFrom = (start: Vec2): Set<number> => {
+      const seen = new Set<number>();
+      if (this.map.walls[idx(start.x, start.y)]) return seen;
+      const queue: Vec2[] = [start];
+      seen.add(idx(start.x, start.y));
+      while (queue.length) {
+        const cur = queue.shift()!;
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]] as const) {
+          const nx = cur.x + dx, ny = cur.y + dy;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const k = idx(nx, ny);
+          if (seen.has(k) || this.map.walls[k]) continue;
+          seen.add(k);
+          queue.push({ x: nx, y: ny });
+        }
+      }
+      return seen;
+    };
+    for (const spawn of [...this.map.ctSpawns, ...this.map.tSpawns]) {
+      const reach = reachableFrom(spawn);
+      for (const site of this.map.bombsites) {
+        if (!reach.has(idx(site.center.x, site.center.y))) {
+          const sideLabel = this.map.ctSpawns.includes(spawn) ? "CT" : "T";
+          return `A ${sideLabel} spawn at (${spawn.x},${spawn.y}) can't reach bombsite ${site.id}. Connect the map.`;
+        }
+      }
+    }
+    return null;
   }
 
   // ---- Drawing ----
