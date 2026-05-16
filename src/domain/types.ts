@@ -154,6 +154,7 @@ export interface GameMap {
   // Default smoke spots agents can throw to (tile coords). Index by side.
   smokeSpots: { side: Side; tile: Vec2 }[];
   flashSpots: { side: Side; tile: Vec2 }[];
+  molotovSpots: { side: Side; tile: Vec2 }[];
 }
 
 export interface Vec2 { x: number; y: number; }
@@ -194,6 +195,8 @@ export interface Agent {
   stanceUntil: number;
   // Flash effect — agent can't acquire targets or move while blinded.
   blindedUntil: number;
+  // Fire avoidance — when set, agent is fleeing a burning area, can't think/shoot.
+  fleeingFireUntil: number;
 }
 
 export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";
@@ -211,6 +214,16 @@ export interface Flash {
   side: Side;
 }
 
+export interface Molotov {
+  pos: Vec2;
+  radius: number;
+  expiresAt: number;
+  side: Side;
+  thrower: string;       // playerId — for kill credit
+}
+
+export type KillCause = WeaponId | "molotov";
+
 export type RoundOutcome = "ct-elim" | "t-elim" | "bomb-detonated" | "bomb-defused" | "time-expired";
 
 export interface RoundResult {
@@ -221,7 +234,7 @@ export interface RoundResult {
 }
 
 export type SimEvent =
-  | { t: number; kind: "kill"; killer: string; victim: string; weapon: WeaponId; headshot: boolean }
+  | { t: number; kind: "kill"; killer: string; victim: string; weapon: KillCause; headshot: boolean }
   | { t: number; kind: "bomb-plant"; planter: string }
   | { t: number; kind: "bomb-defuse"; defuser: string }
   | { t: number; kind: "bomb-detonate" }

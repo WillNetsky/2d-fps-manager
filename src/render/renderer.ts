@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Text } from "pixi.js";
-import type { DroppedWeapon, Flash, GameMap, Side, Smoke, Vec2, WeaponId } from "../domain/types.ts";
+import type { DroppedWeapon, Flash, GameMap, Molotov, Side, Smoke, Vec2, WeaponId } from "../domain/types.ts";
 import type { TickShot } from "../sim/round.ts";
 
 // Subset of state the renderer reads — satisfied by both live RoundSim and a replay snapshot.
@@ -16,6 +16,7 @@ export interface SimView {
   smokes: Smoke[];
   flashes: Flash[];
   tickFlashes: { pos: Vec2; side: Side }[];
+  molotovs: Molotov[];
   drops: DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -265,6 +266,31 @@ export class Renderer {
         .fill({ color: 0xd2d5db, alpha: baseAlpha * 0.6 });
     }
     this.smokeLayer.addChild(smokeGfx);
+
+    // Active molotov fires — flickering orange/red layered circles.
+    const fireGfx = new Graphics();
+    const fireNow = performance.now();
+    for (const m of sim.molotovs) {
+      const igniteAt = m.expiresAt - 7000;
+      // Fuse phase: small spark dot, not yet a fire.
+      if (sim.t < igniteAt) {
+        fireGfx.circle(m.pos.x, m.pos.y, 3).fill({ color: 0xffa030, alpha: 0.9 });
+        continue;
+      }
+      const remaining = m.expiresAt - sim.t;
+      const fade = Math.min(1, remaining / 1500);
+      const phase = ((fireNow * 0.005) + m.pos.x * 0.13 + m.pos.y * 0.07) % (Math.PI * 2);
+      const flicker = 0.75 + 0.25 * Math.sin(phase * 3.1);
+      // Outer orange aura
+      fireGfx.circle(m.pos.x, m.pos.y, m.radius).fill({ color: 0xff6b1f, alpha: 0.55 * fade * flicker });
+      // Mid red puff
+      fireGfx.circle(m.pos.x + Math.sin(phase) * 6, m.pos.y - Math.cos(phase) * 4, m.radius * 0.75)
+        .fill({ color: 0xff2a10, alpha: 0.65 * fade * flicker });
+      // Bright core
+      fireGfx.circle(m.pos.x - Math.sin(phase) * 3, m.pos.y + Math.cos(phase) * 3, m.radius * 0.45)
+        .fill({ color: 0xffd060, alpha: 0.55 * fade * flicker });
+    }
+    this.smokeLayer.addChild(fireGfx);
 
     // Pending flashes (pre-detonation grenades) — small pulsing white dot.
     const inFlightGfx = new Graphics();

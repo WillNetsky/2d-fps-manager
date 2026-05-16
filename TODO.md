@@ -4,11 +4,12 @@
 - [x] Git this project
 
 ## Simulation
-- [ ] Add headshots, kevlar+helmet
-- [ ] Figure out how CT smokes are effective
-- [ ] Flashes
+- [x] Add headshots, kevlar+helmet
+- [x] Figure out how CT smokes are effective
+- [x] Flashes
 - [ ] Molotovs
 - [ ] HE
+- [ ] Grenades are thrown by players, show them leaving their hand and their trajectory. Grenade skills should affect both target choice and accuracy
 - [ ] Ammo, reloads
 - [ ] Different T and CT guns
 - [ ] Upgraded pistols (deagles,)
@@ -25,9 +26,13 @@
 - [ ] MVPs for each round
 - [ ] Kill display in the top right
 - [ ] Timeline kill lines color coded by team
+- [ ] "Replay" displayed on top when its replaying "Live" when live
 
 ## Map Editor
 - [ ] Abillity to create new maps, edit saved maps
+
+## Issues
+- [ ] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
 
 
 ## Thoughts

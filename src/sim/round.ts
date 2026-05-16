@@ -1,5 +1,5 @@
 import type {
-  Agent, DroppedWeapon, Flash, GameMap, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
+  Agent, DroppedWeapon, Flash, GameMap, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
@@ -18,6 +18,11 @@ const FLASH_RANGE = 320;
 const FLASH_MAX_DURATION_MS = 3500;
 const FLASH_MIN_DURATION_MS = 600;
 const FLASH_CONE_HALF = Math.PI / 2; // ±90°
+
+const MOLOTOV_FUSE_MS = 1500;
+const MOLOTOV_DURATION_MS = 7000;
+const MOLOTOV_RADIUS_WORLD = 70;
+const MOLOTOV_DOT_PER_SEC = 14;
 
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
@@ -86,6 +91,7 @@ export interface RoundSnapshot {
   smokes: Smoke[];
   flashes: Flash[];
   tickFlashes: { pos: Vec2; side: Side }[];
+  molotovs: Molotov[];
   drops: import("../domain/types.ts").DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -99,6 +105,7 @@ export class RoundSim {
   smokes: Smoke[] = [];
   flashes: Flash[] = [];      // in-flight grenades waiting on fuse
   tickFlashes: { pos: Vec2; side: Side }[] = []; // detonation events this tick
+  molotovs: Molotov[] = [];   // burning patches
   drops: DroppedWeapon[] = [];
   t = 0;
   events: SimEvent[] = [];
@@ -126,6 +133,7 @@ export class RoundSim {
   private tradeMarks: TradeMark[] = [];
   private smokeQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
+  private molotovQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -166,6 +174,7 @@ export class RoundSim {
     this.assignSites();
     this.scheduleSmokes();
     this.scheduleFlashes();
+    this.scheduleMolotovs();
     this.push({ t: 0, kind: "round-start" });
   }
 
@@ -270,6 +279,7 @@ export class RoundSim {
         stance: "none",
         stanceUntil: -Infinity,
         blindedUntil: -Infinity,
+        fleeingFireUntil: -Infinity,
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
@@ -319,6 +329,7 @@ export class RoundSim {
 
     this.tickSmokes();
     this.tickFlashesUpdate();
+    this.tickMolotovsUpdate();
     this.updateIntel();
 
     for (const a of this.agents) if (a.alive) this.think(a);
@@ -350,6 +361,7 @@ export class RoundSim {
       smokes: this.smokes.map(s => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
       flashes: this.flashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, detonatesAt: f.detonatesAt, side: f.side })),
       tickFlashes: this.tickFlashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, side: f.side })),
+      molotovs: this.molotovs.map(m => ({ pos: { x: m.pos.x, y: m.pos.y }, radius: m.radius, expiresAt: m.expiresAt, side: m.side, thrower: m.thrower })),
       drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
@@ -489,6 +501,106 @@ export class RoundSim {
     }
   }
 
+  // ---- Molotovs ----
+  private scheduleMolotovs() {
+    const usedSpots = new Set<number>();
+    const sortedSpots = (side: Side) => this.map.molotovSpots
+      .map((sp, idx) => ({ sp, idx }))
+      .filter(({ sp }) => sp.side === side);
+    for (const a of this.agents) {
+      if (!a.utility.includes("molotov")) continue;
+      const spots = sortedSpots(a.side);
+      if (!spots.length) continue;
+      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
+      for (const { sp, idx } of spots) {
+        if (usedSpots.has(idx)) continue;
+        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
+        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
+        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
+        if (!best || d < best.d) best = { sp, idx, d };
+      }
+      if (!best) continue;
+      usedSpots.add(best.idx);
+      const player = this.players(a.playerId)!;
+      // molotovs lob early as area denial; utility rating speeds it
+      const baseThrow = 5000 - (player.stats.utility - 50) * 30;
+      this.molotovQueue.push({
+        thrower: a.playerId,
+        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        throwAt: baseThrow + this.rng() * 1500,
+      });
+    }
+  }
+
+  private tickMolotovsUpdate() {
+    // Deploy queued
+    for (let i = this.molotovQueue.length - 1; i >= 0; i--) {
+      const q = this.molotovQueue[i];
+      if (this.t >= q.throwAt) {
+        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
+        if (thrower) {
+          // The grenade has a fuse before the fire starts. Treat fuse as part of the molotov's lifetime
+          // by setting an "ignite" time = throw + fuse. Simpler: skip animation, instant fire on detonation.
+          this.molotovs.push({
+            pos: { ...q.spot },
+            radius: MOLOTOV_RADIUS_WORLD,
+            expiresAt: this.t + MOLOTOV_FUSE_MS + MOLOTOV_DURATION_MS,
+            side: thrower.side,
+            thrower: thrower.playerId,
+          });
+          const idx = thrower.utility.indexOf("molotov");
+          if (idx >= 0) thrower.utility.splice(idx, 1);
+        }
+        this.molotovQueue.splice(i, 1);
+      }
+    }
+
+    // Smoke extinguish: any smoke whose center is inside the fire's reach kills the fire.
+    for (let i = this.molotovs.length - 1; i >= 0; i--) {
+      const m = this.molotovs[i];
+      const extinguished = this.smokes.some(s => {
+        const dx = m.pos.x - s.pos.x, dy = m.pos.y - s.pos.y;
+        const d = Math.hypot(dx, dy);
+        return d < m.radius + s.radius * 0.6;
+      });
+      if (extinguished || this.t >= m.expiresAt) {
+        this.molotovs.splice(i, 1);
+      }
+    }
+
+    // DOT + flee for agents in active fire (after fuse).
+    const dmgPerTick = (MOLOTOV_DOT_PER_SEC * TICK_MS) / 1000;
+    for (const m of this.molotovs) {
+      const igniteAt = m.expiresAt - MOLOTOV_DURATION_MS;
+      if (this.t < igniteAt) continue; // still in fuse phase
+      for (const a of this.agents) {
+        if (!a.alive) continue;
+        const dx = a.pos.x - m.pos.x, dy = a.pos.y - m.pos.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > m.radius * m.radius) continue;
+        const applied = Math.min(a.hp, dmgPerTick);
+        a.hp -= dmgPerTick;
+        this.addDamage(m.thrower, applied);
+        // Flee — set a goal away from the fire.
+        const d = Math.sqrt(d2) || 1;
+        const flee: Vec2 = { x: a.pos.x + (dx / d) * 200, y: a.pos.y + (dy / d) * 200 };
+        this.setGoal(a, flee);
+        a.fleeingFireUntil = this.t + 600;
+        a.nextThinkAt = Math.max(a.nextThinkAt, a.fleeingFireUntil);
+        if (a.hp <= 0) {
+          a.alive = false; a.hp = 0;
+          if (a.weapon !== "knife") {
+            this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
+          }
+          this.push({ t: this.t, kind: "kill", killer: m.thrower, victim: a.playerId, weapon: "molotov", headshot: false });
+          this.bumpStat(m.thrower, "kills", 1);
+          this.bumpStat(a.playerId, "deaths", 1);
+        }
+        break; // one fire DOT per tick per agent
+      }
+    }
+  }
+
   // ---- Pickups ----
   private checkPickups() {
     for (const a of this.agents) {
@@ -539,6 +651,7 @@ export class RoundSim {
 
   // ---- AI ----
   private think(a: Agent) {
+    if (this.t < a.fleeingFireUntil) return;
     const arrived = a.target && a.path.length === 0 && dist(a.pos, a.target) < 6;
     const needNew = !a.target || arrived || a.dirty || this.t >= a.nextThinkAt;
     if (!needNew) return;
@@ -808,6 +921,7 @@ export class RoundSim {
     }
     if (a.reloadingUntil > 0) return; // still reloading
 
+    if (this.t < a.fleeingFireUntil) return; // can't fight while fleeing fire
     const reactionMs = 80 + Math.max(0, (100 - player.stats.reflexes)) * 4;
     const stats = player.stats;
     const enemy = this.acquireTarget(a, reactionMs);

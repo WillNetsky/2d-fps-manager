@@ -283,5 +283,15 @@ export function makeMap(): GameMap {
       { side: "CT", tile: { x: 28, y: 12 } }, // long push
       { side: "CT", tile: { x: 4, y: 12 } },  // B tunnels push
     ],
+    molotovSpots: [
+      // T molotovs — burn CT default-plant areas to flush defenders before pushing.
+      { side: "T", tile: { x: 28, y: 3 } },   // A site default
+      { side: "T", tile: { x: 3, y: 3 } },    // B site default
+      { side: "T", tile: { x: 15, y: 4 } },   // mid CT hold
+      // CT molotovs — burn T approach routes to delay/zone the push.
+      { side: "CT", tile: { x: 15, y: 12 } }, // mid push approach
+      { side: "CT", tile: { x: 28, y: 14 } }, // long push approach
+      { side: "CT", tile: { x: 4, y: 13 } },  // B tunnels approach
+    ],
   };
 }
