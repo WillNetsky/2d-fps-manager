@@ -198,9 +198,10 @@ export function makeMap(): GameMap {
       { side: "T", tile: { x: 27, y: 8 } },  // long-A corner / CT angle
       { side: "T", tile: { x: 15, y: 6 } },  // mid doors (block CT mid AWP)
       { side: "T", tile: { x: 4, y: 7 } },   // B doors / top of tunnels
-      // CT smokes — slow T pushes
-      { side: "CT", tile: { x: 15, y: 11 } }, // mid (block T mid push)
-      { side: "CT", tile: { x: 30, y: 13 } }, // long (block T long push, outside long doors)
+      // CT smokes — drop right in each choke gap so Ts push through blind.
+      { side: "CT", tile: { x: 15, y: 8 } },  // mid doors choke
+      { side: "CT", tile: { x: 26, y: 9 } },  // long upper choke gap
+      { side: "CT", tile: { x: 5, y: 9 } },   // B tunnels upper choke gap
     ],
   };
 }

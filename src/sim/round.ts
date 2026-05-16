@@ -11,7 +11,7 @@ const PLANT_TIME_MS = 3000;
 const DEFUSE_TIME_MS = 5000;
 
 const SMOKE_DURATION_MS = 14_000;
-const SMOKE_RADIUS_WORLD = 60; // ~2 tiles
+const SMOKE_RADIUS_WORLD = 80; // ~2.8 tiles — wide enough to fully plug a 4-tile choke
 
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
