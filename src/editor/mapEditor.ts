@@ -10,6 +10,7 @@ type Tool =
 const CUSTOM_MAP_KEY = "2d-fps-manager-custom-map";
 const SAVED_MAPS_KEY = "2d-fps-manager-saved-maps";
 
+export function loadSavedMapsAll(): Record<string, GameMap> { return loadSavedMaps(); }
 function loadSavedMaps(): Record<string, GameMap> {
   const raw = localStorage.getItem(SAVED_MAPS_KEY);
   if (!raw) return {};

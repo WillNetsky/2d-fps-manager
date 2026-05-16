@@ -149,6 +149,9 @@ html, body {
   color: var(--accent);
   border-color: var(--accent);
 }
+.balance-link {
+  top: 38px;
+}
 
 .panel {
   background: var(--panel);
@@ -406,6 +409,45 @@ html, body {
 }
 .start-row .secondary:hover:not(:disabled) { background: var(--line); }
 .start-row .secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.balance-select, .balance-input {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.balance-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin: 4px 0;
+  color: var(--text);
+}
+.balance-status {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.balance-results { font-size: 13px; }
+.balance-results h3 { margin: 0 0 12px; }
+.balance-table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 500px;
+}
+.balance-table th, .balance-table td {
+  text-align: left;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.balance-table th { font-weight: 600; color: var(--muted); width: 50%; }
+.balance-table td { font-variant-numeric: tabular-nums; }
 
 .kill-feed {
   position: absolute;

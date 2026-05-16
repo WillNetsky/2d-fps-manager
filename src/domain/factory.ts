@@ -139,6 +139,24 @@ export function makePlayer(role: Role): Player {
 
 export const STARTING_PER_PLAYER = 800;
 
+const ALL_STAT_KEYS: Array<keyof PlayerStats> = [
+  "accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe",
+  "reflexes","handSpeed","movement","jiggle",
+  "mapAwareness","positioning","gameSense","timing","adaptability",
+  "composure","aggression","patience","discipline","recovery",
+  "utility","smokeLineups","flashTiming","molotovUse",
+  "pistolPref","riflePref","awpPref","smgPref",
+  "igl","communication",
+];
+
+// Force every stat on every player on this team to `value` (default 60).
+// Useful for balance tests where you want player skill out of the equation.
+export function neutralizeTeamStats(team: Team, value = 60) {
+  for (const p of team.players) {
+    for (const k of ALL_STAT_KEYS) p.stats[k] = value;
+  }
+}
+
 const STANDARD_ROSTER: Role[] = ["igl", "awper", "entry", "support", "lurker"];
 
 export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {

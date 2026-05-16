@@ -151,6 +151,13 @@ export async function initGame(app: HTMLElement) {
   editorLink.onclick = () => { window.location.reload(); };
   canvasHost.appendChild(editorLink);
 
+  const balanceLink = document.createElement("a");
+  balanceLink.href = "#balance";
+  balanceLink.className = "editor-link balance-link";
+  balanceLink.textContent = "📊 Balance";
+  balanceLink.onclick = () => { window.location.reload(); };
+  canvasHost.appendChild(balanceLink);
+
   // --- Replay ---
   const replayPlayer = new ReplayPlayer();
   const timeline = new Timeline(stage, {
