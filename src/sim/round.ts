@@ -908,11 +908,16 @@ export class RoundSim {
   }
 
   // ---- Saving (keep your gun for next round) ----
+  // Continuous, stat-driven: each agent forms a "saveScore" from the
+  // situation as they perceive it (gameSense modulates accuracy) and their
+  // own temperament (composure, aggression, discipline). No hard team-size
+  // cutoff — a high-aggression entry on 3v5 still pushes; a low-composure
+  // awper on 4v5 with a kept AWP can break and hide.
   private maybeSaveDecision(a: Agent) {
     if (this.t < a.reassessSaveAt) return;
     a.reassessSaveAt = this.t + 1200 + this.rng() * 800;
 
-    // Anchors that must not save.
+    // Hard role exclusions — pinned by the role itself, not a stat call.
     if (a.playerId === this.bombCarrier) {
       if (a.saving) { a.saving = false; a.dirty = true; }
       return;
@@ -921,7 +926,6 @@ export class RoundSim {
       if (a.saving) { a.saving = false; a.dirty = true; }
       return;
     }
-    // The T closest to a dropped bomb is committed to retrieving it.
     if (a.side === "T" && this.bombDropped && !this.bombCarrier) {
       const closestT = this.closestAliveOnSide("T", this.bombDropped);
       if (closestT?.playerId === a.playerId) {
@@ -930,37 +934,46 @@ export class RoundSim {
       }
     }
 
-    const us = this.agents.filter(x => x.alive && x.side === a.side).length;
-    const them = this.agents.filter(x => x.alive && x.side !== a.side).length;
     const player = this.players(a.playerId)!;
-    const winChance = this.teamWinChance(a.side);
-
-    if (a.saving) {
-      // Bail out of save mode if situation recovers.
-      if (winChance > 0.50 || us >= them) { a.saving = false; a.dirty = true; }
-      return;
-    }
-
-    // Don't save while the team still has numbers to contest. Real saves only
-    // start once we're meaningfully outnumbered (3v5 still tries to retake).
-    if (us >= them) return;
-    if (us >= 3) return;
-
+    const stats = player.stats;
     const w = WEAPONS[a.weapon];
     const gunValue = w.cost
       + (a.armor > 0 ? VEST_COST : 0)
       + (a.helmet ? HELMET_UPGRADE_COST : 0);
-    if (gunValue < 1500) return; // pistol + light kit — not worth saving
 
-    // Higher composure → recognizes loss earlier and saves;
-    // aggressive players push instead; large score deficits encourage forcing.
-    let threshold = 0.30;
-    threshold += (player.stats.composure - 50) / 250;
-    threshold -= (player.stats.aggression - 50) / 250;
-    threshold += (gunValue - 2000) / 9000;
-    threshold -= Math.max(0, this.scoreDeficit(a.side) - 2) * 0.04;
+    // --- Situation ---
+    const us = this.agents.filter(x => x.alive && x.side === a.side).length;
+    const them = this.agents.filter(x => x.alive && x.side !== a.side).length;
+    const trueWin = this.teamWinChance(a.side);
+    // Perceived win chance is noisier for low-gameSense players (±0.15 at GS=0).
+    const noise = (this.rng() - 0.5) * 2 * (1 - stats.gameSense / 100) * 0.15;
+    const perceivedWin = clamp(trueWin + noise, 0, 1);
+    const numericalDisadvantage = clamp((them - us) / 4, 0, 1); // 0 at parity, 1 at 1v5
+    const gunValueNorm = clamp((gunValue - 1000) / 4000, 0, 1); // 0 at $1k, 1 at $5k+
+    const scoreDef = Math.max(0, this.scoreDeficit(a.side)); // rounds behind in match
 
-    if (winChance < threshold) {
+    // --- Drives toward saving ---
+    let saveScore = 0;
+    saveScore += (1 - perceivedWin) * 0.55;        // hopeless reads push save
+    saveScore += numericalDisadvantage * 0.20;     // visibly outnumbered
+    saveScore += gunValueNorm * 0.30;              // worth preserving
+    // --- Drives against saving ---
+    saveScore -= (stats.aggression / 100) * 0.40;  // aggressive players push
+    saveScore -= (stats.discipline / 100) * 0.10;  // disciplined stay with plan
+    saveScore -= Math.min(scoreDef, 6) * 0.03;     // behind in match → force buy / force commit
+    // --- Calibration ---
+    saveScore += (stats.composure - 50) / 200;     // composure: clean read, decisive
+
+    // Hysteresis when already saving — needs a meaningful reversal to flip back.
+    if (a.saving) {
+      if (saveScore < 0.30) { a.saving = false; a.dirty = true; }
+      return;
+    }
+
+    // Activation threshold around 0.55 — high enough that a calm 4v5 doesn't
+    // flip the whole team. Threshold itself is constant; the score does the
+    // work via stats and situation.
+    if (saveScore > 0.55) {
       a.saving = true;
       a.dirty = true;
     }
