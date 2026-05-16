@@ -1509,6 +1509,8 @@ export class RoundSim {
     const applied = Math.min(enemy.hp, dmg);
     enemy.hp -= dmg;
     this.addDamage(a.playerId, applied);
+    // Taking damage breaks save mode — you've been found.
+    if (enemy.saving) { enemy.saving = false; enemy.dirty = true; }
 
     if (enemy.hp <= 0) {
       enemy.alive = false;
@@ -1547,12 +1549,21 @@ export class RoundSim {
     const stats = player.stats;
     const isLastAlive = this.lastAliveOnSide(a.side);
 
-    // Saving: refuse engagement, just keep moving toward the hide spot.
+    // Saving: try to avoid engagement, but if cornered with an enemy in
+    // close range, drop save and fight back. Composure scales the reaction
+    // radius — calm players notice and react sooner.
     if (a.saving) {
-      a.stance = "disengage";
-      a.stanceUntil = this.t + 2000;
-      this.setGoal(a, this.saveSpotFor(a));
-      return;
+      const d = dist(a.pos, enemy.pos);
+      const reactRange = 100 + (stats.composure / 100) * 140; // 100-240px
+      if (d < reactRange) {
+        a.saving = false;
+        // Fall through to normal stance decision below.
+      } else {
+        a.stance = "disengage";
+        a.stanceUntil = this.t + 2000;
+        this.setGoal(a, this.saveSpotFor(a));
+        return;
+      }
     }
 
     // Count visible enemies.
@@ -1694,6 +1705,7 @@ export class RoundSim {
     const applied = Math.min(target.hp, dmg);
     target.hp -= dmg;
     this.addDamage(a.playerId, applied);
+    if (target.saving) { target.saving = false; target.dirty = true; }
     if (target.hp <= 0) {
       target.alive = false;
       target.hp = 0;

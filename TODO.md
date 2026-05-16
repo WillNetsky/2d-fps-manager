@@ -18,7 +18,7 @@
 - [x] Agents should take cover and peek corners
 
 ## Match Logic
-- [ ] CT side needs to be able to choose strategies, and place players
+- [x] CT side needs to be able to choose strategies, and place players
 - [x] MR12 rules, switch sides! it goes 13 straight CT right now
 - [x] Per-player banks instead of a single team bankroll (each player's kills/wins/losses accrue to their own money; coach decides who buys what)
 - [x] Drop guns for teammates — buy-phase action (give your gun to a teammate before round) and mid-round (agents pick up nearby teammates' drops); especially for AWP redistribution and upgrade hand-me-downs
