@@ -882,14 +882,22 @@ export class RoundSim {
 
   private decideMoveMode(a: Agent) {
     const player = this.players(a.playerId)!;
+    const stats = player.stats;
     // Saving: stealth no matter what.
     if (a.saving) { a.moveMode = "walk"; return; }
     // Lurkers sneak by default.
     if (player.role === "lurker") { a.moveMode = "walk"; return; }
-    // Carrier wants to move fast to plant; only walks near the actual site.
+    // Bomb retriever walks for the last stretch so they don't run blind into ambushes.
+    if (a.side === "T" && this.bombDropped && this.bombRetrieverId() === a.playerId) {
+      if (dist(a.pos, this.bombDropped) < this.map.tileSize * 5) { a.moveMode = "walk"; return; }
+    }
+    // Cautious temperament — low aggression + high composure extends the
+    // "walk near contact" radius. Reckless players run all the way in.
+    const caution = clamp(((100 - stats.aggression) + stats.composure) / 200, 0, 1);
+    const walkRadius = CONTACT_RADIUS * (0.6 + caution * 0.9);
     const contact = this.contactZoneFor(a);
     const d = dist(a.pos, contact);
-    a.moveMode = d < CONTACT_RADIUS ? "walk" : "run";
+    a.moveMode = d < walkRadius ? "walk" : "run";
   }
 
   private contactZoneFor(a: Agent): Vec2 {
@@ -908,31 +916,12 @@ export class RoundSim {
   }
 
   // ---- Saving (keep your gun for next round) ----
-  // Continuous, stat-driven: each agent forms a "saveScore" from the
-  // situation as they perceive it (gameSense modulates accuracy) and their
-  // own temperament (composure, aggression, discipline). No hard team-size
-  // cutoff — a high-aggression entry on 3v5 still pushes; a low-composure
-  // awper on 4v5 with a kept AWP can break and hide.
+  // Every save decision flows through one continuous score. Role-based
+  // responsibility (bomb carrier, last CT vs plant, bomb retriever) is a
+  // bias, not a gate — so a panicked low-composure carrier can still bail.
   private maybeSaveDecision(a: Agent) {
     if (this.t < a.reassessSaveAt) return;
     a.reassessSaveAt = this.t + 1200 + this.rng() * 800;
-
-    // Hard role exclusions — pinned by the role itself, not a stat call.
-    if (a.playerId === this.bombCarrier) {
-      if (a.saving) { a.saving = false; a.dirty = true; }
-      return;
-    }
-    if (this.bombPlanted && a.side === "CT" && this.lastAliveOnSide("CT")) {
-      if (a.saving) { a.saving = false; a.dirty = true; }
-      return;
-    }
-    if (a.side === "T" && this.bombDropped && !this.bombCarrier) {
-      const closestT = this.closestAliveOnSide("T", this.bombDropped);
-      if (closestT?.playerId === a.playerId) {
-        if (a.saving) { a.saving = false; a.dirty = true; }
-        return;
-      }
-    }
 
     const player = this.players(a.playerId)!;
     const stats = player.stats;
@@ -941,42 +930,85 @@ export class RoundSim {
       + (a.armor > 0 ? VEST_COST : 0)
       + (a.helmet ? HELMET_UPGRADE_COST : 0);
 
-    // --- Situation ---
+    // --- Situation read ---
     const us = this.agents.filter(x => x.alive && x.side === a.side).length;
     const them = this.agents.filter(x => x.alive && x.side !== a.side).length;
     const trueWin = this.teamWinChance(a.side);
-    // Perceived win chance is noisier for low-gameSense players (±0.15 at GS=0).
+    // gameSense noise: low-GS players misread the round state.
     const noise = (this.rng() - 0.5) * 2 * (1 - stats.gameSense / 100) * 0.15;
     const perceivedWin = clamp(trueWin + noise, 0, 1);
-    const numericalDisadvantage = clamp((them - us) / 4, 0, 1); // 0 at parity, 1 at 1v5
-    const gunValueNorm = clamp((gunValue - 1000) / 4000, 0, 1); // 0 at $1k, 1 at $5k+
-    const scoreDef = Math.max(0, this.scoreDeficit(a.side)); // rounds behind in match
+    const numericalDisadvantage = clamp((them - us) / 4, 0, 1);
+    const gunValueNorm = clamp((gunValue - 1000) / 4000, 0, 1);
+    const scoreDef = Math.max(0, this.scoreDeficit(a.side));
 
-    // --- Drives toward saving ---
+    // --- Score ---
     let saveScore = 0;
-    saveScore += (1 - perceivedWin) * 0.55;        // hopeless reads push save
-    saveScore += numericalDisadvantage * 0.20;     // visibly outnumbered
-    saveScore += gunValueNorm * 0.30;              // worth preserving
-    // --- Drives against saving ---
-    saveScore -= (stats.aggression / 100) * 0.40;  // aggressive players push
-    saveScore -= (stats.discipline / 100) * 0.10;  // disciplined stay with plan
-    saveScore -= Math.min(scoreDef, 6) * 0.03;     // behind in match → force buy / force commit
-    // --- Calibration ---
-    saveScore += (stats.composure - 50) / 200;     // composure: clean read, decisive
+    saveScore += (1 - perceivedWin) * 0.55;
+    saveScore += numericalDisadvantage * 0.20;
+    saveScore += gunValueNorm * 0.30;
+    saveScore -= (stats.aggression / 100) * 0.40;
+    saveScore -= (stats.discipline / 100) * 0.10;
+    saveScore -= Math.min(scoreDef, 6) * 0.03;
+    saveScore += (stats.composure - 50) / 200;
 
-    // Hysteresis when already saving — needs a meaningful reversal to flip back.
+    // --- Role responsibilities push against saving, scaled by composure/discipline ---
+    if (a.playerId === this.bombCarrier) {
+      // Strong push to plant; shaky carriers can still break.
+      saveScore -= 0.50 + (stats.discipline / 100) * 0.20;
+    }
+    if (this.bombPlanted && a.side === "CT" && this.lastAliveOnSide("CT")) {
+      // The team needs you on defuse; disciplined + composed CTs honor it.
+      saveScore -= 0.20 + (stats.discipline / 100) * 0.20 + (stats.composure / 100) * 0.20;
+    }
+    if (a.side === "T" && this.bombDropped && !this.bombCarrier) {
+      // If you've decided to retrieve the bomb, you don't also save.
+      const retrieverId = this.bombRetrieverId();
+      if (retrieverId === a.playerId) saveScore -= 0.40;
+    }
+
     if (a.saving) {
       if (saveScore < 0.30) { a.saving = false; a.dirty = true; }
       return;
     }
-
-    // Activation threshold around 0.55 — high enough that a calm 4v5 doesn't
-    // flip the whole team. Threshold itself is constant; the score does the
-    // work via stats and situation.
     if (saveScore > 0.55) {
       a.saving = true;
       a.dirty = true;
     }
+  }
+
+  // Which T (if any) is heading for the dropped bomb? Driven by stats, not
+  // proximity alone. Players with low gameSense / map awareness may not
+  // register the bomb situation at all and just deathmatch.
+  private bombRetrieverId(): string | null {
+    if (!this.bombDropped || this.bombCarrier) return null;
+    let best: Agent | null = null;
+    let bestScore = -Infinity;
+    for (const a of this.agents) {
+      if (!a.alive || a.side !== "T") continue;
+      if (a.saving) continue;
+      const player = this.players(a.playerId)!;
+      const stats = player.stats;
+      const d = dist(a.pos, this.bombDropped);
+      const proximity = clamp(1 - d / 800, 0, 1);
+      // Knowing the bomb matters and where it is.
+      const awareness = (stats.gameSense + stats.mapAwareness) / 200;
+      // Willingness to play support over fragging.
+      const teamMind = (stats.discipline + stats.communication) / 200;
+      const aggressionPenalty = clamp((stats.aggression - 50) / 100, 0, 1);
+      const roleBonus = player.role === "support" ? 0.10
+        : player.role === "igl" ? 0.08
+        : player.role === "entry" ? -0.08
+        : player.role === "lurker" ? -0.10
+        : 0;
+      const desire =
+          proximity * 0.40
+        + awareness * 0.35
+        + teamMind  * 0.20
+        - aggressionPenalty * 0.20
+        + roleBonus;
+      if (desire > bestScore) { bestScore = desire; best = a; }
+    }
+    return bestScore > 0.30 ? (best?.playerId ?? null) : null;
   }
 
   private closestAliveOnSide(side: Side, ref: Vec2): Agent | null {
@@ -1028,11 +1060,13 @@ export class RoundSim {
     if (this.bombPlanted && this.bombPlantedAt) {
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
-    // Bomb dropped: closest T heads to retrieve it. Others fall through to
-    // their normal assigned-site goal — they hold lanes instead of swarming.
+    // Bomb dropped: a T with the highest "go-get-it" desire (stats-driven,
+    // not just proximity) heads to retrieve. Could be nobody — if no one's
+    // game sense / discipline registers the bomb, the team plays it as
+    // deathmatch instead. Other Ts fall through to normal site duty.
     if (this.bombDropped) {
-      const closest = this.closestAliveOnSide("T", this.bombDropped);
-      if (closest && a.playerId === closest.playerId) {
+      const retrieverId = this.bombRetrieverId();
+      if (retrieverId && a.playerId === retrieverId) {
         return { x: this.bombDropped.x, y: this.bombDropped.y };
       }
     }
