@@ -1,31 +1,36 @@
 import type { RoundResult, Team } from "../domain/types.ts";
 
-// Simplified CS-style round rewards.
+// Per-player CS-style round rewards.
 const WIN_BONUS = 3250;
 const LOSS_STREAK_BASE = 1400;
 const LOSS_STREAK_BONUS = 500;
 const MAX_LOSS_BONUS = 3400;
-const KILL_REWARD = 300; // pooled into team for simplicity
+const KILL_REWARD = 300;
+const PLAYER_MONEY_CAP = 16000;
 
 export function applyRoundReward(
   ct: Team, t: Team, result: RoundResult, ctLossStreak: number, tLossStreak: number,
 ): { ctLossStreak: number; tLossStreak: number } {
   const winner = result.winningSide === "CT" ? ct : t;
   const loser = result.winningSide === "CT" ? t : ct;
-  winner.money += WIN_BONUS;
-  loser.money += Math.min(MAX_LOSS_BONUS, LOSS_STREAK_BASE + LOSS_STREAK_BONUS *
-    (result.winningSide === "CT" ? tLossStreak : ctLossStreak));
+  const loserBonus = Math.min(
+    MAX_LOSS_BONUS,
+    LOSS_STREAK_BASE + LOSS_STREAK_BONUS * (result.winningSide === "CT" ? tLossStreak : ctLossStreak),
+  );
+  for (const p of winner.players) p.money += WIN_BONUS;
+  for (const p of loser.players)  p.money += loserBonus;
 
-  // Kill rewards
+  // Kill rewards go to the killer directly.
   for (const e of result.events) {
     if (e.kind !== "kill") continue;
-    const killerCt = ct.players.some(p => p.id === e.killer);
-    (killerCt ? ct : t).money += KILL_REWARD;
+    const killer = ct.players.find(p => p.id === e.killer) ?? t.players.find(p => p.id === e.killer);
+    if (killer) killer.money += KILL_REWARD;
   }
 
-  // Cap money
-  ct.money = Math.min(ct.money, 16000);
-  t.money = Math.min(t.money, 16000);
+  // Cap money per player
+  for (const team of [ct, t]) {
+    for (const p of team.players) p.money = Math.min(p.money, PLAYER_MONEY_CAP);
+  }
 
   return {
     ctLossStreak: result.winningSide === "CT" ? 0 : ctLossStreak + 1,

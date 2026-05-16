@@ -71,6 +71,7 @@ export interface Player {
   traits: Trait[];
 
   // Dynamic state — updated round to round.
+  money: number;       // per-player bank
   mood: number;        // 0-100, drifts based on outcomes
   morale: number;      // 0-100, longer-term
   // Relationships keyed by other player id (-100 to 100).
@@ -133,7 +134,6 @@ export interface Team {
   name: string;
   side: Side;          // current side this half
   players: Player[];
-  money: number;       // team-shared bankroll for buy phase; per-player money can come later
   roundsWon: number;
   // Per-player current loadout for the upcoming round.
   loadouts: Record<string, Loadout>;

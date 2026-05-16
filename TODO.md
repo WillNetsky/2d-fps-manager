@@ -9,7 +9,7 @@
 - [x] Flashes
 - [x] Molotovs
 - [x] HE
-- [ ] Grenades are thrown by players, show them leaving their hand and their trajectory. Grenade skills should affect both target choice and accuracy
+- [x] Grenades are thrown by players, show them leaving their hand and their trajectory. Grenade skills should affect both target choice and accuracy
 - [x] Ammo, reloads
 - [ ] Different T and CT guns
 - [ ] Upgraded pistols (deagles,)
@@ -20,7 +20,9 @@
 ## Match Logic
 - [ ] CT side needs to be able to choose strategies, and place players
 - [x] MR12 rules, switch sides! it goes 13 straight CT right now
-- [ ] Should be able to drop guns for teammates, IE someone picks up an AWP and we can give it to the awper, or if someone upgrades you can give the old gun to a teammate
+- [ ] Per-player banks instead of a single team bankroll (each player's kills/wins/losses accrue to their own money; coach decides who buys what)
+- [ ] Drop guns for teammates — buy-phase action (give your gun to a teammate before round) and mid-round (agents pick up nearby teammates' drops); especially for AWP redistribution and upgrade hand-me-downs
+- [x] Bomb drops on carrier death (yellow aura; T retrieves, CT guards)
 
 ## Match Display
 - [ ] MVPs for each round
@@ -30,8 +32,8 @@
 
 ## Map Editor
 - [x] Abillity to create new maps, edit saved maps
-- [ ] Load saved maps
-- [ ] Save as new map
+- [x] Load saved maps
+- [x] Save as new map
 
 ## Issues
 - [ ] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing

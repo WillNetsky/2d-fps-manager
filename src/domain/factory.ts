@@ -129,11 +129,14 @@ export function makePlayer(role: Role): Player {
     id, name, role,
     stats: statsForRole(role),
     traits: rollTraits(role),
+    money: STARTING_PER_PLAYER,
     mood: 65,
     morale: 65,
     relationships: {},
   };
 }
+
+export const STARTING_PER_PLAYER = 800;
 
 const STANDARD_ROSTER: Role[] = ["igl", "awper", "entry", "support", "lurker"];
 
@@ -148,7 +151,6 @@ export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {
   return {
     id, name, side,
     players,
-    money: 3000,
     roundsWon: 0,
     loadouts: Object.fromEntries(players.map(p => [p.id, {
       weapon: "pistol" as const, utility: [], armor: false, helmet: false,

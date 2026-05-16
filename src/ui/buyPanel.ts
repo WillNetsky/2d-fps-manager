@@ -41,15 +41,13 @@ export class BuyPanel {
     this.render();
   }
 
-  private totalCost(): number {
+  private playerCost(p: Player): number {
+    const l = this.team.loadouts[p.id];
     let total = 0;
-    for (const p of this.team.players) {
-      const l = this.team.loadouts[p.id];
-      if (l.weapon !== l.keptWeapon) total += WEAPONS[l.weapon].cost;
-      if (l.armor && !l.keptArmor) total += VEST_COST;
-      if (l.helmet && !l.keptHelmet) total += HELMET_UPGRADE_COST;
-      total += l.utility.reduce((s, u) => s + UTILITIES[u].cost, 0);
-    }
+    if (l.weapon !== l.keptWeapon) total += WEAPONS[l.weapon].cost;
+    if (l.armor && !l.keptArmor) total += VEST_COST;
+    if (l.helmet && !l.keptHelmet) total += HELMET_UPGRADE_COST;
+    total += l.utility.reduce((s, u) => s + UTILITIES[u].cost, 0);
     return total;
   }
 
@@ -59,9 +57,15 @@ export class BuyPanel {
   }
 
   private render() {
-    const cost = this.totalCost();
-    const remaining = this.team.money - cost;
-    const overbudget = remaining < 0;
+    let totalCost = 0;
+    let totalBank = 0;
+    let anyOver = false;
+    for (const p of this.team.players) {
+      const c = this.playerCost(p);
+      totalCost += c;
+      totalBank += p.money;
+      if (c > p.money) anyOver = true;
+    }
 
     this.el.innerHTML = "";
     const header = document.createElement("div");
@@ -83,12 +87,12 @@ export class BuyPanel {
 
     const econ = document.createElement("div");
     econ.className = "economy";
-    econ.innerHTML = `<span>Bank</span><strong>$${this.team.money}</strong>`;
+    econ.innerHTML = `<span>Team total</span><strong>$${totalBank}</strong>`;
     this.el.appendChild(econ);
 
     const spent = document.createElement("div");
     spent.className = "economy";
-    spent.innerHTML = `<span>Spending</span><strong style="color:${overbudget ? "var(--bad)" : "var(--text)"}">$${cost} (left $${remaining})</strong>`;
+    spent.innerHTML = `<span>Spending</span><strong style="color:${anyOver ? "var(--bad)" : "var(--text)"}">$${totalCost}</strong>`;
     this.el.appendChild(spent);
 
     for (const p of this.team.players) {
@@ -125,7 +129,12 @@ export class BuyPanel {
           </div>`;
       }
 
-      row.innerHTML = `<div class="name">${p.name} <span class="role">${p.role}</span></div>
+      const pCost = this.playerCost(p);
+      const pRemaining = p.money - pCost;
+      const pOver = pRemaining < 0;
+      row.innerHTML = `<div class="name">${p.name} <span class="role">${p.role}</span>
+        <span class="player-bank" style="float:right;color:${pOver ? "var(--bad)" : "var(--text)"}">$${pRemaining} / $${p.money}</span>
+      </div>
         ${topBlock}`;
 
       const buy = document.createElement("div");
@@ -194,13 +203,12 @@ export class BuyPanel {
 
     const btn = document.createElement("button");
     btn.className = "primary";
-    btn.textContent = overbudget ? "Over budget" : "Start round";
-    btn.disabled = overbudget;
+    btn.textContent = anyOver ? "Over budget" : "Start round";
+    btn.disabled = anyOver;
     btn.onclick = () => {
-      if (!overbudget) {
-        this.team.money -= cost;
-        this.handlers.onStart();
-      }
+      if (anyOver) return;
+      for (const p of this.team.players) p.money -= this.playerCost(p);
+      this.handlers.onStart();
     };
     this.el.appendChild(btn);
   }

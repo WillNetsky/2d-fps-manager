@@ -23,7 +23,7 @@ export async function initGame(app: HTMLElement) {
   app.appendChild(rightCol);
 
   // --- MR12 config ---
-  const STARTING_BANK = 3000;
+  const STARTING_BANK = 800; // per-player starting money
   const HALFTIME_ROUND = 12;
   const WIN_THRESHOLD = 13;
   const MAX_ROUNDS = 24;
@@ -128,7 +128,6 @@ export async function initGame(app: HTMLElement) {
     const HELMET = 350;
     const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
 
-    let budget = away.money;
     const players = away.players;
 
     for (let i = 0; i < players.length; i++) {
@@ -137,8 +136,7 @@ export async function initGame(app: HTMLElement) {
       const kept = existing.keptWeapon;
       const keptArmor = existing.keptArmor;
       const keptHelmet = existing.keptHelmet;
-      const remaining = players.length - i;
-      const share = Math.floor(budget / remaining);
+      const share = p.money;
       const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
 
       let weapon: WId = kept ?? "pistol";
@@ -174,20 +172,17 @@ export async function initGame(app: HTMLElement) {
         weapon, utility: util, armor, helmet,
         keptWeapon: kept, keptArmor, keptHelmet,
       };
-      budget -= spent;
+      p.money = Math.max(0, p.money - spent);
     }
-
-    away.money = Math.max(0, budget);
   }
 
   function halftimeSwap() {
     homeIsCt = !homeIsCt;
     home.side = homeIsCt ? "CT" : "T";
     away.side = homeIsCt ? "T" : "CT";
-    home.money = STARTING_BANK;
-    away.money = STARTING_BANK;
     for (const team of [home, away]) {
       for (const p of team.players) {
+        p.money = STARTING_BANK;
         team.loadouts[p.id] = {
           weapon: "pistol", utility: [], armor: false, helmet: false,
           keptWeapon: null, keptArmor: false, keptHelmet: false,
