@@ -448,9 +448,10 @@ export class RoundSim {
     const goal = this.pickGoal(a);
     if (goal) this.setGoal(a, goal);
 
-    // Periodic reassessment cadence — lower gameSense reconsiders less often.
+    // Adaptability + gameSense drive how often agents reconsider.
     const player = this.players(a.playerId)!;
-    const period = 1200 + (100 - player.stats.gameSense) * 12 + this.rng() * 800;
+    const decisionScore = (player.stats.adaptability + player.stats.gameSense) / 2;
+    const period = 1200 + (100 - decisionScore) * 12 + this.rng() * 800;
     a.nextThinkAt = this.t + period;
     a.dirty = false;
 
@@ -603,8 +604,9 @@ export class RoundSim {
       const isCarrier = a.playerId === this.bombCarrier;
       const isRushing = a.stance === "rush";
       const fading = (smokeAhead.expiresAt - this.t) < 3000;
-      const aggressive = player.traits.includes("entry-fragger");
-      if (!isCarrier && !isRushing && !fading && !aggressive) {
+      // Push if aggression decisively beats patience (rating-driven temperament).
+      const willPushPersonality = player.stats.aggression > player.stats.patience + 15;
+      if (!isCarrier && !isRushing && !fading && !willPushPersonality) {
         // Hold at smoke edge — face it, in case anyone comes through.
         a.holdAngle = Math.atan2(smokeAhead.pos.y - a.pos.y, smokeAhead.pos.x - a.pos.x);
         return;
@@ -650,14 +652,14 @@ export class RoundSim {
       baseDir = this.rng() < 0.6 ? threatDir : moveDir;
     }
 
-    // High game-sense players scan tighter, focused arcs. Low-sense players sweep wildly.
-    const senseFactor = Math.max(0.4, player.stats.gameSense / 100);
-    const arcHalf = Math.PI * 0.5 * (1.1 - senseFactor); // ~27° at 100, ~55° at 40
+    // Crosshair placement tightens the scan arc; adaptability speeds cadence.
+    const cp = player.stats.crosshairPlacement / 100;
+    const arcHalf = Math.PI * 0.5 * (1.1 - Math.max(0.4, cp));
     const offset = (this.rng() - 0.5) * 2 * arcHalf;
     const dir = baseDir + offset;
 
     a.lookTarget = { x: a.pos.x + Math.cos(dir) * 120, y: a.pos.y + Math.sin(dir) * 120 };
-    const cadence = 500 + (100 - player.stats.gameSense) * 8 + this.rng() * 400;
+    const cadence = 500 + (100 - player.stats.adaptability) * 8 + this.rng() * 400;
     a.lookChangeAt = this.t + cadence;
   }
 
@@ -685,8 +687,9 @@ export class RoundSim {
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     const player = this.players(a.playerId)!;
-    // Faster turn rate for higher reflexes.
-    const maxStep = 0.10 + (player.stats.reflexes / 100) * 0.14; // 0.10..0.24 rad/tick
+    // Turn rate driven by handSpeed (with reflexes as a small contributor).
+    const speed = (player.stats.handSpeed * 0.7 + player.stats.reflexes * 0.3) / 100;
+    const maxStep = 0.08 + speed * 0.18;
     const step = Math.max(-maxStep, Math.min(maxStep, diff));
     a.facing += step;
   }
@@ -707,6 +710,7 @@ export class RoundSim {
     if (a.reloadingUntil > 0) return; // still reloading
 
     const reactionMs = 80 + Math.max(0, (100 - player.stats.reflexes)) * 4;
+    const stats = player.stats;
     const enemy = this.acquireTarget(a, reactionMs);
 
     if (!enemy) {
@@ -749,26 +753,39 @@ export class RoundSim {
     const d = dist(a.pos, enemy.pos);
     const rangeFactor = Math.max(0.25, 1 - Math.max(0, d - weapon.range * 0.5) / weapon.range);
 
-    let aimMod = player.stats.aim / 100;
-    if (player.traits.includes("rifler") && (a.weapon === "rifle" || a.weapon === "smg")) aimMod += 0.08;
-    if (player.traits.includes("rifler") && a.weapon === "awp") aimMod -= 0.1;
-    if (player.traits.includes("awp-prodigy") && a.weapon === "awp") aimMod += 0.12;
-    if (player.traits.includes("clutch") && this.lastAliveOnSide(a.side)) aimMod += 0.1;
-    if (player.traits.includes("tilts-easy") && this.scoreDeficit(a.side) >= 3) aimMod -= 0.08;
+    // Base aim: accuracy with weapon-pref scaling 30% of the way toward the preferred-weapon rating.
+    const weaponPrefKey = (a.weapon + "Pref") as "pistolPref" | "smgPref" | "riflePref" | "awpPref";
+    const weaponPref = (stats[weaponPrefKey] ?? 50) / 100;
+    let aimMod = (stats.accuracy / 100) * 0.7 + weaponPref * 0.3;
 
-    // Trade-frag bonus: did a teammate of mine recently die to this enemy?
+    // Last alive — composure carries you. Score deficit punishes low composure.
+    if (this.lastAliveOnSide(a.side)) aimMod += (stats.composure - 60) / 200;
+    if (this.scoreDeficit(a.side) >= 3) aimMod -= Math.max(0, 60 - stats.composure) / 400;
+
+    // Trade-frag window
     if (this.tradeMarks.some(m => m.killerId === enemy.playerId && m.victimSide === a.side)) {
       aimMod += TRADE_AIM_BONUS;
     }
 
-    // Stationary aim bonus (held angle vs running)
-    if (a.path.length === 0) aimMod += 0.05;
-    else aimMod -= 0.05;
+    // First shot vs sustained spray: tapping helps the first crisp shot; sprayControl helps follow-ups.
+    const sinceLastShot = this.t - a.lastShotAt;
+    if (a.lastShotAt > 0 && sinceLastShot < 500) {
+      aimMod += (stats.sprayControl - 50) / 400;
+    } else {
+      aimMod += (stats.tapping - 50) / 500;
+    }
 
-    const nerve = player.stats.nerve / 100;
-    const mood = player.mood / 100;
-    const composure = 0.6 + 0.25 * nerve + 0.15 * mood;
-    const hitChance = clamp(weapon.accuracy * aimMod * rangeFactor * composure, 0.05, 0.95);
+    // Stationary aim bonus, weighted by counter-strafe (stopping accuracy).
+    if (a.path.length === 0) {
+      aimMod += 0.04 + (stats.counterStrafe - 50) / 600;
+    } else {
+      aimMod -= 0.05;
+    }
+
+    // Mood is a softer modifier — represents in-the-moment confidence.
+    aimMod += (player.mood - 50) / 400;
+
+    const hitChance = clamp(weapon.accuracy * aimMod * rangeFactor, 0.05, 0.95);
     const hit = this.rng() < hitChance;
     this.tickShots.push({
       from: { ...a.pos }, to: { ...enemy.pos }, side: a.side, hit, killerId: a.playerId,
@@ -777,9 +794,9 @@ export class RoundSim {
 
     let dmg = weapon.damage * (0.85 + this.rng() * 0.3);
 
-    // Headshot roll: base by weapon + aim contribution. Clamped so even bad aim has some chance.
+    // Headshot roll — crosshair placement contributes most, then accuracy.
     const hsBase = HEADSHOT_BASE[a.weapon];
-    const hsChance = clamp(hsBase + (player.stats.aim - 50) / 400, 0.03, 0.55);
+    const hsChance = clamp(hsBase + (stats.crosshairPlacement - 50) / 350 + (stats.accuracy - 50) / 600, 0.03, 0.55);
     const isHeadshot = this.rng() < hsChance;
     if (isHeadshot) {
       dmg *= HEADSHOT_MULTIPLIER;
@@ -831,9 +848,10 @@ export class RoundSim {
   // ---- Engagement stance ----
   private decideStance(a: Agent, enemy: Agent) {
     const player = this.players(a.playerId)!;
+    const stats = player.stats;
     const isLastAlive = this.lastAliveOnSide(a.side);
 
-    // Count visible enemies (LOS, vision range).
+    // Count visible enemies.
     let visibleEnemies = 0;
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
@@ -841,33 +859,30 @@ export class RoundSim {
       if (!this.hasLineOfSight(a.pos, e.pos)) continue;
       visibleEnemies++;
     }
-    // Count nearby allies (no LOS — comms/positional awareness). Low-nerve players want closer support.
-    const allyRange = 280 + (60 - player.stats.nerve) * 0.5;
+    // Nearby allies — low-composure players want closer support to feel safe.
+    const allyRange = 240 + (80 - stats.composure) * 0.8;
     let nearbyAllies = 0;
     for (const al of this.agents) {
       if (!al.alive || al.side !== a.side || al.playerId === a.playerId) continue;
       if (dist(a.pos, al.pos) < allyRange) nearbyAllies++;
     }
 
-    // Tilts-easy + behind on score: even a 1v0 (solo contact, no support) becomes disengage.
-    const tiltScared = player.traits.includes("tilts-easy") && this.scoreDeficit(a.side) >= 3;
-    const enemyThreshold = tiltScared ? 1 : 2;
-
-    // Clutch player when last alive: never disengage — fight on.
-    const refuseDisengage = player.traits.includes("clutch") && isLastAlive;
+    // Low-composure player behind on score will retreat even from solo contact.
+    const tiltPressure = stats.composure < 45 && this.scoreDeficit(a.side) >= 3;
+    const enemyThreshold = tiltPressure ? 1 : 2;
+    // Composed clutch players refuse to disengage when last alive.
+    const refuseDisengage = isLastAlive && stats.composure > 70;
 
     let stance: Agent["stance"];
     if (!refuseDisengage && visibleEnemies >= enemyThreshold && nearbyAllies === 0) {
       stance = "disengage";
     } else {
-      // Rush when outgunned at medium-long range. HP gate avoids suicide rushes at low HP.
       const myCost = WEAPONS[a.weapon].cost;
       const theirCost = WEAPONS[enemy.weapon].cost;
       const ratio = myCost / Math.max(1, theirCost);
       const d = dist(a.pos, enemy.pos);
-      let rushBias = 0;
-      if (player.traits.includes("entry-fragger")) rushBias += 0.15;
-      if (player.traits.includes("clutch") && isLastAlive) rushBias += 0.30;
+      // Aggression scales rush threshold; clutch-last-alive adds extra push.
+      const rushBias = (stats.aggression - 60) / 200 + (isLastAlive && stats.composure > 65 ? 0.25 : 0);
       if (ratio < 0.5 + rushBias && d > 160 && a.hp > 45) stance = "rush";
       else stance = "hold";
     }

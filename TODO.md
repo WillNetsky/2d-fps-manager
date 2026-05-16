@@ -14,6 +14,7 @@
 - [ ] Upgraded pistols (deagles,)
 - [ ] Agents should be aware of how many players are left
 - [ ] Agents should think about saving their gun
+- [ ] Agents should take cover and peek corners
 
 ## Match Logic
 - [ ] CT side needs to be able to choose strategies, and place players

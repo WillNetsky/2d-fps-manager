@@ -17,19 +17,89 @@ function rollStat(base: number, spread: number): number {
   return Math.max(20, Math.min(95, Math.round(base + (rand() - 0.5) * 2 * spread)));
 }
 
+// Per-role base/spread per stat. Missing keys fall through to a neutral baseline.
+const NEUTRAL: [number, number] = [60, 12];
+
+const ROLE_PROFILES: Record<Role, Partial<Record<keyof PlayerStats, [number, number]>>> = {
+  entry: {
+    accuracy: [72, 10], crosshairPlacement: [70, 10], sprayControl: [70, 10],
+    tapping: [62, 12], flickAim: [78, 10], counterStrafe: [65, 10],
+    reflexes: [80, 8], handSpeed: [80, 8], movement: [76, 8], jiggle: [70, 10],
+    mapAwareness: [62, 10], positioning: [58, 10], gameSense: [60, 10],
+    timing: [60, 10], adaptability: [62, 10],
+    composure: [62, 12], aggression: [82, 8], patience: [38, 10],
+    discipline: [55, 12], recovery: [60, 12],
+    utility: [50, 10], smokeLineups: [45, 10], flashTiming: [55, 10], molotovUse: [50, 10],
+    pistolPref: [55, 8], riflePref: [70, 8], awpPref: [40, 10], smgPref: [60, 10],
+    igl: [35, 10], communication: [55, 10],
+  },
+  awper: {
+    accuracy: [82, 8], crosshairPlacement: [80, 8], sprayControl: [50, 10],
+    tapping: [78, 8], flickAim: [82, 8], counterStrafe: [75, 8],
+    reflexes: [78, 8], handSpeed: [76, 8], movement: [60, 10], jiggle: [72, 10],
+    mapAwareness: [70, 10], positioning: [74, 10], gameSense: [70, 10],
+    timing: [72, 10], adaptability: [60, 10],
+    composure: [76, 8], aggression: [55, 12], patience: [70, 10],
+    discipline: [60, 12], recovery: [60, 12],
+    utility: [48, 10], smokeLineups: [45, 10], flashTiming: [45, 10], molotovUse: [45, 10],
+    pistolPref: [55, 8], riflePref: [50, 8], awpPref: [82, 8], smgPref: [45, 10],
+    igl: [40, 10], communication: [55, 10],
+  },
+  support: {
+    accuracy: [66, 10], crosshairPlacement: [66, 10], sprayControl: [68, 10],
+    tapping: [60, 10], flickAim: [55, 10], counterStrafe: [62, 10],
+    reflexes: [64, 10], handSpeed: [62, 10], movement: [66, 8], jiggle: [60, 10],
+    mapAwareness: [76, 8], positioning: [74, 8], gameSense: [74, 8],
+    timing: [70, 10], adaptability: [68, 10],
+    composure: [72, 10], aggression: [50, 10], patience: [75, 10],
+    discipline: [78, 8], recovery: [65, 10],
+    utility: [82, 6], smokeLineups: [82, 8], flashTiming: [78, 8], molotovUse: [76, 10],
+    pistolPref: [55, 10], riflePref: [65, 10], awpPref: [40, 10], smgPref: [60, 10],
+    igl: [45, 10], communication: [70, 10],
+  },
+  igl: {
+    accuracy: [62, 10], crosshairPlacement: [66, 10], sprayControl: [58, 10],
+    tapping: [62, 10], flickAim: [55, 10], counterStrafe: [60, 10],
+    reflexes: [62, 10], handSpeed: [60, 10], movement: [62, 8], jiggle: [58, 10],
+    mapAwareness: [88, 6], positioning: [78, 8], gameSense: [88, 6],
+    timing: [78, 8], adaptability: [82, 8],
+    composure: [82, 8], aggression: [50, 12], patience: [68, 10],
+    discipline: [82, 8], recovery: [72, 10],
+    utility: [74, 8], smokeLineups: [72, 10], flashTiming: [70, 10], molotovUse: [68, 10],
+    pistolPref: [55, 10], riflePref: [60, 10], awpPref: [42, 10], smgPref: [55, 10],
+    igl: [85, 6], communication: [82, 8],
+  },
+  lurker: {
+    accuracy: [74, 10], crosshairPlacement: [76, 10], sprayControl: [62, 10],
+    tapping: [72, 10], flickAim: [74, 10], counterStrafe: [70, 10],
+    reflexes: [72, 8], handSpeed: [68, 10], movement: [70, 8], jiggle: [72, 10],
+    mapAwareness: [80, 8], positioning: [80, 8], gameSense: [76, 8],
+    timing: [78, 8], adaptability: [62, 10],
+    composure: [78, 8], aggression: [48, 12], patience: [82, 8],
+    discipline: [55, 12], recovery: [65, 10],
+    utility: [55, 10], smokeLineups: [50, 10], flashTiming: [50, 10], molotovUse: [50, 10],
+    pistolPref: [60, 10], riflePref: [70, 10], awpPref: [55, 10], smgPref: [55, 10],
+    igl: [40, 10], communication: [50, 10],
+  },
+};
+
 function statsForRole(role: Role): PlayerStats {
-  switch (role) {
-    case "entry":
-      return { aim: rollStat(72, 10), reflexes: rollStat(78, 8), gameSense: rollStat(60, 10), nerve: rollStat(72, 10), utility: rollStat(55, 10), movement: rollStat(75, 8) };
-    case "awper":
-      return { aim: rollStat(82, 8), reflexes: rollStat(78, 8), gameSense: rollStat(70, 8), nerve: rollStat(74, 10), utility: rollStat(55, 10), movement: rollStat(65, 10) };
-    case "support":
-      return { aim: rollStat(66, 8), reflexes: rollStat(66, 8), gameSense: rollStat(72, 8), nerve: rollStat(70, 10), utility: rollStat(80, 8), movement: rollStat(66, 8) };
-    case "igl":
-      return { aim: rollStat(64, 10), reflexes: rollStat(64, 10), gameSense: rollStat(85, 6), nerve: rollStat(80, 8), utility: rollStat(72, 8), movement: rollStat(64, 8) };
-    case "lurker":
-      return { aim: rollStat(72, 10), reflexes: rollStat(70, 8), gameSense: rollStat(78, 8), nerve: rollStat(76, 8), utility: rollStat(60, 10), movement: rollStat(72, 8) };
+  const profile = ROLE_PROFILES[role];
+  const out: Partial<PlayerStats> = {};
+  const ALL_KEYS: Array<keyof PlayerStats> = [
+    "accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe",
+    "reflexes","handSpeed","movement","jiggle",
+    "mapAwareness","positioning","gameSense","timing","adaptability",
+    "composure","aggression","patience","discipline","recovery",
+    "utility","smokeLineups","flashTiming","molotovUse",
+    "pistolPref","riflePref","awpPref","smgPref",
+    "igl","communication",
+  ];
+  for (const key of ALL_KEYS) {
+    const [base, spread] = profile[key] ?? NEUTRAL;
+    out[key] = rollStat(base, spread);
   }
+  return out as PlayerStats;
 }
 
 const ROLE_TRAITS: Record<Role, Trait[]> = {

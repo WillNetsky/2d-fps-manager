@@ -1,4 +1,5 @@
 import type { Agent, Team } from "../domain/types.ts";
+import { statSummary } from "../domain/statSummary.ts";
 
 type View = "ratings" | "match";
 
@@ -86,15 +87,16 @@ export class TeamPanel {
 
       let body: string;
       if (this.view === "ratings") {
+        const s = statSummary(p.stats);
         body = `
           <div class="traits">${p.traits.join(" · ")}</div>
           <div class="loadout">${loadoutLine}</div>
           <div class="stats">
-            <div>${p.stats.aim}<span>AIM</span></div>
-            <div>${p.stats.reflexes}<span>RFX</span></div>
-            <div>${p.stats.gameSense}<span>GS</span></div>
-            <div>${p.stats.nerve}<span>NRV</span></div>
-            <div>${p.stats.utility}<span>UTL</span></div>
+            <div>${s.aim}<span>AIM</span></div>
+            <div>${s.reflexes}<span>RFX</span></div>
+            <div>${s.gameSense}<span>GS</span></div>
+            <div>${s.nerve}<span>NRV</span></div>
+            <div>${s.utility}<span>UTL</span></div>
           </div>
           <div class="mood"><div style="width:${p.mood}%"></div></div>`;
       } else {

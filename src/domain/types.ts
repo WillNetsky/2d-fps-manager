@@ -6,13 +6,51 @@ export type Side = "CT" | "T";
 export type Role = "entry" | "awper" | "support" | "igl" | "lurker";
 
 // 0-100 attribute scale across the board for legibility.
+// Six categories of fine-grained ratings — sim reads these, UI usually shows aggregated summaries.
 export interface PlayerStats {
-  aim: number;        // raw accuracy
-  reflexes: number;   // reaction time
-  gameSense: number;  // positioning, anticipation
-  nerve: number;      // resistance to pressure (clutch, ecos)
-  utility: number;    // grenade lineups, smoke quality
-  movement: number;   // peek/strafe quality
+  // Aim
+  accuracy: number;          // base hit chance
+  crosshairPlacement: number; // pre-aim quality
+  sprayControl: number;      // sustained-fire accuracy
+  tapping: number;           // first-shot discipline
+  flickAim: number;          // snap acquisition
+  counterStrafe: number;     // accuracy after stopping
+
+  // Mechanical
+  reflexes: number;          // reaction time (target acquisition delay)
+  handSpeed: number;         // turn/aim rotation speed
+  movement: number;          // overall pace
+  jiggle: number;            // peek discipline (unused for now; reserved)
+
+  // Cognitive
+  mapAwareness: number;      // spatial model of the map
+  positioning: number;       // chooses good defensive/offensive spots
+  gameSense: number;         // general decision making
+  timing: number;            // peek/push timing
+  adaptability: number;      // adjusts mid-round (reassess cadence)
+
+  // Mental
+  composure: number;         // pressure resistance (replaces nerve)
+  aggression: number;        // base push tendency
+  patience: number;          // willingness to wait (e.g., for smokes)
+  discipline: number;        // sticks to IGL plan
+  recovery: number;          // bounceback from setbacks
+
+  // Utility
+  utility: number;           // general util mastery
+  smokeLineups: number;      // knows where to throw smokes
+  flashTiming: number;       // pops flashes effectively
+  molotovUse: number;        // area denial
+
+  // Weapon specialty (50 = neutral, >50 = bonus, <50 = penalty)
+  pistolPref: number;
+  riflePref: number;
+  awpPref: number;
+  smgPref: number;
+
+  // Team
+  igl: number;               // shotcalling
+  communication: number;     // info sharing
 }
 
 export type Trait =
