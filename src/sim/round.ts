@@ -589,13 +589,28 @@ export class RoundSim {
 
   // ---- Movement (waypoint-based) ----
   private move(a: Agent) {
-    // Hold stance keeps the agent planted to aim. Rush/disengage allow movement.
     if (a.stance === "hold" && this.t < a.stanceUntil) return;
     if (a.path.length === 0) {
       if (a.holdAngle !== null) a.facing = a.holdAngle;
       return;
     }
     const player = this.players(a.playerId)!;
+
+    // Smoke avoidance: most agents wait at the edge of a smoke instead of walking through blind.
+    const nextWp = a.path[0];
+    const smokeAhead = this.smokes.find(s => dist(nextWp, s.pos) < s.radius);
+    if (smokeAhead) {
+      const isCarrier = a.playerId === this.bombCarrier;
+      const isRushing = a.stance === "rush";
+      const fading = (smokeAhead.expiresAt - this.t) < 3000;
+      const aggressive = player.traits.includes("entry-fragger");
+      if (!isCarrier && !isRushing && !fading && !aggressive) {
+        // Hold at smoke edge — face it, in case anyone comes through.
+        a.holdAngle = Math.atan2(smokeAhead.pos.y - a.pos.y, smokeAhead.pos.x - a.pos.x);
+        return;
+      }
+    }
+
     const baseSpeed = (60 + player.stats.movement * 0.8) / 1000 * TICK_MS;
     const speed = a.moveMode === "walk" ? baseSpeed * WALK_SPEED_FACTOR : baseSpeed;
     const wp = a.path[0];
@@ -620,15 +635,19 @@ export class RoundSim {
     const focus = a.side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
     const threatDir = Math.atan2(focus.y - a.pos.y, focus.x - a.pos.x);
 
-    // Bias the scan: blend threat direction with movement direction (if moving) plus random offset.
     let baseDir = threatDir;
-    if (a.path.length > 0) {
+    // Stationary: pre-aim onto a smoke in our threat direction if there is one.
+    if (a.path.length === 0) {
+      const smoke = this.findThreatSmoke(a, threatDir);
+      if (smoke) {
+        baseDir = Math.atan2(smoke.pos.y - a.pos.y, smoke.pos.x - a.pos.x);
+      } else if (a.holdAngle !== null) {
+        baseDir = a.holdAngle;
+      }
+    } else {
       const wp = a.path[0];
       const moveDir = Math.atan2(wp.y - a.pos.y, wp.x - a.pos.x);
-      // 60% look toward threat focus, 40% along movement — running blend.
       baseDir = this.rng() < 0.6 ? threatDir : moveDir;
-    } else if (a.holdAngle !== null) {
-      baseDir = a.holdAngle;
     }
 
     // High game-sense players scan tighter, focused arcs. Low-sense players sweep wildly.
@@ -640,6 +659,22 @@ export class RoundSim {
     a.lookTarget = { x: a.pos.x + Math.cos(dir) * 120, y: a.pos.y + Math.sin(dir) * 120 };
     const cadence = 500 + (100 - player.stats.gameSense) * 8 + this.rng() * 400;
     a.lookChangeAt = this.t + cadence;
+  }
+
+  // Smokes within ~280 px and roughly in the agent's threat direction (±60°).
+  private findThreatSmoke(a: Agent, threatDir: number): Smoke | null {
+    let best: Smoke | null = null;
+    let bestD = 280;
+    for (const s of this.smokes) {
+      const d = dist(a.pos, s.pos);
+      if (d > bestD) continue;
+      const smokeDir = Math.atan2(s.pos.y - a.pos.y, s.pos.x - a.pos.x);
+      let angDiff = Math.abs(smokeDir - threatDir);
+      while (angDiff > Math.PI) angDiff = Math.PI * 2 - angDiff;
+      if (angDiff > Math.PI / 3) continue;
+      best = s; bestD = d;
+    }
+    return best;
   }
 
   // Smoothly rotate facing toward lookTarget.
@@ -678,6 +713,12 @@ export class RoundSim {
       // Idle auto-reload: top off when no contact, mag low, reserve available.
       if (a.weapon !== "knife" && a.ammo < weaponStats.magSize * 0.4 && a.reserve > 0) {
         a.reloadingUntil = this.t + weaponStats.reloadMs;
+        return;
+      }
+      // Blind spray: hear a running enemy through smoke → shoot toward them.
+      if (a.weapon !== "knife" && a.ammo > 0 && this.smokes.length > 0) {
+        const blind = this.tryBlindSpray(a);
+        if (blind) this.fireBlind(a, blind, weaponStats);
       }
       return;
     }
@@ -848,6 +889,76 @@ export class RoundSim {
       // hold — stop moving, no path
       a.target = null;
       a.path = [];
+    }
+  }
+
+  // ---- Blind spray (audio cue through smoke) ----
+  private tryBlindSpray(a: Agent): Agent | null {
+    for (const e of this.agents) {
+      if (!e.alive || e.side === a.side) continue;
+      if (e.moveMode !== "run") continue;
+      const d = dist(a.pos, e.pos);
+      if (d > HEARING_RANGE) continue;
+      if (this.hasLineOfSight(a.pos, e.pos)) continue; // direct LOS handled by acquireTarget
+      if (!this.smokeOnLine(a.pos, e.pos)) continue;
+      return e;
+    }
+    return null;
+  }
+
+  private smokeOnLine(p1: Vec2, p2: Vec2): boolean {
+    const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const steps = Math.ceil(d / 10);
+    for (let i = 1; i < steps; i++) {
+      const tt = i / steps;
+      const x = p1.x + (p2.x - p1.x) * tt;
+      const y = p1.y + (p2.y - p1.y) * tt;
+      for (const sm of this.smokes) {
+        const dx = x - sm.pos.x, dy = y - sm.pos.y;
+        if (dx * dx + dy * dy < sm.radius * sm.radius) return true;
+      }
+    }
+    return false;
+  }
+
+  private fireBlind(a: Agent, target: Agent, weapon: typeof WEAPONS[keyof typeof WEAPONS]) {
+    const cooldown = 1000 / weapon.fireRate;
+    if (this.t - a.lastShotAt < cooldown) return;
+    a.lastShotAt = this.t;
+    if (a.weapon !== "knife") a.ammo--;
+    const HIT_CHANCE = 0.08;
+    const hit = this.rng() < HIT_CHANCE;
+    this.tickShots.push({
+      from: { x: a.pos.x, y: a.pos.y },
+      to: { x: target.pos.x, y: target.pos.y },
+      side: a.side, hit, killerId: a.playerId,
+    });
+    if (!hit) return;
+    let dmg = weapon.damage * (0.6 + this.rng() * 0.3);
+    if (target.armor > 0) {
+      dmg *= 0.65;
+      target.armor = Math.max(0, target.armor - dmg * 0.5);
+    }
+    const applied = Math.min(target.hp, dmg);
+    target.hp -= dmg;
+    this.addDamage(a.playerId, applied);
+    if (target.hp <= 0) {
+      target.alive = false;
+      target.hp = 0;
+      if (target.weapon !== "knife") {
+        this.drops.push({ pos: { x: target.pos.x, y: target.pos.y }, weapon: target.weapon });
+      }
+      this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: target.playerId, weapon: a.weapon, headshot: false });
+      this.bumpStat(a.playerId, "kills", 1);
+      this.bumpStat(target.playerId, "deaths", 1);
+      if (target.playerId === this.bombCarrier) {
+        const ts = this.agents.filter(x => x.side === "T" && x.alive);
+        this.bombCarrier = ts.length ? ts[0].playerId : null;
+        if (this.bombCarrier) {
+          const carrierAgent = this.agents.find(x => x.playerId === this.bombCarrier);
+          if (carrierAgent) carrierAgent.dirty = true;
+        }
+      }
     }
   }
 
