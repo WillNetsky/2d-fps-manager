@@ -921,15 +921,30 @@ export class RoundSim {
       if (a.saving) { a.saving = false; a.dirty = true; }
       return;
     }
+    // The T closest to a dropped bomb is committed to retrieving it.
+    if (a.side === "T" && this.bombDropped && !this.bombCarrier) {
+      const closestT = this.closestAliveOnSide("T", this.bombDropped);
+      if (closestT?.playerId === a.playerId) {
+        if (a.saving) { a.saving = false; a.dirty = true; }
+        return;
+      }
+    }
 
+    const us = this.agents.filter(x => x.alive && x.side === a.side).length;
+    const them = this.agents.filter(x => x.alive && x.side !== a.side).length;
     const player = this.players(a.playerId)!;
     const winChance = this.teamWinChance(a.side);
 
     if (a.saving) {
       // Bail out of save mode if situation recovers.
-      if (winChance > 0.55) { a.saving = false; a.dirty = true; }
+      if (winChance > 0.50 || us >= them) { a.saving = false; a.dirty = true; }
       return;
     }
+
+    // Don't save while the team still has numbers to contest. Real saves only
+    // start once we're meaningfully outnumbered (3v5 still tries to retake).
+    if (us >= them) return;
+    if (us >= 3) return;
 
     const w = WEAPONS[a.weapon];
     const gunValue = w.cost
@@ -949,6 +964,17 @@ export class RoundSim {
       a.saving = true;
       a.dirty = true;
     }
+  }
+
+  private closestAliveOnSide(side: Side, ref: Vec2): Agent | null {
+    let best: Agent | null = null;
+    let bd = Infinity;
+    for (const ag of this.agents) {
+      if (!ag.alive || ag.side !== side) continue;
+      const d = dist(ag.pos, ref);
+      if (d < bd) { bd = d; best = ag; }
+    }
+    return best;
   }
 
   private teamWinChance(side: Side): number {
@@ -989,18 +1015,13 @@ export class RoundSim {
     if (this.bombPlanted && this.bombPlantedAt) {
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
-    // Bomb dropped: closest T retrieves it; others hold near it to support.
+    // Bomb dropped: closest T heads to retrieve it. Others fall through to
+    // their normal assigned-site goal — they hold lanes instead of swarming.
     if (this.bombDropped) {
-      const ts = this.agents.filter(x => x.side === "T" && x.alive);
-      let closest = ts[0]; let bestD = Infinity;
-      for (const t of ts) {
-        const d = dist(t.pos, this.bombDropped);
-        if (d < bestD) { bestD = d; closest = t; }
-      }
+      const closest = this.closestAliveOnSide("T", this.bombDropped);
       if (closest && a.playerId === closest.playerId) {
         return { x: this.bombDropped.x, y: this.bombDropped.y };
       }
-      return jitter(this.bombDropped, 90, this.rng);
     }
 
     // Intel-driven rotation: Ts prefer the lighter (less CT-defended) site.
@@ -1035,18 +1056,15 @@ export class RoundSim {
   }
 
   private ctGoal(a: Agent): Vec2 | null {
-    // Bomb dropped (not yet picked up): closest CT guards the drop; others orbit.
+    // Bomb dropped (not yet picked up): only the closest CT routes to the
+    // drop to guard. Others continue with their normal site duty so the team
+    // doesn't collapse onto one point.
     if (this.bombDropped && !this.bombPlanted) {
-      const cts = this.agents.filter(x => x.side === "CT" && x.alive);
-      let closest = cts[0]; let bestD = Infinity;
-      for (const c of cts) {
-        const d = dist(c.pos, this.bombDropped);
-        if (d < bestD) { bestD = d; closest = c; }
-      }
+      const closest = this.closestAliveOnSide("CT", this.bombDropped);
       if (closest && a.playerId === closest.playerId) {
-        return jitter(this.bombDropped, 110, this.rng);
+        return jitter(this.bombDropped, 90, this.rng);
       }
-      return jitter(this.bombDropped, 160, this.rng);
+      // fall through to normal ctGoal logic below
     }
     // Bomb planted: designated defuser routes exactly to the bomb; others orbit for cover.
     if (this.bombPlanted && this.bombPlantedAt) {

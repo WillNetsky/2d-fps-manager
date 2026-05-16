@@ -374,6 +374,22 @@ html, body {
 .live-badge.live::before { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 
+.speed-btn {
+  position: absolute;
+  top: 12px;
+  right: 90px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+.speed-btn:hover { background: rgba(40, 44, 52, 0.85); }
+
 .kill-feed {
   position: absolute;
   top: 56px;

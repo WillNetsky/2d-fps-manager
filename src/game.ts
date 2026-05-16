@@ -88,11 +88,24 @@ export async function initGame(app: HTMLElement) {
   liveBadge.className = "live-badge";
   canvasHost.appendChild(liveBadge);
   const setStatus = (mode: "live" | "replay" | "idle") => {
-    if (mode === "idle") { liveBadge.style.display = "none"; return; }
+    if (mode === "idle") { liveBadge.style.display = "none"; speedBtn.style.display = "none"; return; }
     liveBadge.style.display = "";
     liveBadge.className = `live-badge ${mode}`;
     liveBadge.textContent = mode === "live" ? "LIVE" : "REPLAY";
+    speedBtn.style.display = mode === "live" ? "" : "none";
   };
+
+  // Speed control (live sim only).
+  const SPEEDS = [1, 2, 4, 8];
+  const speedBtn = document.createElement("button");
+  speedBtn.className = "speed-btn";
+  speedBtn.textContent = "1×";
+  speedBtn.onclick = () => {
+    const idx = SPEEDS.indexOf(simSpeed);
+    simSpeed = SPEEDS[(idx + 1) % SPEEDS.length];
+    speedBtn.textContent = `${simSpeed}×`;
+  };
+  canvasHost.appendChild(speedBtn);
   setStatus("idle");
 
   // Kill feed in the canvas-host top-right.
@@ -140,6 +153,7 @@ export async function initGame(app: HTMLElement) {
 
   let sim: RoundSim | null = null;
   let simInterval: number | null = null;
+  let simSpeed = 1;
   let lastEventIdx = 0;
   let lastRotationIdx = 0;
 
@@ -251,7 +265,10 @@ export async function initGame(app: HTMLElement) {
 
   function tickRound() {
     if (!sim) return;
-    sim.tick();
+    // Run sim faster by stepping multiple sim ticks per render frame.
+    for (let s = 0; s < simSpeed && !sim.finished; s++) {
+      sim.tick();
+    }
 
     for (let i = lastEventIdx; i < sim.events.length; i++) {
       const e = sim.events[i];
