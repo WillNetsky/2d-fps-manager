@@ -68,6 +68,8 @@ export interface AgentSnapshot {
   helmet: boolean;
   alive: boolean;
   weapon: import("../domain/types.ts").WeaponId;
+  ammo: number;
+  reloadingUntil: number;
   moveMode: "walk" | "run";
 }
 
@@ -226,6 +228,7 @@ export class RoundSim {
       const focus = side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
       const sx = (spawn.x + 0.5) * this.map.tileSize;
       const sy = (spawn.y + 0.5) * this.map.tileSize;
+      const w = WEAPONS[loadout.weapon];
       return {
         playerId: p.id,
         side,
@@ -235,6 +238,9 @@ export class RoundSim {
         armor: loadout.armor ? 100 : 0,
         helmet: loadout.helmet,
         weapon: loadout.weapon,
+        ammo: w.magSize,
+        reserve: w.reserveAmmo,
+        reloadingUntil: 0,
         utility: [...loadout.utility],
         alive: true,
         lastShotAt: -9999,
@@ -321,7 +327,8 @@ export class RoundSim {
         playerId: a.playerId, side: a.side,
         pos: { x: a.pos.x, y: a.pos.y }, facing: a.facing,
         hp: a.hp, armor: a.armor, helmet: a.helmet, alive: a.alive,
-        weapon: a.weapon, moveMode: a.moveMode,
+        weapon: a.weapon, ammo: a.ammo, reloadingUntil: a.reloadingUntil,
+        moveMode: a.moveMode,
       })),
       smokes: this.smokes.map(s => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
       drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
@@ -392,11 +399,14 @@ export class RoundSim {
         const d = this.drops[i];
         if (dist(a.pos, d.pos) > 14) continue;
         if (WEAPONS[d.weapon].cost > WEAPONS[a.weapon].cost) {
-          // Drop their current gun in exchange so it's not lost to the round (and others can grab it).
           if (a.weapon !== "knife") {
             this.drops.push({ pos: { ...a.pos }, weapon: a.weapon });
           }
           a.weapon = d.weapon;
+          const newW = WEAPONS[d.weapon];
+          a.ammo = newW.magSize;
+          a.reserve = newW.reserveAmmo;
+          a.reloadingUntil = 0;
           this.drops.splice(i, 1);
           break;
         }
@@ -649,10 +659,28 @@ export class RoundSim {
   // ---- Combat ----
   private maybeShoot(a: Agent) {
     const player = this.players(a.playerId)!;
-    const reactionMs = 80 + Math.max(0, (100 - player.stats.reflexes)) * 4;
+    const weaponStats = WEAPONS[a.weapon];
 
+    // Complete any in-progress reload.
+    if (a.reloadingUntil > 0 && this.t >= a.reloadingUntil) {
+      const needed = weaponStats.magSize - a.ammo;
+      const taken = Math.min(needed, a.reserve);
+      a.ammo += taken;
+      a.reserve -= taken;
+      a.reloadingUntil = 0;
+    }
+    if (a.reloadingUntil > 0) return; // still reloading
+
+    const reactionMs = 80 + Math.max(0, (100 - player.stats.reflexes)) * 4;
     const enemy = this.acquireTarget(a, reactionMs);
-    if (!enemy) return;
+
+    if (!enemy) {
+      // Idle auto-reload: top off when no contact, mag low, reserve available.
+      if (a.weapon !== "knife" && a.ammo < weaponStats.magSize * 0.4 && a.reserve > 0) {
+        a.reloadingUntil = this.t + weaponStats.reloadMs;
+      }
+      return;
+    }
 
     // Refresh stance only when previous one has expired — avoids flapping.
     if (this.t >= a.stanceUntil) this.decideStance(a, enemy);
@@ -660,10 +688,18 @@ export class RoundSim {
     // Disengage: skip firing; the path is already moving us toward cover.
     if (a.stance === "disengage") return;
 
-    const weapon = WEAPONS[a.weapon];
+    const weapon = weaponStats;
     const cooldown = 1000 / weapon.fireRate;
     if (this.t - a.lastShotAt < cooldown) return;
+
+    // Forced reload when the mag is empty.
+    if (a.weapon !== "knife" && a.ammo <= 0) {
+      if (a.reserve > 0) a.reloadingUntil = this.t + weapon.reloadMs;
+      return;
+    }
+
     a.lastShotAt = this.t;
+    if (a.weapon !== "knife") a.ammo--;
     // Snap-aim to the target when actually firing; also redirect scanning to them.
     a.facing = Math.atan2(enemy.pos.y - a.pos.y, enemy.pos.x - a.pos.x);
     a.lookTarget = { x: enemy.pos.x, y: enemy.pos.y };

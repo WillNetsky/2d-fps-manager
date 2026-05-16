@@ -9,7 +9,8 @@ export interface SimView {
   agents: Array<{
     playerId: string; side: Side; pos: Vec2; facing: number;
     hp: number; armor: number; helmet: boolean; alive: boolean;
-    weapon: WeaponId; moveMode: "walk" | "run";
+    weapon: WeaponId; ammo: number; reloadingUntil: number;
+    moveMode: "walk" | "run";
   }>;
   smokes: Smoke[];
   drops: DroppedWeapon[];
@@ -228,8 +229,10 @@ export class Renderer {
       // name above
       name.x = a.pos.x; name.y = a.pos.y - 17;
       name.alpha = 1;
-      // weapon below
-      wlabel.text = weaponAbbrev(a.weapon);
+      // weapon below — show "reloading…" while in reload, normal abbrev otherwise
+      const reloading = a.reloadingUntil > sim.t;
+      wlabel.text = reloading ? "↻" : weaponAbbrev(a.weapon);
+      wlabel.style.fill = reloading ? 0xe3a857 : 0xffffff;
       wlabel.x = a.pos.x; wlabel.y = a.pos.y + 9;
       wlabel.alpha = 0.85;
     }

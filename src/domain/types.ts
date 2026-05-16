@@ -54,6 +54,9 @@ export interface Weapon {
   fireRate: number;    // shots per second
   accuracy: number;    // 0-1 base, modulated by player stats
   range: number;       // effective range in world units
+  magSize: number;     // bullets per magazine (0 = N/A)
+  reserveAmmo: number; // spare bullets at spawn
+  reloadMs: number;    // time to reload one full magazine
 }
 
 export type UtilityId = "smoke" | "flash" | "he" | "molotov";
@@ -128,6 +131,9 @@ export interface Agent {
   armor: number;
   helmet: boolean;      // halves HS damage; breaks after first HS taken
   weapon: WeaponId;
+  ammo: number;         // rounds in current magazine
+  reserve: number;      // rounds in reserve
+  reloadingUntil: number; // sim ms when reload completes (0 if not reloading)
   utility: UtilityId[];
   alive: boolean;
   lastShotAt: number;   // sim time (ms)

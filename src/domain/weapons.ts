@@ -1,11 +1,16 @@
 import type { Weapon, WeaponId, Utility, UtilityId } from "./types.ts";
 
 export const WEAPONS: Record<WeaponId, Weapon> = {
-  knife: { id: "knife", name: "Knife", cost: 0, damage: 50, fireRate: 2, accuracy: 0.9, range: 32 },
-  pistol: { id: "pistol", name: "Pistol", cost: 0, damage: 22, fireRate: 4, accuracy: 0.72, range: 320 },
-  smg: { id: "smg", name: "SMG", cost: 1250, damage: 26, fireRate: 10, accuracy: 0.7, range: 360 },
-  rifle: { id: "rifle", name: "Rifle", cost: 2700, damage: 32, fireRate: 8, accuracy: 0.82, range: 520 },
-  awp: { id: "awp", name: "AWP", cost: 4750, damage: 115, fireRate: 1, accuracy: 0.95, range: 640 },
+  knife:  { id: "knife",  name: "Knife",  cost: 0,    damage: 50,  fireRate: 2,  accuracy: 0.9,  range: 32,
+            magSize: 0,  reserveAmmo: 0,  reloadMs: 0 },
+  pistol: { id: "pistol", name: "Pistol", cost: 0,    damage: 22,  fireRate: 4,  accuracy: 0.72, range: 320,
+            magSize: 15, reserveAmmo: 60, reloadMs: 1500 },
+  smg:    { id: "smg",    name: "SMG",    cost: 1250, damage: 26,  fireRate: 10, accuracy: 0.7,  range: 360,
+            magSize: 30, reserveAmmo: 90, reloadMs: 2500 },
+  rifle:  { id: "rifle",  name: "Rifle",  cost: 2700, damage: 32,  fireRate: 8,  accuracy: 0.82, range: 520,
+            magSize: 30, reserveAmmo: 90, reloadMs: 3000 },
+  awp:    { id: "awp",    name: "AWP",    cost: 4750, damage: 115, fireRate: 1,  accuracy: 0.95, range: 640,
+            magSize: 5,  reserveAmmo: 20, reloadMs: 3700 },
 };
 
 export const UTILITIES: Record<UtilityId, Utility> = {
