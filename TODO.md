@@ -20,15 +20,15 @@
 ## Match Logic
 - [ ] CT side needs to be able to choose strategies, and place players
 - [x] MR12 rules, switch sides! it goes 13 straight CT right now
-- [ ] Per-player banks instead of a single team bankroll (each player's kills/wins/losses accrue to their own money; coach decides who buys what)
-- [ ] Drop guns for teammates — buy-phase action (give your gun to a teammate before round) and mid-round (agents pick up nearby teammates' drops); especially for AWP redistribution and upgrade hand-me-downs
+- [x] Per-player banks instead of a single team bankroll (each player's kills/wins/losses accrue to their own money; coach decides who buys what)
+- [x] Drop guns for teammates — buy-phase action (give your gun to a teammate before round) and mid-round (agents pick up nearby teammates' drops); especially for AWP redistribution and upgrade hand-me-downs
 - [x] Bomb drops on carrier death (yellow aura; T retrieves, CT guards)
 
 ## Match Display
-- [ ] MVPs for each round
-- [ ] Kill display in the top right
-- [ ] Timeline kill lines color coded by team
-- [ ] "Replay" displayed on top when its replaying "Live" when live
+- [x] MVPs for each round
+- [x] Kill display in the top right
+- [x] Timeline kill lines color coded by team
+- [x] "Replay" displayed on top when its replaying "Live" when live
 
 ## Map Editor
 - [x] Abillity to create new maps, edit saved maps

@@ -193,6 +193,11 @@ export interface Agent {
   blindedUntil: number;
   // Fire avoidance — when set, agent is fleeing a burning area, can't think/shoot.
   fleeingFireUntil: number;
+  // Peek-and-retreat: oscillate between cover and a brief exposed step.
+  coverPos: Vec2 | null;
+  peekPos: Vec2 | null;
+  peekState: "cover" | "peek" | "none";
+  peekUntil: number;
 }
 
 export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";

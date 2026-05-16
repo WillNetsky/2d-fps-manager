@@ -304,6 +304,10 @@ export class RoundSim {
         stanceUntil: -Infinity,
         blindedUntil: -Infinity,
         fleeingFireUntil: -Infinity,
+        coverPos: null,
+        peekPos: null,
+        peekState: "none",
+        peekUntil: 0,
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
@@ -415,6 +419,7 @@ export class RoundSim {
     this.updateIntel();
 
     for (const a of this.agents) if (a.alive) this.think(a);
+    for (const a of this.agents) if (a.alive) this.tickPeek(a);
     for (const a of this.agents) if (a.alive) this.move(a);
     this.checkPickups();
     for (const a of this.agents) if (a.alive) this.updateLook(a);
@@ -835,7 +840,13 @@ export class RoundSim {
     if (!needNew) return;
 
     const goal = this.pickGoal(a);
-    if (goal) this.setGoal(a, goal);
+    if (goal) {
+      // Picking a new high-level goal invalidates the peek anchor.
+      a.coverPos = null;
+      a.peekPos = null;
+      a.peekState = "none";
+      this.setGoal(a, goal);
+    }
 
     // Adaptability + gameSense drive how often agents reconsider.
     const player = this.players(a.playerId)!;
@@ -993,6 +1004,96 @@ export class RoundSim {
 
   private siteByLetter(letter: "A" | "B") {
     return this.map.bombsites.find(s => s.id === letter)!;
+  }
+
+  // ---- Peek and retreat ----
+  // When an agent has reached their hold position and is not in combat, look
+  // for nearby cover and oscillate between a covered tile and an exposed
+  // (peek) tile one step toward the threat direction.
+  private tickPeek(a: Agent) {
+    if (this.t < a.fleeingFireUntil) return;
+    if (this.t < a.blindedUntil) return;
+    if (a.stance === "rush" || a.stance === "disengage") return;
+    if (this.bombPlanted) return; // post-plant: be present, not peeking
+    // Mid-move toward a non-peek goal: don't disturb it.
+    if (a.path.length > 0 && a.peekState === "none") return;
+
+    if (a.peekState === "none") {
+      if (a.path.length > 0) return;
+      if (!this.setupPeek(a)) return;
+    }
+
+    if (this.t < a.peekUntil) return;
+    const player = this.players(a.playerId)!;
+    if (a.peekState === "cover" && a.peekPos) {
+      a.peekState = "peek";
+      const timing = player.stats.timing;
+      a.peekUntil = this.t + 350 + timing * 4;
+      this.setGoalForPeek(a, a.peekPos);
+    } else if (a.peekState === "peek" && a.coverPos) {
+      a.peekState = "cover";
+      const patience = player.stats.patience;
+      a.peekUntil = this.t + 800 + (100 - patience) * 10 + this.rng() * 400;
+      this.setGoalForPeek(a, a.coverPos);
+    }
+  }
+
+  private setGoalForPeek(a: Agent, goal: Vec2) {
+    // Same as setGoal but doesn't clobber peek state.
+    const path = findPath(this.map, a.pos, goal);
+    if (path === null) return;
+    a.target = goal;
+    a.path = path;
+    a.holdAngle = null;
+  }
+
+  private setupPeek(a: Agent): boolean {
+    const ts = this.map.tileSize;
+    const ax = Math.floor(a.pos.x / ts);
+    const ay = Math.floor(a.pos.y / ts);
+    const focus = a.side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
+    const tx = focus.x - a.pos.x, ty = focus.y - a.pos.y;
+    // Cardinal-snap the threat direction.
+    let dx = 0, dy = 0;
+    if (Math.abs(tx) >= Math.abs(ty)) dx = tx > 0 ? 1 : -1;
+    else dy = ty > 0 ? 1 : -1;
+
+    // Search outward for a covered floor tile within a small radius.
+    for (let r = 0; r <= 2; r++) {
+      for (let oy = -r; oy <= r; oy++) {
+        for (let ox = -r; ox <= r; ox++) {
+          if (Math.max(Math.abs(ox), Math.abs(oy)) !== r) continue;
+          const cx = ax + ox, cy = ay + oy;
+          if (!this.inBoundsTile(cx, cy) || this.wallAt(cx, cy)) continue;
+          // Cover requires a wall directly in the threat direction.
+          if (!this.wallAt(cx + dx, cy + dy)) continue;
+          // Try both perpendicular peek options; require the peek tile to be
+          // floor AND have an open threat-direction so it's actually exposed.
+          for (const [px, py] of [[-dy, dx], [dy, -dx]] as const) {
+            const pxT = cx + px, pyT = cy + py;
+            if (!this.inBoundsTile(pxT, pyT) || this.wallAt(pxT, pyT)) continue;
+            if (this.wallAt(pxT + dx, pyT + dy)) continue;
+            a.coverPos = this.tileCenter({ x: cx, y: cy });
+            a.peekPos = this.tileCenter({ x: pxT, y: pyT });
+            a.peekState = "cover";
+            const patience = this.players(a.playerId)!.stats.patience;
+            a.peekUntil = this.t + 600 + (100 - patience) * 8 + this.rng() * 400;
+            // If we're not already at the cover tile, route there first.
+            if (ox !== 0 || oy !== 0) this.setGoalForPeek(a, a.coverPos);
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private inBoundsTile(tx: number, ty: number): boolean {
+    return tx >= 0 && ty >= 0 && tx < this.map.width && ty < this.map.height;
+  }
+  private wallAt(tx: number, ty: number): boolean {
+    if (!this.inBoundsTile(tx, ty)) return true;
+    return this.map.walls[ty * this.map.width + tx];
   }
 
   private setGoal(a: Agent, goal: Vec2) {
