@@ -198,6 +198,10 @@ export interface Agent {
   peekPos: Vec2 | null;
   peekState: "cover" | "peek" | "none";
   peekUntil: number;
+  // Saving: agent has decided this round is unwinnable and wants to keep
+  // their gun for the next round. Avoids engagements, hides far from contact.
+  saving: boolean;
+  reassessSaveAt: number;
 }
 
 export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";

@@ -1,7 +1,7 @@
 import type {
   Agent, DroppedWeapon, Flash, GameMap, GrenadeInFlight, GrenadeKind, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, UtilityId, Vec2,
 } from "../domain/types.ts";
-import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
+import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, HELMET_UPGRADE_COST, VEST_COST, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
 import { analyzeMap, type Choke, type MapAnalysis } from "./mapAnalysis.ts";
 
@@ -308,6 +308,8 @@ export class RoundSim {
         peekPos: null,
         peekState: "none",
         peekUntil: 0,
+        saving: false,
+        reassessSaveAt: 0,
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
@@ -835,6 +837,7 @@ export class RoundSim {
   // ---- AI ----
   private think(a: Agent) {
     if (this.t < a.fleeingFireUntil) return;
+    this.maybeSaveDecision(a);
     const arrived = a.target && a.path.length === 0 && dist(a.pos, a.target) < 6;
     const needNew = !a.target || arrived || a.dirty || this.t >= a.nextThinkAt;
     if (!needNew) return;
@@ -864,6 +867,8 @@ export class RoundSim {
 
   private decideMoveMode(a: Agent) {
     const player = this.players(a.playerId)!;
+    // Saving: stealth no matter what.
+    if (a.saving) { a.moveMode = "walk"; return; }
     // Lurkers sneak by default.
     if (player.role === "lurker") { a.moveMode = "walk"; return; }
     // Carrier wants to move fast to plant; only walks near the actual site.
@@ -882,8 +887,86 @@ export class RoundSim {
   }
 
   private pickGoal(a: Agent): Vec2 | null {
+    if (a.saving) return this.saveSpotFor(a);
     if (a.side === "T") return this.tGoal(a);
     return this.ctGoal(a);
+  }
+
+  // ---- Saving (keep your gun for next round) ----
+  private maybeSaveDecision(a: Agent) {
+    if (this.t < a.reassessSaveAt) return;
+    a.reassessSaveAt = this.t + 1200 + this.rng() * 800;
+
+    // Anchors that must not save.
+    if (a.playerId === this.bombCarrier) {
+      if (a.saving) { a.saving = false; a.dirty = true; }
+      return;
+    }
+    if (this.bombPlanted && a.side === "CT" && this.lastAliveOnSide("CT")) {
+      if (a.saving) { a.saving = false; a.dirty = true; }
+      return;
+    }
+
+    const player = this.players(a.playerId)!;
+    const winChance = this.teamWinChance(a.side);
+
+    if (a.saving) {
+      // Bail out of save mode if situation recovers.
+      if (winChance > 0.55) { a.saving = false; a.dirty = true; }
+      return;
+    }
+
+    const w = WEAPONS[a.weapon];
+    const gunValue = w.cost
+      + (a.armor > 0 ? VEST_COST : 0)
+      + (a.helmet ? HELMET_UPGRADE_COST : 0);
+    if (gunValue < 1500) return; // pistol + light kit — not worth saving
+
+    // Higher composure → recognizes loss earlier and saves;
+    // aggressive players push instead; large score deficits encourage forcing.
+    let threshold = 0.30;
+    threshold += (player.stats.composure - 50) / 250;
+    threshold -= (player.stats.aggression - 50) / 250;
+    threshold += (gunValue - 2000) / 9000;
+    threshold -= Math.max(0, this.scoreDeficit(a.side) - 2) * 0.04;
+
+    if (winChance < threshold) {
+      a.saving = true;
+      a.dirty = true;
+    }
+  }
+
+  private teamWinChance(side: Side): number {
+    const us = this.agents.filter(a => a.alive && a.side === side).length;
+    const them = this.agents.filter(a => a.alive && a.side !== side).length;
+    if (us === 0) return 0;
+    if (them === 0) return 1;
+    // Weight slightly by total HP so a wounded team is rated lower.
+    const hpUs = this.agents.filter(a => a.alive && a.side === side).reduce((s, a) => s + a.hp, 0);
+    const hpThem = this.agents.filter(a => a.alive && a.side !== side).reduce((s, a) => s + a.hp, 0);
+    const headcount = us / (us + them);
+    const hpRatio = hpUs / Math.max(1, hpUs + hpThem);
+    let r = headcount * 0.7 + hpRatio * 0.3;
+    if (this.bombPlanted) {
+      if (side === "T") r = r * 0.55 + 0.4;
+      else              r = r * 0.85;
+    }
+    return r;
+  }
+
+  private saveSpotFor(a: Agent): Vec2 {
+    const spawns = a.side === "CT" ? this.map.ctSpawns : this.map.tSpawns;
+    const ref = this.bombPlanted && this.bombPlantedAt
+      ? this.bombPlantedAt
+      : this.contactZoneFor(a);
+    let best = spawns[0];
+    let bestD = -Infinity;
+    for (const s of spawns) {
+      const w = this.tileCenter(s);
+      const d = dist(w, ref);
+      if (d > bestD) { bestD = d; best = s; }
+    }
+    return this.tileCenter(best);
   }
 
   private tGoal(a: Agent): Vec2 | null {
@@ -1376,6 +1459,14 @@ export class RoundSim {
     const player = this.players(a.playerId)!;
     const stats = player.stats;
     const isLastAlive = this.lastAliveOnSide(a.side);
+
+    // Saving: refuse engagement, just keep moving toward the hide spot.
+    if (a.saving) {
+      a.stance = "disengage";
+      a.stanceUntil = this.t + 2000;
+      this.setGoal(a, this.saveSpotFor(a));
+      return;
+    }
 
     // Count visible enemies.
     let visibleEnemies = 0;
