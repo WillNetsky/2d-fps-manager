@@ -28,8 +28,8 @@ export class BuyPanel {
 
   setRound(n: number) {
     this.roundNumber = n;
-    // Force pistols on round 1.
-    if (n === 1) {
+    // Force pistols on the first round of each half.
+    if (n === 1 || n === 13) {
       for (const p of this.team.players) {
         const l = this.team.loadouts[p.id];
         if (l.weapon !== "pistol") l.weapon = "pistol";
@@ -127,7 +127,7 @@ export class BuyPanel {
       buy.className = "buy-grid";
 
       // Weapons row
-      const pistolRound = this.roundNumber === 1;
+      const pistolRound = this.roundNumber === 1 || this.roundNumber === 13;
       buy.appendChild(this.makeRow("Weapon", WEAPON_OPTIONS.map(w => ({
         label: WEAPONS[w].name,
         cost: WEAPONS[w].cost,

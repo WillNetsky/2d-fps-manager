@@ -1,7 +1,7 @@
 ### TODO
 
 ## Overall
-- [ ] Git this project
+- [x] Git this project
 
 ## Simulation
 - [ ] Add headshots, kevlar+helmet
@@ -17,7 +17,7 @@
 
 ## Match Logic
 - [ ] CT side needs to be able to choose strategies, and place players
-- [ ] MR12 rules, switch sides! it goes 13 straight CT right now
+- [x] MR12 rules, switch sides! it goes 13 straight CT right now
 
 ## Match Display
 - [ ] MVPs for each round

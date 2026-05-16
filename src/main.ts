@@ -7,14 +7,13 @@ import { Renderer } from "./render/renderer.ts";
 import { BuyPanel } from "./ui/buyPanel.ts";
 import { TeamPanel } from "./ui/teamPanel.ts";
 import { Timeline } from "./ui/timeline.ts";
-import type { Player } from "./domain/types.ts";
+import type { Player, Team } from "./domain/types.ts";
 
 setSeed(Date.now());
 
 const app = document.getElementById("app")!;
 app.innerHTML = "";
 
-// Layout: left panel (buy), center stage (sim), right panel (opponent + log)
 const leftCol = document.createElement("div");
 leftCol.style.display = "contents";
 const stage = document.createElement("div");
@@ -25,13 +24,24 @@ app.appendChild(leftCol);
 app.appendChild(stage);
 app.appendChild(rightCol);
 
-// Game state
-const map = makeMap();
-const ct = makeTeam("home", "Northwind GG", "CT");
-const t = makeTeam("away", "Crimson Dust", "T");
+// --- MR12 config ---
+const STARTING_BANK = 3000;
+const HALFTIME_ROUND = 12;
+const WIN_THRESHOLD = 13;
+const MAX_ROUNDS = 24;
+const isPistolRound = (n: number) => n === 1 || n === HALFTIME_ROUND + 1;
 
-// Equip pistols for round 1 by default
-for (const team of [ct, t]) for (const p of team.players) {
+// --- Teams ---
+const map = makeMap();
+const home = makeTeam("home", "Northwind GG", "CT");
+const away = makeTeam("away", "Crimson Dust", "T");
+
+let homeIsCt = true;
+const ctSideTeam = (): Team => homeIsCt ? home : away;
+const tSideTeam = (): Team => homeIsCt ? away : home;
+
+// Initial loadouts
+for (const team of [home, away]) for (const p of team.players) {
   team.loadouts[p.id] = {
     weapon: "pistol", utility: [], armor: false,
     keptWeapon: null, keptArmor: false,
@@ -39,13 +49,12 @@ for (const team of [ct, t]) for (const p of team.players) {
 }
 
 const playerLookup = (id: string): Player | undefined =>
-  ct.players.find(p => p.id === id) ?? t.players.find(p => p.id === id);
+  home.players.find(p => p.id === id) ?? away.players.find(p => p.id === id);
 
 let lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
 let roundNumber = 1;
-const MAX_ROUNDS = 16;
 
-// Stage layout: canvas host on top, timeline below.
+// --- Stage / renderer ---
 const canvasHost = document.createElement("div");
 canvasHost.className = "canvas-host";
 stage.appendChild(canvasHost);
@@ -59,23 +68,23 @@ renderer.setNameFor((id) => {
   return m ? m[1] : p.name.split(" ")[0];
 });
 
-const buyPanel = new BuyPanel(leftCol, ct, { onStart: startRound });
-const ctLivePanel = new TeamPanel(leftCol, ct);
-ctLivePanel.el.style.display = "none";
-const oppPanel = new TeamPanel(rightCol, t);
-oppPanel.log(`Match start — ${ct.name} (CT) vs ${t.name} (T)`);
+// --- Panels ---
+const buyPanel = new BuyPanel(leftCol, home, { onStart: startRound });
+const homeLivePanel = new TeamPanel(leftCol, home);
+homeLivePanel.el.style.display = "none";
+const oppPanel = new TeamPanel(rightCol, away);
+oppPanel.log(`Match start — ${home.name} (CT) vs ${away.name} (T)`);
 
-// T buys at the start of every buy phase so the user can see their loadout while choosing their own.
-aiBuyForT();
+aiBuyForAway();
 buyPanel.setRound(roundNumber);
 oppPanel.refresh();
 
-// Scoreboard HUD (overlays the canvas)
+// --- HUD ---
 const hud = document.createElement("div");
 hud.className = "hud";
 canvasHost.appendChild(hud);
 
-// Replay timeline below the canvas
+// --- Replay ---
 const replayPlayer = new ReplayPlayer();
 const timeline = new Timeline(stage, {
   onSeek: (idx) => { replayPlayer.seek(idx); },
@@ -89,8 +98,15 @@ replayPlayer.setOnFrame((view, idx) => {
   renderer.syncAgents(view);
   timeline.setIndex(idx);
 });
+
 function paintHud() {
-  hud.innerHTML = `<span class="ct">${ct.name} ${ct.roundsWon}</span><span class="sep">— Round ${roundNumber} —</span><span class="t">${t.roundsWon} ${t.name}</span>`;
+  const half = roundNumber <= HALFTIME_ROUND ? 1 : 2;
+  const homeSide = homeIsCt ? "CT" : "T";
+  const awaySide = homeIsCt ? "T" : "CT";
+  hud.innerHTML =
+    `<span class="ct">${home.name} (${homeSide}) ${home.roundsWon}</span>` +
+    `<span class="sep">— R${roundNumber} H${half} —</span>` +
+    `<span class="t">${away.roundsWon} (${awaySide}) ${away.name}</span>`;
 }
 paintHud();
 
@@ -99,29 +115,27 @@ let simInterval: number | null = null;
 let lastEventIdx = 0;
 let lastRotationIdx = 0;
 
-function aiBuyForT() {
+function aiBuyForAway() {
   type WId = import("./domain/types.ts").WeaponId;
   type UId = import("./domain/types.ts").UtilityId;
-  const WPRICE: Record<WId, number> = { knife: 0, pistol: 200, smg: 1250, rifle: 2700, awp: 4750 };
+  const WPRICE: Record<WId, number> = { knife: 0, pistol: 0, smg: 1250, rifle: 2700, awp: 4750 };
   const ARMOR = 1000;
   const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
 
-  let budget = t.money;
-  const players = t.players;
+  let budget = away.money;
+  const players = away.players;
 
   for (let i = 0; i < players.length; i++) {
     const p = players[i];
-    const existing = t.loadouts[p.id];
+    const existing = away.loadouts[p.id];
     const kept = existing.keptWeapon;
     const keptArmor = existing.keptArmor;
     const remaining = players.length - i;
     const share = Math.floor(budget / remaining);
     const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
 
-    // Start from kept weapon; consider upgrades.
     let weapon: WId = kept ?? "pistol";
-    // Pistol round: weapons locked to pistol.
-    if (roundNumber === 1) {
+    if (isPistolRound(roundNumber)) {
       weapon = "pistol";
     } else {
       if (p.role === "awper" && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
@@ -138,35 +152,52 @@ function aiBuyForT() {
     const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
     if (share - spent >= UPRICE[want]) { util.push(want); spent += UPRICE[want]; }
 
-    t.loadouts[p.id] = {
+    away.loadouts[p.id] = {
       weapon, utility: util, armor,
       keptWeapon: kept, keptArmor,
     };
     budget -= spent;
   }
 
-  t.money = Math.max(0, budget);
+  away.money = Math.max(0, budget);
+}
+
+function halftimeSwap() {
+  homeIsCt = !homeIsCt;
+  home.side = homeIsCt ? "CT" : "T";
+  away.side = homeIsCt ? "T" : "CT";
+  // Economy reset across halves
+  home.money = STARTING_BANK;
+  away.money = STARTING_BANK;
+  for (const team of [home, away]) {
+    for (const p of team.players) {
+      team.loadouts[p.id] = {
+        weapon: "pistol", utility: [], armor: false,
+        keptWeapon: null, keptArmor: false,
+      };
+    }
+  }
+  lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
+  oppPanel.log(`=== HALFTIME · sides switched ===`);
 }
 
 function startRound() {
   buyPanel.refresh();
 
-  // Stop any replay from previous round
   replayPlayer.pause();
   timeline.el.style.display = "none";
   renderer.clearTransient();
 
-  sim = new RoundSim(ct, t, map, Math.floor(Math.random() * 1e9));
+  sim = new RoundSim(ctSideTeam(), tSideTeam(), map, Math.floor(Math.random() * 1e9));
   lastEventIdx = 0;
   lastRotationIdx = 0;
   oppPanel.clearLog();
   oppPanel.log(`— Round ${roundNumber} begins —`);
   oppPanel.log(`T strategy: ${sim.tStrategy} · CT setup: ${sim.ctSetup.A}A/${sim.ctSetup.B}B/${sim.ctSetup.mid}M`);
 
-  // Swap left panel: buy → live team status
   buyPanel.el.style.display = "none";
-  ctLivePanel.el.style.display = "";
-  ctLivePanel.refresh();
+  homeLivePanel.el.style.display = "";
+  homeLivePanel.refresh();
 
   simInterval = window.setInterval(tickRound, 50);
 }
@@ -175,7 +206,6 @@ function tickRound() {
   if (!sim) return;
   sim.tick();
 
-  // Process new events
   for (let i = lastEventIdx; i < sim.events.length; i++) {
     const e = sim.events[i];
     if (e.kind === "kill") {
@@ -195,7 +225,6 @@ function tickRound() {
   }
   lastEventIdx = sim.events.length;
 
-  // Drain rotations
   for (let i = lastRotationIdx; i < sim.rotationLog.length; i++) {
     const r = sim.rotationLog[i];
     const p = playerLookup(r.agentId);
@@ -205,19 +234,20 @@ function tickRound() {
 
   renderer.syncAgents(sim);
   oppPanel.setAgents(sim.agents);
-  ctLivePanel.setAgents(sim.agents);
+  homeLivePanel.setAgents(sim.agents);
 
   if (sim.finished && sim.result) {
     if (simInterval) clearInterval(simInterval);
     simInterval = null;
     const r = sim.result;
-    if (r.winningSide === "CT") ct.roundsWon++; else t.roundsWon++;
-    lossStreaks = applyRoundReward(ct, t, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
-    oppPanel.log(`Round ${roundNumber} → ${r.winningSide} wins (${r.outcome})`);
+    const winningTeam = r.winningSide === "CT" ? ctSideTeam() : tSideTeam();
+    winningTeam.roundsWon++;
+    lossStreaks = applyRoundReward(ctSideTeam(), tSideTeam(), r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
+    oppPanel.log(`Round ${roundNumber} → ${winningTeam.name} wins (${r.outcome})`);
 
-    // Carry over: alive players keep their weapon + armor for free next round.
+    // Carry over kept weapons/armor
     for (const ag of sim.agents) {
-      const team = ct.players.some(p => p.id === ag.playerId) ? ct : t;
+      const team = home.players.some(p => p.id === ag.playerId) ? home : away;
       if (ag.alive) {
         team.loadouts[ag.playerId] = {
           weapon: ag.weapon,
@@ -234,32 +264,40 @@ function tickRound() {
       }
     }
 
-    // Mood drift based on outcome
-    for (const p of ct.players) p.mood = clamp(p.mood + (r.winningSide === "CT" ? 3 : -4), 0, 100);
-    for (const p of t.players) p.mood = clamp(p.mood + (r.winningSide === "T" ? 3 : -4), 0, 100);
+    // Mood drift
+    for (const p of winningTeam.players) p.mood = clamp(p.mood + 3, 0, 100);
+    const losingTeam = winningTeam === home ? away : home;
+    for (const p of losingTeam.players) p.mood = clamp(p.mood - 4, 0, 100);
 
     roundNumber++;
+
+    // Halftime swap before any UI for the next round.
+    if (roundNumber === HALFTIME_ROUND + 1) {
+      halftimeSwap();
+    }
+
     paintHud();
 
-    const winThreshold = Math.floor(MAX_ROUNDS / 2) + 1;
-    if (ct.roundsWon >= winThreshold || t.roundsWon >= winThreshold || roundNumber > MAX_ROUNDS) {
-      oppPanel.log(`=== MATCH OVER === ${ct.roundsWon > t.roundsWon ? ct.name : t.name} wins`);
-      ctLivePanel.el.style.display = "none";
+    const matchOver = home.roundsWon >= WIN_THRESHOLD || away.roundsWon >= WIN_THRESHOLD || roundNumber > MAX_ROUNDS;
+    if (matchOver) {
+      const winner = home.roundsWon > away.roundsWon ? home.name
+        : away.roundsWon > home.roundsWon ? away.name
+        : "Draw";
+      oppPanel.log(`=== MATCH OVER · ${winner} ===`);
+      homeLivePanel.el.style.display = "none";
       buyPanel.el.style.display = "";
       buyPanel.refresh();
       return;
     }
 
-    // Hand the just-finished round to the replay player.
     const finishedSim = sim;
     setTimeout(() => {
-      ctLivePanel.el.style.display = "none";
+      homeLivePanel.el.style.display = "none";
       buyPanel.el.style.display = "";
-      aiBuyForT();
+      aiBuyForAway();
       buyPanel.setRound(roundNumber);
       oppPanel.refresh();
 
-      // Show the timeline and auto-play the replay of the round we just watched.
       if (finishedSim && finishedSim.snapshots.length > 0) {
         renderer.clearTransient();
         replayPlayer.load({
