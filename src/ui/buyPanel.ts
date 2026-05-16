@@ -56,6 +56,20 @@ export class BuyPanel {
     this.render();
   }
 
+  private giveWeapon(from: Player, to: Player) {
+    const fromL = this.team.loadouts[from.id];
+    const toL = this.team.loadouts[to.id];
+    const gun = fromL.keptWeapon;
+    if (!gun) return;
+    // Giver downgrades to pistol; loses kept gun.
+    fromL.keptWeapon = null;
+    if (fromL.weapon === gun) fromL.weapon = "pistol";
+    // Recipient gains kept gun (free) and selects it as their loadout.
+    toL.keptWeapon = gun;
+    toL.weapon = gun;
+    this.render();
+  }
+
   private render() {
     let totalCost = 0;
     let totalBank = 0;
@@ -196,6 +210,37 @@ export class BuyPanel {
           }),
         },
       ]));
+
+      // Give weapon to teammate — coach action.
+      // Only meaningful when this player has a kept gun better than pistol.
+      const keptW = l.keptWeapon;
+      if (keptW && WEAPONS[keptW].cost > 0 && !pistolRound) {
+        const giveRow = document.createElement("div");
+        giveRow.className = "buy-toggle-row";
+        const lab = document.createElement("div");
+        lab.className = "buy-toggle-label";
+        lab.textContent = "Give";
+        giveRow.appendChild(lab);
+        const btns = document.createElement("div");
+        btns.className = "buy-toggle-btns";
+        for (const t of this.team.players) {
+          if (t.id === p.id) continue;
+          const tl = this.team.loadouts[t.id];
+          const tKeptCost = tl.keptWeapon ? WEAPONS[tl.keptWeapon].cost : 0;
+          const recipientHasBetter = tKeptCost >= WEAPONS[keptW].cost;
+          const b = document.createElement("button");
+          const classes = ["buy-btn"];
+          if (recipientHasBetter) classes.push("locked");
+          b.className = classes.join(" ");
+          const short = t.name.match(/"([^"]+)"/)?.[1] ?? t.name.split(" ")[0];
+          b.innerHTML = `<span class="b-name">→ ${short}</span><span class="b-cost">${WEAPONS[keptW].name}</span>`;
+          b.disabled = recipientHasBetter;
+          if (!recipientHasBetter) b.onclick = () => this.giveWeapon(p, t);
+          btns.appendChild(b);
+        }
+        giveRow.appendChild(btns);
+        buy.appendChild(giveRow);
+      }
 
       row.appendChild(buy);
       this.el.appendChild(row);
