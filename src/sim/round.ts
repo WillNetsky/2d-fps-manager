@@ -3,6 +3,7 @@ import type {
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
+import { analyzeMap, type Choke, type MapAnalysis } from "./mapAnalysis.ts";
 
 const TICK_MS = 50;
 const ROUND_TIME_MS = 90_000;
@@ -142,6 +143,7 @@ export class RoundSim {
   private players: PlayerLookup;
   private ctThreatFocus: Vec2;
   private tThreatFocus: Vec2;
+  private mapAnalysis: MapAnalysis;
   private tradeMarks: TradeMark[] = [];
   private smokeQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
@@ -180,6 +182,7 @@ export class RoundSim {
     // Each side's "hold" direction is toward the opposite spawn centroid.
     this.ctThreatFocus = spawnCentroid(map.tSpawns, map.tileSize);
     this.tThreatFocus = spawnCentroid(map.ctSpawns, map.tileSize);
+    this.mapAnalysis = analyzeMap(map);
     this.tStrategy = this.pickTStrategy();
     this.ctSetup = this.pickCtSetup();
     this.spawnAgents();
@@ -300,36 +303,91 @@ export class RoundSim {
     this.tSide.players.forEach((p, i) => this.agents.push(make(p, "T", this.map.tSpawns[i % this.map.tSpawns.length])));
   }
 
+  // Compute path from agent to assigned site center, then find chokes along it.
+  // Returns chokes with skill-modulated quality preference.
+  private chokesOnAgentPath(a: Agent): Choke[] {
+    const sitePos = this.agentSiteWorldPos(a);
+    if (!sitePos) return [];
+    const path = findPath(this.map, a.pos, sitePos);
+    if (!path) return [];
+    const pathTiles = new Set<string>();
+    const ts = this.map.tileSize;
+    pathTiles.add(`${Math.floor(a.pos.x / ts)},${Math.floor(a.pos.y / ts)}`);
+    for (const wp of path) pathTiles.add(`${Math.floor(wp.x / ts)},${Math.floor(wp.y / ts)}`);
+    return this.mapAnalysis.chokes.filter(c => pathTiles.has(`${c.tile.x},${c.tile.y}`));
+  }
+
+  private agentSiteWorldPos(a: Agent): Vec2 | null {
+    if (a.assignedSite === "mid") {
+      return {
+        x: this.map.width * this.map.tileSize * 0.5,
+        y: this.map.height * this.map.tileSize * 0.5,
+      };
+    }
+    const site = this.map.bombsites.find(s => s.id === a.assignedSite);
+    if (!site) return null;
+    return this.tileCenter(site.center);
+  }
+
+  private tileCenter(tile: Vec2): Vec2 {
+    return { x: (tile.x + 0.5) * this.map.tileSize, y: (tile.y + 0.5) * this.map.tileSize };
+  }
+
+  // For an agent, choose the most useful choke on their path.
+  // Strategy: pick the choke closest to enemy spawn (most forward / aggressive).
+  // High smokeLineups picks optimally; low picks worse choices.
+  private pickChokeForAgent(a: Agent, mode: "in" | "enemy-side", usedTiles: Set<string>): Choke | null {
+    const candidates = this.chokesOnAgentPath(a).filter(c => !usedTiles.has(`${c.tile.x},${c.tile.y}`));
+    if (!candidates.length) return null;
+    const player = this.players(a.playerId)!;
+    const skill = (player.stats.smokeLineups + player.stats.utility) / 200; // 0..1
+    // High-skill players pick the most-forward choke. Low-skill randomize.
+    if (this.rng() > skill) {
+      return candidates[Math.floor(this.rng() * candidates.length)];
+    }
+    const W = this.map.width;
+    const enemyDist = a.side === "T" ? this.mapAnalysis.ctDist : this.mapAnalysis.tDist;
+    let best = candidates[0];
+    let bestD = enemyDist[best.tile.y * W + best.tile.x];
+    for (const c of candidates) {
+      const d = enemyDist[c.tile.y * W + c.tile.x];
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    void mode;
+    return best;
+  }
+
+  // Like pickChokeForAgent but returns the actual throw position (in choke or its enemy-side neighbor).
+  private pickChokeTargetForAgent(
+    a: Agent,
+    mode: "in" | "enemy-side",
+    usedTiles: Set<string>,
+  ): { choke: Choke; spot: Vec2 } | null {
+    const choke = this.pickChokeForAgent(a, mode, usedTiles);
+    if (!choke) return null;
+    if (mode === "in") return { choke, spot: this.tileCenter(choke.tile) };
+    // enemy-side: throw past the choke into the enemy's holding area
+    const enemyNeighbor = a.side === "T" ? choke.ctSide : choke.tSide;
+    const target = enemyNeighbor ?? choke.tile;
+    return { choke, spot: this.tileCenter(target) };
+  }
+
   private assignBombCarrier() {
     const ts = this.agents.filter(a => a.side === "T");
     this.bombCarrier = ts[Math.floor(this.rng() * ts.length)].playerId;
   }
 
   private scheduleSmokes() {
-    // Each agent with a smoke throws to the nearest unassigned same-side smoke spot, 1-3s after round start.
-    const usedSpots = new Set<number>();
-    const sortedSpots = (side: Side) => this.map.smokeSpots
-      .map((sp, idx) => ({ sp, idx }))
-      .filter(({ sp }) => sp.side === side);
-
+    const usedTiles = new Set<string>();
     for (const a of this.agents) {
       if (!a.utility.includes("smoke")) continue;
-      const spots = sortedSpots(a.side);
-      if (!spots.length) continue;
-      // Pick nearest unused
-      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
-      for (const { sp, idx } of spots) {
-        if (usedSpots.has(idx)) continue;
-        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
-        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
-        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
-        if (!best || d < best.d) best = { sp, idx, d };
-      }
-      if (!best) continue;
-      usedSpots.add(best.idx);
+      const choke = this.pickChokeForAgent(a, "in", usedTiles);
+      if (!choke) continue;
+      const spot = this.tileCenter(choke.tile);
+      usedTiles.add(`${choke.tile.x},${choke.tile.y}`);
       this.smokeQueue.push({
         thrower: a.playerId,
-        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        spot,
         throwAt: 1000 + this.rng() * 2000,
       });
     }
@@ -443,33 +501,20 @@ export class RoundSim {
 
   // ---- Flashes ----
   private scheduleFlashes() {
-    const usedSpots = new Set<number>();
-    const sortedSpots = (side: Side) => this.map.flashSpots
-      .map((sp, idx) => ({ sp, idx }))
-      .filter(({ sp }) => sp.side === side);
+    const usedTiles = new Set<string>();
     for (const a of this.agents) {
       if (!a.utility.includes("flash")) continue;
-      const spots = sortedSpots(a.side);
-      if (!spots.length) continue;
-      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
-      for (const { sp, idx } of spots) {
-        if (usedSpots.has(idx)) continue;
-        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
-        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
-        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
-        if (!best || d < best.d) best = { sp, idx, d };
-      }
-      if (!best) continue;
-      usedSpots.add(best.idx);
-      // Aggressive players throw earlier (pre-push); cautious throw later.
+      const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
+      if (!target) continue;
       const player = this.players(a.playerId)!;
-      const earliness = (player.stats.aggression - 50) / 100; // -0.5..0.5
+      const earliness = (player.stats.aggression - 50) / 100;
       const baseThrow = 4500 - earliness * 2000;
       this.flashQueue.push({
         thrower: a.playerId,
-        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        spot: target.spot,
         throwAt: baseThrow + this.rng() * 1500,
       });
+      usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
 
@@ -522,32 +567,19 @@ export class RoundSim {
 
   // ---- Molotovs ----
   private scheduleMolotovs() {
-    const usedSpots = new Set<number>();
-    const sortedSpots = (side: Side) => this.map.molotovSpots
-      .map((sp, idx) => ({ sp, idx }))
-      .filter(({ sp }) => sp.side === side);
+    const usedTiles = new Set<string>();
     for (const a of this.agents) {
       if (!a.utility.includes("molotov")) continue;
-      const spots = sortedSpots(a.side);
-      if (!spots.length) continue;
-      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
-      for (const { sp, idx } of spots) {
-        if (usedSpots.has(idx)) continue;
-        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
-        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
-        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
-        if (!best || d < best.d) best = { sp, idx, d };
-      }
-      if (!best) continue;
-      usedSpots.add(best.idx);
+      const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
+      if (!target) continue;
       const player = this.players(a.playerId)!;
-      // molotovs lob early as area denial; utility rating speeds it
       const baseThrow = 5000 - (player.stats.utility - 50) * 30;
       this.molotovQueue.push({
         thrower: a.playerId,
-        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        spot: target.spot,
         throwAt: baseThrow + this.rng() * 1500,
       });
+      usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
 
@@ -622,31 +654,19 @@ export class RoundSim {
 
   // ---- HE grenades ----
   private scheduleHEs() {
-    const usedSpots = new Set<number>();
-    const sortedSpots = (side: Side) => this.map.heSpots
-      .map((sp, idx) => ({ sp, idx }))
-      .filter(({ sp }) => sp.side === side);
+    const usedTiles = new Set<string>();
     for (const a of this.agents) {
       if (!a.utility.includes("he")) continue;
-      const spots = sortedSpots(a.side);
-      if (!spots.length) continue;
-      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
-      for (const { sp, idx } of spots) {
-        if (usedSpots.has(idx)) continue;
-        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
-        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
-        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
-        if (!best || d < best.d) best = { sp, idx, d };
-      }
-      if (!best) continue;
-      usedSpots.add(best.idx);
+      const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
+      if (!target) continue;
       const player = this.players(a.playerId)!;
       const baseThrow = 4000 - (player.stats.aggression - 50) * 20;
       this.heQueue.push({
         thrower: a.playerId,
-        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        spot: target.spot,
         throwAt: baseThrow + this.rng() * 1500,
       });
+      usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
 

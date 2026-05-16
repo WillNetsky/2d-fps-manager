@@ -1,15 +1,10 @@
-import type { GameMap, Side, Vec2 } from "../domain/types.ts";
+import type { GameMap, Vec2 } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
 
-type UtilKind = "smoke" | "flash" | "molotov" | "he";
 type Tool =
   | "wall" | "floor"
   | "ct-spawn" | "t-spawn"
   | "site-a" | "site-b"
-  | "smoke-t" | "smoke-ct"
-  | "flash-t" | "flash-ct"
-  | "molotov-t" | "molotov-ct"
-  | "he-t" | "he-ct"
   | "eraser";
 
 const CUSTOM_MAP_KEY = "2d-fps-manager-custom-map";
@@ -61,24 +56,6 @@ export class MapEditor {
         ],
       },
       {
-        name: "T Utility",
-        tools: [
-          { id: "smoke-t", label: "T Smoke", color: "#bcc1c9" },
-          { id: "flash-t", label: "T Flash", color: "#fff8df" },
-          { id: "molotov-t", label: "T Molotov", color: "#ff6b1f" },
-          { id: "he-t", label: "T HE", color: "#5e646f" },
-        ],
-      },
-      {
-        name: "CT Utility",
-        tools: [
-          { id: "smoke-ct", label: "CT Smoke", color: "#bcc1c9" },
-          { id: "flash-ct", label: "CT Flash", color: "#fff8df" },
-          { id: "molotov-ct", label: "CT Molotov", color: "#ff8040" },
-          { id: "he-ct", label: "CT HE", color: "#5e646f" },
-        ],
-      },
-      {
         name: "Other",
         tools: [{ id: "eraser", label: "Eraser", color: "#d9534f" }],
       },
@@ -126,8 +103,9 @@ export class MapEditor {
     const help = document.createElement("div");
     help.className = "editor-help";
     help.innerHTML = `
-      <p><strong>Tip:</strong> Click & drag walls/floor to paint. Click util/spawn tools toggle a single tile.</p>
+      <p><strong>Tip:</strong> Click & drag walls/floor to paint. Spawn/site tools toggle a single tile.</p>
       <p>Min: ≥5 CT spawns, ≥5 T spawns, A & B bombsites.</p>
+      <p>Util throw spots are now auto-detected from the map's chokepoints — no need to place them.</p>
     `;
     sidebar.appendChild(help);
 
@@ -214,11 +192,7 @@ export class MapEditor {
       case "eraser":
         this.map.ctSpawns = this.map.ctSpawns.filter(s => !(s.x === tile.x && s.y === tile.y));
         this.map.tSpawns = this.map.tSpawns.filter(s => !(s.x === tile.x && s.y === tile.y));
-        this.map.smokeSpots = this.map.smokeSpots.filter(s => !(s.tile.x === tile.x && s.tile.y === tile.y));
-        this.map.flashSpots = this.map.flashSpots.filter(s => !(s.tile.x === tile.x && s.tile.y === tile.y));
-        this.map.molotovSpots = this.map.molotovSpots.filter(s => !(s.tile.x === tile.x && s.tile.y === tile.y));
-        this.map.heSpots = this.map.heSpots.filter(s => !(s.tile.x === tile.x && s.tile.y === tile.y));
-        // Don't erase bombsites with eraser — too easy to fat-finger; user must use site-a/site-b to move.
+        // Don't erase bombsites with eraser — use site tools to relocate them.
         return;
       case "ct-spawn":
         toggleTileInList(this.map.ctSpawns, tile);
@@ -238,16 +212,6 @@ export class MapEditor {
         else this.map.bombsites.push({ id: "B", center: tile, radius: 2.5 });
         return;
       }
-      default: {
-        const [kind, sideKey] = this.currentTool.split("-") as [UtilKind, "t" | "ct"];
-        const side: Side = sideKey === "t" ? "T" : "CT";
-        const listKey = `${kind}Spots` as "smokeSpots" | "flashSpots" | "molotovSpots" | "heSpots";
-        const list = this.map[listKey];
-        const existing = list.findIndex(s => s.tile.x === tile.x && s.tile.y === tile.y && s.side === side);
-        if (existing >= 0) list.splice(existing, 1);
-        else list.push({ side, tile });
-        return;
-      }
     }
   }
 
@@ -256,10 +220,6 @@ export class MapEditor {
     this.map.ctSpawns = [];
     this.map.tSpawns = [];
     this.map.bombsites = [];
-    this.map.smokeSpots = [];
-    this.map.flashSpots = [];
-    this.map.molotovSpots = [];
-    this.map.heSpots = [];
   }
 
   private playMap() {
@@ -318,12 +278,6 @@ export class MapEditor {
     // Spawn zones
     this.drawZone(this.map.ctSpawns, "#4a90e2", "CT");
     this.drawZone(this.map.tSpawns, "#c9692e", "T");
-
-    // Util spots
-    for (const s of this.map.smokeSpots) this.drawUtil(s.tile, s.side, "S", "#bcc1c9");
-    for (const s of this.map.flashSpots) this.drawUtil(s.tile, s.side, "F", "#fff8df");
-    for (const s of this.map.molotovSpots) this.drawUtil(s.tile, s.side, "M", "#ff6b1f");
-    for (const s of this.map.heSpots) this.drawUtil(s.tile, s.side, "H", "#9aa0aa");
   }
 
   private drawZone(tiles: Vec2[], color: string, label: string) {
@@ -344,24 +298,6 @@ export class MapEditor {
     }
   }
 
-  private drawUtil(tile: Vec2, side: Side, label: string, color: string) {
-    const ctx = this.ctx;
-    const ts = this.map.tileSize;
-    const cx = (tile.x + 0.5) * ts;
-    const cy = (tile.y + 0.5) * ts;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = side === "T" ? "#c9692e" : "#4a90e2";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = "#0a0c10";
-    ctx.font = "bold 9px ui-monospace, monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, cx, cy);
-  }
 }
 
 function toggleTileInList(list: Vec2[], tile: Vec2) {

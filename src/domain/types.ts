@@ -151,11 +151,6 @@ export interface GameMap {
   ctSpawns: Vec2[];
   tSpawns: Vec2[];
   bombsites: { id: "A" | "B"; center: Vec2; radius: number }[];
-  // Default smoke spots agents can throw to (tile coords). Index by side.
-  smokeSpots: { side: Side; tile: Vec2 }[];
-  flashSpots: { side: Side; tile: Vec2 }[];
-  molotovSpots: { side: Side; tile: Vec2 }[];
-  heSpots: { side: Side; tile: Vec2 }[];
 }
 
 export interface Vec2 { x: number; y: number; }
