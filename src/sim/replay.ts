@@ -87,6 +87,7 @@ export class ReplayPlayer {
       hes: snap.hes,
       tickHEs: snap.tickHEs,
       smokeHoles: snap.smokeHoles,
+      grenadeFlights: snap.grenadeFlights,
       drops: snap.drops,
       bombPlanted: snap.bombPlanted,
       bombPlantedAt: snap.bombPlantedAt,

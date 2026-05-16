@@ -29,7 +29,9 @@
 - [ ] "Replay" displayed on top when its replaying "Live" when live
 
 ## Map Editor
-- [ ] Abillity to create new maps, edit saved maps
+- [x] Abillity to create new maps, edit saved maps
+- [ ] Load saved maps
+- [ ] Save as new map
 
 ## Issues
 - [ ] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing

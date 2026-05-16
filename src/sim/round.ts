@@ -1,5 +1,5 @@
 import type {
-  Agent, DroppedWeapon, Flash, GameMap, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, Vec2,
+  Agent, DroppedWeapon, Flash, GameMap, GrenadeInFlight, GrenadeKind, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, UtilityId, Vec2,
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
@@ -30,6 +30,9 @@ const HE_RADIUS = 120;
 const HE_MAX_DAMAGE = 80;
 const HE_HOLE_RADIUS = 70;
 const HE_HOLE_DURATION_MS = 1500;
+
+const GRENADE_FLIGHT_MS = 600;
+const GRENADE_NOISE_PER_SKILL_GAP = 1.5; // px per (100 - skill)
 
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
@@ -102,6 +105,7 @@ export interface RoundSnapshot {
   hes: HE[];
   tickHEs: { pos: Vec2; side: Side }[];
   smokeHoles: SmokeHole[];
+  grenadeFlights: GrenadeInFlight[];
   drops: import("../domain/types.ts").DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -119,6 +123,7 @@ export class RoundSim {
   hes: HE[] = [];             // in-flight HE grenades
   tickHEs: { pos: Vec2; side: Side }[] = []; // detonation events this tick
   smokeHoles: SmokeHole[] = []; // brief LOS gaps punched through smoke by HEs
+  grenadeFlights: GrenadeInFlight[] = []; // flying grenades between throw and land
   drops: DroppedWeapon[] = [];
   t = 0;
   events: SimEvent[] = [];
@@ -400,6 +405,7 @@ export class RoundSim {
     this.tickFlashes.length = 0;
     this.tickHEs.length = 0;
 
+    this.tickGrenadeFlights();
     this.tickSmokes();
     this.tickFlashesUpdate();
     this.tickMolotovsUpdate();
@@ -439,6 +445,12 @@ export class RoundSim {
       hes: this.hes.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, detonatesAt: h.detonatesAt, side: h.side, thrower: h.thrower })),
       tickHEs: this.tickHEs.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, side: h.side })),
       smokeHoles: this.smokeHoles.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, radius: h.radius, expiresAt: h.expiresAt })),
+      grenadeFlights: this.grenadeFlights.map(g => ({
+        kind: g.kind, thrower: g.thrower, side: g.side,
+        start: { x: g.start.x, y: g.start.y },
+        landing: { x: g.landing.x, y: g.landing.y },
+        startedAt: g.startedAt, landsAt: g.landsAt,
+      })),
       drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
@@ -519,23 +531,6 @@ export class RoundSim {
   }
 
   private tickFlashesUpdate() {
-    // Deploy queued (throws)
-    for (let i = this.flashQueue.length - 1; i >= 0; i--) {
-      const q = this.flashQueue[i];
-      if (this.t >= q.throwAt) {
-        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
-        if (thrower) {
-          this.flashes.push({
-            pos: { ...q.spot },
-            detonatesAt: this.t + FLASH_FUSE_MS,
-            side: thrower.side,
-          });
-          const idx = thrower.utility.indexOf("flash");
-          if (idx >= 0) thrower.utility.splice(idx, 1);
-        }
-        this.flashQueue.splice(i, 1);
-      }
-    }
     // Detonate
     for (let i = this.flashes.length - 1; i >= 0; i--) {
       const f = this.flashes[i];
@@ -584,28 +579,6 @@ export class RoundSim {
   }
 
   private tickMolotovsUpdate() {
-    // Deploy queued
-    for (let i = this.molotovQueue.length - 1; i >= 0; i--) {
-      const q = this.molotovQueue[i];
-      if (this.t >= q.throwAt) {
-        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
-        if (thrower) {
-          // The grenade has a fuse before the fire starts. Treat fuse as part of the molotov's lifetime
-          // by setting an "ignite" time = throw + fuse. Simpler: skip animation, instant fire on detonation.
-          this.molotovs.push({
-            pos: { ...q.spot },
-            radius: MOLOTOV_RADIUS_WORLD,
-            expiresAt: this.t + MOLOTOV_FUSE_MS + MOLOTOV_DURATION_MS,
-            side: thrower.side,
-            thrower: thrower.playerId,
-          });
-          const idx = thrower.utility.indexOf("molotov");
-          if (idx >= 0) thrower.utility.splice(idx, 1);
-        }
-        this.molotovQueue.splice(i, 1);
-      }
-    }
-
     // Smoke extinguish: any smoke whose center is inside the fire's reach kills the fire.
     for (let i = this.molotovs.length - 1; i >= 0; i--) {
       const m = this.molotovs[i];
@@ -671,22 +644,6 @@ export class RoundSim {
   }
 
   private tickHEsUpdate() {
-    // Deploy queued
-    for (let i = this.heQueue.length - 1; i >= 0; i--) {
-      const q = this.heQueue[i];
-      if (this.t >= q.throwAt) {
-        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
-        if (thrower) {
-          this.hes.push({
-            pos: { ...q.spot }, detonatesAt: this.t + HE_FUSE_MS,
-            side: thrower.side, thrower: thrower.playerId,
-          });
-          const idx = thrower.utility.indexOf("he");
-          if (idx >= 0) thrower.utility.splice(idx, 1);
-        }
-        this.heQueue.splice(i, 1);
-      }
-    }
     // Detonate
     for (let i = this.hes.length - 1; i >= 0; i--) {
       const he = this.hes[i];
@@ -766,27 +723,103 @@ export class RoundSim {
 
   // ---- Smokes ----
   private tickSmokes() {
-    // Deploy queued smokes
-    for (let i = this.smokeQueue.length - 1; i >= 0; i--) {
-      const q = this.smokeQueue[i];
-      if (this.t >= q.throwAt) {
+    this.smokes = this.smokes.filter(s => s.expiresAt > this.t);
+  }
+
+  // ---- Grenade flight pipeline ----
+  // Handles all four util types' transitions: queue → in-flight → spawn-at-landing.
+  // Each flight has skill-based noise applied to the landing relative to the intended target.
+  private tickGrenadeFlights() {
+    const launchFromQueue = <Q extends { thrower: string; spot: Vec2; throwAt: number }>(
+      queue: Q[],
+      kind: GrenadeKind,
+      utilName: UtilityId,
+    ) => {
+      for (let i = queue.length - 1; i >= 0; i--) {
+        const q = queue[i];
+        if (this.t < q.throwAt) continue;
         const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
         if (thrower) {
-          this.smokes.push({
-            pos: { ...q.spot },
-            radius: SMOKE_RADIUS_WORLD,
-            expiresAt: this.t + SMOKE_DURATION_MS,
-            side: thrower.side,
+          const noise = this.grenadeNoise(q.thrower, kind);
+          const landing = this.applyNoise(q.spot, noise);
+          this.grenadeFlights.push({
+            kind, thrower: q.thrower, side: thrower.side,
+            start: { x: thrower.pos.x, y: thrower.pos.y },
+            landing,
+            startedAt: this.t,
+            landsAt: this.t + GRENADE_FLIGHT_MS,
           });
-          // Consume the smoke from inventory
-          const idx = thrower.utility.indexOf("smoke");
+          const idx = thrower.utility.indexOf(utilName);
           if (idx >= 0) thrower.utility.splice(idx, 1);
         }
-        this.smokeQueue.splice(i, 1);
+        queue.splice(i, 1);
       }
+    };
+    launchFromQueue(this.smokeQueue, "smoke", "smoke");
+    launchFromQueue(this.flashQueue, "flash", "flash");
+    launchFromQueue(this.molotovQueue, "molotov", "molotov");
+    launchFromQueue(this.heQueue, "he", "he");
+
+    // In-flight → spawn at landing.
+    for (let i = this.grenadeFlights.length - 1; i >= 0; i--) {
+      const g = this.grenadeFlights[i];
+      if (this.t < g.landsAt) continue;
+      switch (g.kind) {
+        case "smoke":
+          this.smokes.push({
+            pos: { x: g.landing.x, y: g.landing.y },
+            radius: SMOKE_RADIUS_WORLD,
+            expiresAt: this.t + SMOKE_DURATION_MS,
+            side: g.side,
+          });
+          break;
+        case "flash":
+          this.flashes.push({
+            pos: { x: g.landing.x, y: g.landing.y },
+            detonatesAt: this.t + FLASH_FUSE_MS,
+            side: g.side,
+          });
+          break;
+        case "molotov":
+          this.molotovs.push({
+            pos: { x: g.landing.x, y: g.landing.y },
+            radius: MOLOTOV_RADIUS_WORLD,
+            expiresAt: this.t + MOLOTOV_FUSE_MS + MOLOTOV_DURATION_MS,
+            side: g.side,
+            thrower: g.thrower,
+          });
+          break;
+        case "he":
+          this.hes.push({
+            pos: { x: g.landing.x, y: g.landing.y },
+            detonatesAt: this.t + HE_FUSE_MS,
+            side: g.side,
+            thrower: g.thrower,
+          });
+          break;
+      }
+      this.grenadeFlights.splice(i, 1);
     }
-    // Expire smokes
-    this.smokes = this.smokes.filter(s => s.expiresAt > this.t);
+  }
+
+  private grenadeNoise(playerId: string, kind: GrenadeKind): number {
+    const player = this.players(playerId);
+    if (!player) return 0;
+    let skill: number;
+    switch (kind) {
+      case "smoke":   skill = player.stats.smokeLineups; break;
+      case "flash":   skill = player.stats.flashTiming; break;
+      case "molotov": skill = player.stats.molotovUse; break;
+      case "he":      skill = player.stats.utility; break;
+    }
+    return Math.max(0, 100 - skill) * GRENADE_NOISE_PER_SKILL_GAP;
+  }
+
+  private applyNoise(target: Vec2, noise: number): Vec2 {
+    if (noise <= 0) return { x: target.x, y: target.y };
+    const angle = this.rng() * Math.PI * 2;
+    const d = this.rng() * noise;
+    return { x: target.x + Math.cos(angle) * d, y: target.y + Math.sin(angle) * d };
   }
 
   // ---- AI ----

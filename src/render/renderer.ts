@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Text } from "pixi.js";
-import type { DroppedWeapon, Flash, GameMap, HE, Molotov, Side, Smoke, SmokeHole, Vec2, WeaponId } from "../domain/types.ts";
+import type { DroppedWeapon, Flash, GameMap, GrenadeInFlight, HE, Molotov, Side, Smoke, SmokeHole, Vec2, WeaponId } from "../domain/types.ts";
 import type { TickShot } from "../sim/round.ts";
 
 // Subset of state the renderer reads — satisfied by both live RoundSim and a replay snapshot.
@@ -20,6 +20,7 @@ export interface SimView {
   hes: HE[];
   tickHEs: { pos: Vec2; side: Side }[];
   smokeHoles: SmokeHole[];
+  grenadeFlights: GrenadeInFlight[];
   drops: DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -276,6 +277,22 @@ export class Renderer {
     }
     this.smokeLayer.addChild(smokeGfx);
 
+    // Grenades in flight — arc body + ground shadow.
+    const flightGfx = new Graphics();
+    for (const g of sim.grenadeFlights) {
+      const phase = Math.max(0, Math.min(1, (sim.t - g.startedAt) / (g.landsAt - g.startedAt)));
+      const gx = g.start.x + (g.landing.x - g.start.x) * phase;
+      const gy = g.start.y + (g.landing.y - g.start.y) * phase;
+      const arc = Math.sin(phase * Math.PI) * 28;
+      // Shadow on the ground
+      flightGfx.circle(gx, gy, 2.5).fill({ color: 0x000000, alpha: 0.35 });
+      // Body lifted by the arc
+      flightGfx.circle(gx, gy - arc, 3.5)
+        .fill({ color: grenadeColor(g.kind) })
+        .stroke({ color: 0x111418, width: 0.6, alpha: 0.8 });
+    }
+    this.smokeLayer.addChild(flightGfx);
+
     // Active molotov fires — flickering orange/red layered circles.
     const fireGfx = new Graphics();
     const fireNow = performance.now();
@@ -420,5 +437,15 @@ function weaponAbbrev(w: string): string {
     case "rifle":  return "R";
     case "awp":    return "AWP";
     default:       return "";
+  }
+}
+
+function grenadeColor(kind: string): number {
+  switch (kind) {
+    case "smoke":   return 0xcfd3da;
+    case "flash":   return 0xfff8df;
+    case "molotov": return 0xff6b1f;
+    case "he":      return 0x6b707b;
+    default:        return 0xffffff;
   }
 }

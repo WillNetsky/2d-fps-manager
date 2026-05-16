@@ -225,6 +225,18 @@ export interface HE {
   thrower: string;
 }
 
+export type GrenadeKind = "smoke" | "flash" | "molotov" | "he";
+
+export interface GrenadeInFlight {
+  kind: GrenadeKind;
+  thrower: string;
+  side: Side;
+  start: Vec2;
+  landing: Vec2;
+  startedAt: number;
+  landsAt: number;
+}
+
 export interface SmokeHole {
   pos: Vec2;
   radius: number;
