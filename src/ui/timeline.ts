@@ -1,9 +1,11 @@
-import type { SimEvent } from "../domain/types.ts";
+import type { SimEvent, Side } from "../domain/types.ts";
 
 export interface TimelineHandlers {
   onSeek(tickIdx: number): void;
   onPlayPauseToggle(): void;
 }
+
+export type SideOf = (playerId: string) => Side | null;
 
 export class Timeline {
   el: HTMLElement;
@@ -20,6 +22,7 @@ export class Timeline {
   private playing = false;
   private events: SimEvent[] = [];
   private tickMs = 50;
+  private sideOf: SideOf = () => null;
 
   constructor(parent: HTMLElement, private handlers: TimelineHandlers) {
     this.el = document.createElement("div");
@@ -83,10 +86,11 @@ export class Timeline {
     window.addEventListener("mouseup", () => { dragging = false; });
   }
 
-  setReplay(totalTicks: number, events: SimEvent[], tickMs: number, title?: string) {
+  setReplay(totalTicks: number, events: SimEvent[], tickMs: number, title?: string, sideOf?: SideOf) {
     this.totalTicks = totalTicks;
     this.events = events;
     this.tickMs = tickMs;
+    if (sideOf) this.sideOf = sideOf;
     if (title) this.titleEl.textContent = title;
     this.renderMarkers();
     this.setIndex(0);
@@ -113,7 +117,13 @@ export class Timeline {
     for (const e of this.events) {
       const ratio = totalMs > 0 ? e.t / totalMs : 0;
       const m = document.createElement("div");
-      m.className = `replay-marker ${e.kind}`;
+      let extra = "";
+      if (e.kind === "kill") {
+        const side = this.sideOf(e.killer);
+        if (side === "CT") extra = " kill-ct";
+        else if (side === "T") extra = " kill-t";
+      }
+      m.className = `replay-marker ${e.kind}${extra}`;
       m.style.left = `${Math.min(100, Math.max(0, ratio * 100))}%`;
       m.title = this.eventLabel(e);
       this.markersEl.appendChild(m);

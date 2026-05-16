@@ -6,8 +6,9 @@ import { Renderer } from "./render/renderer.ts";
 import { BuyPanel } from "./ui/buyPanel.ts";
 import { TeamPanel } from "./ui/teamPanel.ts";
 import { Timeline } from "./ui/timeline.ts";
+import { KillFeed } from "./ui/killFeed.ts";
 import { loadCustomMap } from "./editor/mapEditor.ts";
-import type { Player, Team } from "./domain/types.ts";
+import type { Player, Side, Team } from "./domain/types.ts";
 
 export async function initGame(app: HTMLElement) {
   setSeed(Date.now());
@@ -80,6 +81,27 @@ export async function initGame(app: HTMLElement) {
   const hud = document.createElement("div");
   hud.className = "hud";
   canvasHost.appendChild(hud);
+
+  // Live / Replay status badge.
+  const liveBadge = document.createElement("div");
+  liveBadge.className = "live-badge";
+  canvasHost.appendChild(liveBadge);
+  const setStatus = (mode: "live" | "replay" | "idle") => {
+    if (mode === "idle") { liveBadge.style.display = "none"; return; }
+    liveBadge.style.display = "";
+    liveBadge.className = `live-badge ${mode}`;
+    liveBadge.textContent = mode === "live" ? "LIVE" : "REPLAY";
+  };
+  setStatus("idle");
+
+  // Kill feed in the canvas-host top-right.
+  const killFeed = new KillFeed(canvasHost);
+
+  const sideOfPlayer = (id: string): Side | null => {
+    if (home.players.some(p => p.id === id)) return home.side;
+    if (away.players.some(p => p.id === id)) return away.side;
+    return null;
+  };
 
   // Small editor link in the HUD corner.
   const editorLink = document.createElement("a");
@@ -199,6 +221,8 @@ export async function initGame(app: HTMLElement) {
     replayPlayer.pause();
     timeline.el.style.display = "none";
     renderer.clearTransient();
+    killFeed.clear();
+    setStatus("live");
 
     sim = new RoundSim(ctSideTeam(), tSideTeam(), map, Math.floor(Math.random() * 1e9));
     lastEventIdx = 0;
@@ -225,6 +249,15 @@ export async function initGame(app: HTMLElement) {
         const v = playerLookup(e.victim);
         const hs = e.headshot ? " 🎯" : "";
         oppPanel.log(`${shortName(k)} [${e.weapon}]${hs} → ${shortName(v)}`);
+        const kSide = sideOfPlayer(e.killer);
+        const vSide = sideOfPlayer(e.victim);
+        if (kSide && vSide) {
+          killFeed.push(
+            { name: shortName(k), side: kSide },
+            { name: shortName(v), side: vSide },
+            e.weapon, e.headshot,
+          );
+        }
       } else if (e.kind === "bomb-plant") {
         const planter = playerLookup(e.planter);
         const site = nearestSiteLetter(sim);
@@ -257,6 +290,30 @@ export async function initGame(app: HTMLElement) {
       winningTeam.roundsWon++;
       lossStreaks = applyRoundReward(ctSideTeam(), tSideTeam(), r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
       oppPanel.log(`Round ${roundNumber} → ${winningTeam.name} wins (${r.outcome})`);
+
+      // MVP: most kills this round on the winning team.
+      const roundKillsByPlayer = new Map<string, number>();
+      for (const ev of r.events) {
+        if (ev.kind !== "kill") continue;
+        if (!winningTeam.players.some(pp => pp.id === ev.killer)) continue;
+        roundKillsByPlayer.set(ev.killer, (roundKillsByPlayer.get(ev.killer) ?? 0) + 1);
+      }
+      let mvpId: string | null = null;
+      let mvpKills = 0;
+      for (const [id, k] of roundKillsByPlayer) {
+        if (k > mvpKills) { mvpKills = k; mvpId = id; }
+      }
+      if (mvpId) {
+        const mvp = playerLookup(mvpId);
+        oppPanel.log(`🏆 MVP: ${shortName(mvp)} — ${mvpKills} kill${mvpKills === 1 ? "" : "s"}`);
+      } else {
+        // Bomb plant/defuse wins with no kills — credit the bomb actor.
+        const bombEvt = r.events.find(e => e.kind === "bomb-plant" || e.kind === "bomb-defuse");
+        if (bombEvt && (bombEvt.kind === "bomb-plant" || bombEvt.kind === "bomb-defuse")) {
+          const id = bombEvt.kind === "bomb-plant" ? bombEvt.planter : bombEvt.defuser;
+          oppPanel.log(`🏆 MVP: ${shortName(playerLookup(id))} — ${bombEvt.kind === "bomb-plant" ? "plant" : "defuse"}`);
+        }
+      }
 
       for (const ag of sim.agents) {
         const team = home.players.some(p => p.id === ag.playerId) ? home : away;
@@ -295,6 +352,7 @@ export async function initGame(app: HTMLElement) {
           : away.roundsWon > home.roundsWon ? away.name
           : "Draw";
         oppPanel.log(`=== MATCH OVER · ${winner} ===`);
+        setStatus("idle");
         homeLivePanel.el.style.display = "none";
         buyPanel.el.style.display = "";
         buyPanel.refresh();
@@ -317,10 +375,12 @@ export async function initGame(app: HTMLElement) {
             events: finishedSim.events,
             tickMs: 50,
           });
-          timeline.setReplay(finishedSim.snapshots.length, finishedSim.events, 50, `REPLAY · round ${roundNumber - 1}`);
+          timeline.setReplay(finishedSim.snapshots.length, finishedSim.events, 50, `REPLAY · round ${roundNumber - 1}`, sideOfPlayer);
           timeline.el.style.display = "";
           replayPlayer.play();
           timeline.setPlaying(true);
+          setStatus("replay");
+          killFeed.clear();
         }
       }, 1200);
     }

@@ -312,6 +312,8 @@ html, body {
   opacity: 0.85;
 }
 .replay-marker.kill { background: var(--bad); }
+.replay-marker.kill.kill-ct { background: var(--ct); }
+.replay-marker.kill.kill-t { background: var(--t); }
 .replay-marker.bomb-plant { background: var(--accent); }
 .replay-marker.bomb-defuse { background: var(--ct); }
 .replay-marker.bomb-detonate { background: var(--bad); width: 3px; }
@@ -344,6 +346,57 @@ html, body {
 .hud .ct { color: var(--ct); }
 .hud .t { color: var(--t); }
 .hud .sep { color: var(--muted); }
+
+.live-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.live-badge.live { color: var(--bad); }
+.live-badge.replay { color: var(--accent); }
+.live-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.live-badge.live::before { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+.kill-feed {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 5;
+}
+.kf-row {
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: opacity 0.4s linear;
+}
+.kf-weapon { color: var(--muted); }
+.kf-ct { color: var(--ct); font-weight: 600; }
+.kf-t  { color: var(--t);  font-weight: 600; }
 
 .player-card {
   background: var(--panel-2);
