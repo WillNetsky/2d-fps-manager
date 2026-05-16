@@ -7,6 +7,7 @@ const UTILITY_OPTIONS: UtilityId[] = ["smoke", "flash", "he", "molotov"];
 
 export interface BuyPanelHandlers {
   onStart: () => void;
+  onSimNow: () => void;
 }
 
 type View = "ratings" | "match";
@@ -302,16 +303,32 @@ export class BuyPanel {
       this.el.appendChild(row);
     }
 
-    const btn = document.createElement("button");
-    btn.className = "primary";
-    btn.textContent = anyOver ? "Over budget" : "Start round";
-    btn.disabled = anyOver;
-    btn.onclick = () => {
+    const btnRow = document.createElement("div");
+    btnRow.className = "start-row";
+    const startBtn = document.createElement("button");
+    startBtn.className = "primary";
+    startBtn.textContent = anyOver ? "Over budget" : "Start round";
+    startBtn.disabled = anyOver;
+    startBtn.onclick = () => {
       if (anyOver) return;
       for (const p of this.team.players) p.money -= this.playerCost(p);
       this.handlers.onStart();
     };
-    this.el.appendChild(btn);
+    btnRow.appendChild(startBtn);
+
+    const simBtn = document.createElement("button");
+    simBtn.className = "secondary";
+    simBtn.textContent = "Sim round";
+    simBtn.disabled = anyOver;
+    simBtn.title = "Run the next round headless, then watch the replay";
+    simBtn.onclick = () => {
+      if (anyOver) return;
+      for (const p of this.team.players) p.money -= this.playerCost(p);
+      this.handlers.onSimNow();
+    };
+    btnRow.appendChild(simBtn);
+
+    this.el.appendChild(btnRow);
   }
 
   private makeRow(

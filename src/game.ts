@@ -68,7 +68,10 @@ export async function initGame(app: HTMLElement) {
   });
 
   // --- Panels ---
-  const buyPanel = new BuyPanel(leftCol, home, { onStart: startRound });
+  const buyPanel = new BuyPanel(leftCol, home, {
+    onStart: startRound,
+    onSimNow: () => { startRound(); skipToEnd(); },
+  });
   const homeLivePanel = new TeamPanel(leftCol, home);
   homeLivePanel.el.style.display = "none";
   const oppPanel = new TeamPanel(rightCol, away);
@@ -88,11 +91,17 @@ export async function initGame(app: HTMLElement) {
   liveBadge.className = "live-badge";
   canvasHost.appendChild(liveBadge);
   const setStatus = (mode: "live" | "replay" | "idle") => {
-    if (mode === "idle") { liveBadge.style.display = "none"; speedBtn.style.display = "none"; return; }
+    if (mode === "idle") {
+      liveBadge.style.display = "none";
+      speedBtn.style.display = "none";
+      skipBtn.style.display = "none";
+      return;
+    }
     liveBadge.style.display = "";
     liveBadge.className = `live-badge ${mode}`;
     liveBadge.textContent = mode === "live" ? "LIVE" : "REPLAY";
     speedBtn.style.display = mode === "live" ? "" : "none";
+    skipBtn.style.display = mode === "live" ? "" : "none";
   };
 
   // Speed control (live sim only).
@@ -106,7 +115,24 @@ export async function initGame(app: HTMLElement) {
     speedBtn.textContent = `${simSpeed}×`;
   };
   canvasHost.appendChild(speedBtn);
+
+  const skipBtn = document.createElement("button");
+  skipBtn.className = "speed-btn skip-btn";
+  skipBtn.textContent = "⏭ End";
+  skipBtn.title = "Fast-forward to end of round";
+  skipBtn.onclick = () => skipToEnd();
+  canvasHost.appendChild(skipBtn);
+
   setStatus("idle");
+
+  function skipToEnd() {
+    if (!sim || sim.finished) return;
+    // Bound the loop so a runaway round can't hang the tab.
+    let safety = 100000;
+    while (sim && !sim.finished && safety-- > 0) {
+      tickRound();
+    }
+  }
 
   // Kill feed in the canvas-host top-right.
   const killFeed = new KillFeed(canvasHost);

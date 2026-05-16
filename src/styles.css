@@ -389,6 +389,23 @@ html, body {
   font-family: inherit;
 }
 .speed-btn:hover { background: rgba(40, 44, 52, 0.85); }
+.skip-btn { right: 150px; }
+
+.start-row { display: flex; gap: 8px; }
+.start-row .primary { flex: 2; }
+.start-row .secondary {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: inherit;
+}
+.start-row .secondary:hover:not(:disabled) { background: var(--line); }
+.start-row .secondary:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .kill-feed {
   position: absolute;
