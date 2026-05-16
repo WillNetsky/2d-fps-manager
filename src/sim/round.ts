@@ -1,5 +1,5 @@
 import type {
-  Agent, DroppedWeapon, Flash, GameMap, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, TStrategy, Team, Vec2,
+  Agent, DroppedWeapon, Flash, GameMap, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, Vec2,
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HEADSHOT_MULTIPLIER, HELMET_HS_REDUCTION, WEAPONS } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
@@ -23,6 +23,12 @@ const MOLOTOV_FUSE_MS = 1500;
 const MOLOTOV_DURATION_MS = 7000;
 const MOLOTOV_RADIUS_WORLD = 70;
 const MOLOTOV_DOT_PER_SEC = 14;
+
+const HE_FUSE_MS = 1500;
+const HE_RADIUS = 120;
+const HE_MAX_DAMAGE = 80;
+const HE_HOLE_RADIUS = 70;
+const HE_HOLE_DURATION_MS = 1500;
 
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
@@ -92,6 +98,9 @@ export interface RoundSnapshot {
   flashes: Flash[];
   tickFlashes: { pos: Vec2; side: Side }[];
   molotovs: Molotov[];
+  hes: HE[];
+  tickHEs: { pos: Vec2; side: Side }[];
+  smokeHoles: SmokeHole[];
   drops: import("../domain/types.ts").DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -106,6 +115,9 @@ export class RoundSim {
   flashes: Flash[] = [];      // in-flight grenades waiting on fuse
   tickFlashes: { pos: Vec2; side: Side }[] = []; // detonation events this tick
   molotovs: Molotov[] = [];   // burning patches
+  hes: HE[] = [];             // in-flight HE grenades
+  tickHEs: { pos: Vec2; side: Side }[] = []; // detonation events this tick
+  smokeHoles: SmokeHole[] = []; // brief LOS gaps punched through smoke by HEs
   drops: DroppedWeapon[] = [];
   t = 0;
   events: SimEvent[] = [];
@@ -134,6 +146,7 @@ export class RoundSim {
   private smokeQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private molotovQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
+  private heQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -175,6 +188,7 @@ export class RoundSim {
     this.scheduleSmokes();
     this.scheduleFlashes();
     this.scheduleMolotovs();
+    this.scheduleHEs();
     this.push({ t: 0, kind: "round-start" });
   }
 
@@ -326,10 +340,12 @@ export class RoundSim {
     this.t += TICK_MS;
     this.tickShots.length = 0;
     this.tickFlashes.length = 0;
+    this.tickHEs.length = 0;
 
     this.tickSmokes();
     this.tickFlashesUpdate();
     this.tickMolotovsUpdate();
+    this.tickHEsUpdate();
     this.updateIntel();
 
     for (const a of this.agents) if (a.alive) this.think(a);
@@ -362,6 +378,9 @@ export class RoundSim {
       flashes: this.flashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, detonatesAt: f.detonatesAt, side: f.side })),
       tickFlashes: this.tickFlashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, side: f.side })),
       molotovs: this.molotovs.map(m => ({ pos: { x: m.pos.x, y: m.pos.y }, radius: m.radius, expiresAt: m.expiresAt, side: m.side, thrower: m.thrower })),
+      hes: this.hes.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, detonatesAt: h.detonatesAt, side: h.side, thrower: h.thrower })),
+      tickHEs: this.tickHEs.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, side: h.side })),
+      smokeHoles: this.smokeHoles.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, radius: h.radius, expiresAt: h.expiresAt })),
       drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
@@ -597,6 +616,107 @@ export class RoundSim {
           this.bumpStat(a.playerId, "deaths", 1);
         }
         break; // one fire DOT per tick per agent
+      }
+    }
+  }
+
+  // ---- HE grenades ----
+  private scheduleHEs() {
+    const usedSpots = new Set<number>();
+    const sortedSpots = (side: Side) => this.map.heSpots
+      .map((sp, idx) => ({ sp, idx }))
+      .filter(({ sp }) => sp.side === side);
+    for (const a of this.agents) {
+      if (!a.utility.includes("he")) continue;
+      const spots = sortedSpots(a.side);
+      if (!spots.length) continue;
+      let best: { sp: typeof spots[number]["sp"]; idx: number; d: number } | null = null;
+      for (const { sp, idx } of spots) {
+        if (usedSpots.has(idx)) continue;
+        const wx = (sp.tile.x + 0.5) * this.map.tileSize;
+        const wy = (sp.tile.y + 0.5) * this.map.tileSize;
+        const d = Math.hypot(wx - a.pos.x, wy - a.pos.y);
+        if (!best || d < best.d) best = { sp, idx, d };
+      }
+      if (!best) continue;
+      usedSpots.add(best.idx);
+      const player = this.players(a.playerId)!;
+      const baseThrow = 4000 - (player.stats.aggression - 50) * 20;
+      this.heQueue.push({
+        thrower: a.playerId,
+        spot: { x: (best.sp.tile.x + 0.5) * this.map.tileSize, y: (best.sp.tile.y + 0.5) * this.map.tileSize },
+        throwAt: baseThrow + this.rng() * 1500,
+      });
+    }
+  }
+
+  private tickHEsUpdate() {
+    // Deploy queued
+    for (let i = this.heQueue.length - 1; i >= 0; i--) {
+      const q = this.heQueue[i];
+      if (this.t >= q.throwAt) {
+        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
+        if (thrower) {
+          this.hes.push({
+            pos: { ...q.spot }, detonatesAt: this.t + HE_FUSE_MS,
+            side: thrower.side, thrower: thrower.playerId,
+          });
+          const idx = thrower.utility.indexOf("he");
+          if (idx >= 0) thrower.utility.splice(idx, 1);
+        }
+        this.heQueue.splice(i, 1);
+      }
+    }
+    // Detonate
+    for (let i = this.hes.length - 1; i >= 0; i--) {
+      const he = this.hes[i];
+      if (this.t >= he.detonatesAt) {
+        this.tickHEs.push({ pos: { ...he.pos }, side: he.side });
+        this.applyHEDamage(he);
+        // Punch a hole in any nearby smoke for a brief moment.
+        for (const sm of this.smokes) {
+          const dx = sm.pos.x - he.pos.x, dy = sm.pos.y - he.pos.y;
+          const d = Math.hypot(dx, dy);
+          if (d < sm.radius + HE_HOLE_RADIUS) {
+            this.smokeHoles.push({
+              pos: { x: he.pos.x, y: he.pos.y },
+              radius: HE_HOLE_RADIUS,
+              expiresAt: this.t + HE_HOLE_DURATION_MS,
+            });
+            break;
+          }
+        }
+        this.hes.splice(i, 1);
+      }
+    }
+    // Expire smoke holes
+    this.smokeHoles = this.smokeHoles.filter(h => h.expiresAt > this.t);
+  }
+
+  private applyHEDamage(he: HE) {
+    for (const a of this.agents) {
+      if (!a.alive) continue;
+      if (a.side === he.side) continue; // no friendly fire
+      const dx = a.pos.x - he.pos.x, dy = a.pos.y - he.pos.y;
+      const d = Math.hypot(dx, dy);
+      if (d > HE_RADIUS) continue;
+      if (!this.hasLineOfSight(a.pos, he.pos)) continue; // walls block damage
+      let dmg = HE_MAX_DAMAGE * (1 - d / HE_RADIUS);
+      if (a.armor > 0) {
+        dmg *= 0.6;
+        a.armor = Math.max(0, a.armor - dmg * 0.5);
+      }
+      const applied = Math.min(a.hp, dmg);
+      a.hp -= dmg;
+      this.addDamage(he.thrower, applied);
+      if (a.hp <= 0) {
+        a.alive = false; a.hp = 0;
+        if (a.weapon !== "knife") {
+          this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
+        }
+        this.push({ t: this.t, kind: "kill", killer: he.thrower, victim: a.playerId, weapon: "he", headshot: false });
+        this.bumpStat(he.thrower, "kills", 1);
+        this.bumpStat(a.playerId, "deaths", 1);
       }
     }
   }
@@ -1235,10 +1355,16 @@ export class RoundSim {
       const x = a.x + (b.x - a.x) * t;
       const y = a.y + (b.y - a.y) * t;
       if (this.solidAtWorld(x, y)) return false;
-      // Smoke blocks LOS
+      // Smoke blocks LOS — unless this point is inside a fresh smoke hole punched by an HE.
       for (const sm of this.smokes) {
         const dx = x - sm.pos.x, dy = y - sm.pos.y;
-        if (dx * dx + dy * dy < sm.radius * sm.radius) return false;
+        if (dx * dx + dy * dy >= sm.radius * sm.radius) continue;
+        let inHole = false;
+        for (const h of this.smokeHoles) {
+          const hdx = x - h.pos.x, hdy = y - h.pos.y;
+          if (hdx * hdx + hdy * hdy < h.radius * h.radius) { inHole = true; break; }
+        }
+        if (!inHole) return false;
       }
     }
     return true;

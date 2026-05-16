@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Text } from "pixi.js";
-import type { DroppedWeapon, Flash, GameMap, Molotov, Side, Smoke, Vec2, WeaponId } from "../domain/types.ts";
+import type { DroppedWeapon, Flash, GameMap, HE, Molotov, Side, Smoke, SmokeHole, Vec2, WeaponId } from "../domain/types.ts";
 import type { TickShot } from "../sim/round.ts";
 
 // Subset of state the renderer reads — satisfied by both live RoundSim and a replay snapshot.
@@ -17,6 +17,9 @@ export interface SimView {
   flashes: Flash[];
   tickFlashes: { pos: Vec2; side: Side }[];
   molotovs: Molotov[];
+  hes: HE[];
+  tickHEs: { pos: Vec2; side: Side }[];
+  smokeHoles: SmokeHole[];
   drops: DroppedWeapon[];
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
@@ -54,6 +57,7 @@ export class Renderer {
   private map!: GameMap;
   private lastShots: { from: { x: number; y: number }; to: { x: number; y: number }; side: "CT" | "T"; t: number; hit: boolean }[] = [];
   private lastFlashes: { pos: { x: number; y: number }; t: number }[] = [];
+  private lastHEs: { pos: { x: number; y: number }; t: number }[] = [];
   private timeText: Text;
 
   constructor() {
@@ -153,6 +157,7 @@ export class Renderer {
   clearTransient() {
     this.lastShots.length = 0;
     this.lastFlashes.length = 0;
+    this.lastHEs.length = 0;
     this.fxLayer.removeChildren();
   }
 
@@ -170,6 +175,10 @@ export class Renderer {
     // Drain new flash detonations
     for (const f of sim.tickFlashes) {
       this.lastFlashes.push({ pos: { x: f.pos.x, y: f.pos.y }, t: now });
+    }
+    // Drain new HE detonations
+    for (const h of sim.tickHEs) {
+      this.lastHEs.push({ pos: { x: h.pos.x, y: h.pos.y }, t: now });
     }
 
     for (const a of sim.agents) {
@@ -311,6 +320,34 @@ export class Renderer {
       flashFxGfx.circle(f.pos.x, f.pos.y, radius).fill({ color: 0xffffff, alpha });
     }
     this.fxLayer.addChild(flashFxGfx);
+
+    // Pending HEs — small dark dot at the spot.
+    const hePreGfx = new Graphics();
+    for (const h of sim.hes) {
+      hePreGfx.circle(h.pos.x, h.pos.y, 3).fill({ color: 0x4a4f5a }).stroke({ color: 0x111418, width: 0.5 });
+    }
+    this.smokeLayer.addChild(hePreGfx);
+
+    // HE detonation bursts — orange-red expanding ring over ~500ms.
+    this.lastHEs = this.lastHEs.filter(h => now - h.t < 500);
+    const heFxGfx = new Graphics();
+    for (const h of this.lastHEs) {
+      const age = (now - h.t) / 500;
+      const radius = 24 + age * 130;
+      const alpha = 0.9 * (1 - age);
+      heFxGfx.circle(h.pos.x, h.pos.y, radius).stroke({ color: 0xff5e1a, width: 4, alpha });
+      heFxGfx.circle(h.pos.x, h.pos.y, radius * 0.55).fill({ color: 0xffb060, alpha: alpha * 0.5 });
+    }
+    this.fxLayer.addChild(heFxGfx);
+
+    // Smoke holes — darker translucent circle where smoke is currently punctured.
+    const holeGfx = new Graphics();
+    for (const h of sim.smokeHoles) {
+      const remaining = h.expiresAt - sim.t;
+      const fade = Math.min(1, remaining / 500);
+      holeGfx.circle(h.pos.x, h.pos.y, h.radius).fill({ color: 0x0a0c10, alpha: 0.6 * fade });
+    }
+    this.smokeLayer.addChild(holeGfx);
 
     // Dropped weapons
     const dropGfx = new Graphics();

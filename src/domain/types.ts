@@ -155,6 +155,7 @@ export interface GameMap {
   smokeSpots: { side: Side; tile: Vec2 }[];
   flashSpots: { side: Side; tile: Vec2 }[];
   molotovSpots: { side: Side; tile: Vec2 }[];
+  heSpots: { side: Side; tile: Vec2 }[];
 }
 
 export interface Vec2 { x: number; y: number; }
@@ -222,7 +223,20 @@ export interface Molotov {
   thrower: string;       // playerId — for kill credit
 }
 
-export type KillCause = WeaponId | "molotov";
+export interface HE {
+  pos: Vec2;
+  detonatesAt: number;
+  side: Side;
+  thrower: string;
+}
+
+export interface SmokeHole {
+  pos: Vec2;
+  radius: number;
+  expiresAt: number;
+}
+
+export type KillCause = WeaponId | "molotov" | "he";
 
 export type RoundOutcome = "ct-elim" | "t-elim" | "bomb-detonated" | "bomb-defused" | "time-expired";
 

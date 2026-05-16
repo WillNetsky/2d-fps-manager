@@ -293,5 +293,15 @@ export function makeMap(): GameMap {
       { side: "CT", tile: { x: 28, y: 14 } }, // long push approach
       { side: "CT", tile: { x: 4, y: 13 } },  // B tunnels approach
     ],
+    heSpots: [
+      // T HEs — chip enemies stacked at CT hold positions.
+      { side: "T", tile: { x: 28, y: 3 } },
+      { side: "T", tile: { x: 3, y: 3 } },
+      { side: "T", tile: { x: 15, y: 5 } },
+      // CT HEs — chip pushers + punch a hole in their smokes.
+      { side: "CT", tile: { x: 15, y: 11 } },
+      { side: "CT", tile: { x: 28, y: 13 } },
+      { side: "CT", tile: { x: 4, y: 12 } },
+    ],
   };
 }
