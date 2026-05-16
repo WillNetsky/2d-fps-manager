@@ -115,6 +115,7 @@ export interface Loadout {
   keptWeapon: WeaponId | null;
   keptArmor: boolean;
   keptHelmet: boolean;
+  keptUtility: UtilityId[];
 }
 
 export interface DroppedWeapon {

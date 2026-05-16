@@ -42,7 +42,7 @@ export async function initGame(app: HTMLElement) {
   for (const team of [home, away]) for (const p of team.players) {
     team.loadouts[p.id] = {
       weapon: "pistol", utility: [], armor: false, helmet: false,
-      keptWeapon: null, keptArmor: false, keptHelmet: false,
+      keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     };
   }
 
@@ -158,14 +158,16 @@ export async function initGame(app: HTMLElement) {
       const kept = existing.keptWeapon;
       const keptArmor = existing.keptArmor;
       const keptHelmet = existing.keptHelmet;
+      const keptUtil = [...existing.keptUtility];
       const share = p.money;
       const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
+      const uCost = (u: UId) => keptUtil.includes(u) ? 0 : UPRICE[u];
 
       let weapon: WId = kept ?? "pistol";
       let spent = 0;
       let armor = keptArmor;
       let helmet = keptHelmet;
-      const util: UId[] = [];
+      const util: UId[] = [...keptUtil];
       const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
 
       if (isPistolRound(roundNumber)) {
@@ -175,9 +177,9 @@ export async function initGame(app: HTMLElement) {
         if (wantsVest && share >= VEST) {
           armor = true;
           spent += VEST;
-        } else if (share >= UPRICE[want]) {
+        } else if (!util.includes(want) && share - spent >= uCost(want)) {
           util.push(want);
-          spent += UPRICE[want];
+          spent += uCost(want);
         }
       } else {
         if (p.role === "awper" && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
@@ -187,12 +189,15 @@ export async function initGame(app: HTMLElement) {
         spent = wCost(weapon);
         if (!armor && weapon !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
         if (armor && !helmet && weapon !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
-        if (share - spent >= UPRICE[want]) { util.push(want); spent += UPRICE[want]; }
+        if (!util.includes(want) && share - spent >= uCost(want)) {
+          util.push(want);
+          spent += uCost(want);
+        }
       }
 
       away.loadouts[p.id] = {
         weapon, utility: util, armor, helmet,
-        keptWeapon: kept, keptArmor, keptHelmet,
+        keptWeapon: kept, keptArmor, keptHelmet, keptUtility: keptUtil,
       };
       p.money = Math.max(0, p.money - spent);
     }
@@ -207,7 +212,7 @@ export async function initGame(app: HTMLElement) {
         p.money = STARTING_BANK;
         team.loadouts[p.id] = {
           weapon: "pistol", utility: [], armor: false, helmet: false,
-          keptWeapon: null, keptArmor: false, keptHelmet: false,
+          keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
         };
       }
     }
@@ -319,19 +324,21 @@ export async function initGame(app: HTMLElement) {
         const team = home.players.some(p => p.id === ag.playerId) ? home : away;
         if (ag.alive) {
           const hasVest = ag.armor > 30;
+          const keptUtil = [...ag.utility];
           team.loadouts[ag.playerId] = {
             weapon: ag.weapon,
-            utility: [],
+            utility: keptUtil,
             armor: hasVest,
             helmet: ag.helmet,
             keptWeapon: ag.weapon === "knife" ? null : ag.weapon,
             keptArmor: hasVest,
             keptHelmet: ag.helmet,
+            keptUtility: keptUtil,
           };
         } else {
           team.loadouts[ag.playerId] = {
             weapon: "pistol", utility: [], armor: false, helmet: false,
-            keptWeapon: null, keptArmor: false, keptHelmet: false,
+            keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
           };
         }
       }

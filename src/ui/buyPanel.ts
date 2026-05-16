@@ -47,7 +47,7 @@ export class BuyPanel {
     if (l.weapon !== l.keptWeapon) total += WEAPONS[l.weapon].cost;
     if (l.armor && !l.keptArmor) total += VEST_COST;
     if (l.helmet && !l.keptHelmet) total += HELMET_UPGRADE_COST;
-    total += l.utility.reduce((s, u) => s + UTILITIES[u].cost, 0);
+    total += l.utility.reduce((s, u) => l.keptUtility.includes(u) ? s : s + UTILITIES[u].cost, 0);
     return total;
   }
 
@@ -166,17 +166,18 @@ export class BuyPanel {
       }))));
 
       // On pistol rounds, each player picks vest OR util (not both); helmet is locked off.
+      // Kept (free) utility doesn't count against the vest-OR-util constraint.
       const hasArmor = l.armor;
-      const hasUtil = l.utility.length > 0;
+      const hasBoughtUtil = l.utility.some(u => !l.keptUtility.includes(u));
       const utilDisabled = pistolRound && hasArmor;
-      const vestDisabled = pistolRound && hasUtil;
+      const vestDisabled = pistolRound && hasBoughtUtil;
 
       // Utility row (multi-select toggle)
       buy.appendChild(this.makeRow("Util", UTILITY_OPTIONS.map(u => ({
         label: UTILITIES[u].name,
         cost: UTILITIES[u].cost,
         active: l.utility.includes(u),
-        free: false,
+        free: l.keptUtility.includes(u),
         disabled: utilDisabled,
         onClick: () => this.setLoadout(p, ll => {
           const idx = ll.utility.indexOf(u);
