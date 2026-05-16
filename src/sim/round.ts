@@ -1365,8 +1365,15 @@ export class RoundSim {
     const rangeFactor = Math.max(0.25, 1 - Math.max(0, d - weapon.range * 0.5) / weapon.range);
 
     // Base aim: accuracy with weapon-pref scaling 30% of the way toward the preferred-weapon rating.
-    const weaponPrefKey = (a.weapon + "Pref") as "pistolPref" | "smgPref" | "riflePref" | "awpPref";
-    const weaponPref = (stats[weaponPrefKey] ?? 50) / 100;
+    const slot = WEAPONS[a.weapon].slot;
+    const prefMap: Record<typeof slot, number> = {
+      knife: 50,
+      pistol: stats.pistolPref,
+      smg: stats.smgPref,
+      rifle: stats.riflePref,
+      awp: stats.awpPref,
+    };
+    const weaponPref = (prefMap[slot] ?? 50) / 100;
     let aimMod = (stats.accuracy / 100) * 0.7 + weaponPref * 0.3;
 
     // Last alive — composure carries you. Score deficit punishes low composure.

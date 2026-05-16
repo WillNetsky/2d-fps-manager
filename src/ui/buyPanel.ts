@@ -2,7 +2,7 @@ import type { Loadout, Player, Team, UtilityId, WeaponId } from "../domain/types
 import { HELMET_UPGRADE_COST, UTILITIES, VEST_COST, WEAPONS } from "../domain/weapons.ts";
 import { statSummary } from "../domain/statSummary.ts";
 
-const WEAPON_OPTIONS: WeaponId[] = ["pistol", "smg", "rifle", "awp"];
+const ALL_WEAPONS: WeaponId[] = ["pistol", "deagle", "mp9", "mac10", "m4", "ak", "awp"];
 const UTILITY_OPTIONS: UtilityId[] = ["smoke", "flash", "he", "molotov"];
 
 export interface BuyPanelHandlers {
@@ -34,7 +34,7 @@ export class BuyPanel {
     if (n === 1 || n === 13) {
       for (const p of this.team.players) {
         const l = this.team.loadouts[p.id];
-        if (l.weapon !== "pistol") l.weapon = "pistol";
+        if (WEAPONS[l.weapon].slot !== "pistol") l.weapon = "pistol";
         l.helmet = false;
       }
     }
@@ -154,14 +154,20 @@ export class BuyPanel {
       const buy = document.createElement("div");
       buy.className = "buy-grid";
 
-      // Weapons row
+      // Weapons row — filter to this team's faction (universal weapons always shown).
       const pistolRound = this.roundNumber === 1 || this.roundNumber === 13;
-      buy.appendChild(this.makeRow("Weapon", WEAPON_OPTIONS.map(w => ({
+      const availableWeapons = ALL_WEAPONS.filter(w => {
+        const fac = WEAPONS[w].faction;
+        if (!fac || fac === this.team.side) return true;
+        // Also show a captured/kept enemy-faction gun.
+        return l.keptWeapon === w || l.weapon === w;
+      });
+      buy.appendChild(this.makeRow("Weapon", availableWeapons.map(w => ({
         label: WEAPONS[w].name,
         cost: WEAPONS[w].cost,
         active: l.weapon === w,
         free: l.keptWeapon === w || WEAPONS[w].cost === 0,
-        disabled: pistolRound && w !== "pistol",
+        disabled: pistolRound && WEAPONS[w].slot !== "pistol",
         onClick: () => this.setLoadout(p, ll => { ll.weapon = w; }),
       }))));
 

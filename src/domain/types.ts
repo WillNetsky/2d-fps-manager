@@ -81,13 +81,20 @@ export interface Player {
 export type WeaponId =
   | "knife"
   | "pistol"
-  | "smg"
-  | "rifle"
+  | "deagle"
+  | "mp9"      // CT SMG
+  | "mac10"    // T SMG
+  | "m4"       // CT rifle
+  | "ak"       // T rifle
   | "awp";
+
+export type WeaponSlot = "knife" | "pistol" | "smg" | "rifle" | "awp";
 
 export interface Weapon {
   id: WeaponId;
   name: string;
+  slot: WeaponSlot;    // category for stat prefs / pistol-round rules
+  faction?: Side;      // CT/T-only weapons (omitted = universal)
   cost: number;
   damage: number;      // per hit, before falloff
   fireRate: number;    // shots per second

@@ -72,8 +72,11 @@ function weaponIcon(w: KillCause): string {
   switch (w) {
     case "knife":    return "🔪";
     case "pistol":   return "[P]";
-    case "smg":      return "[smg]";
-    case "rifle":    return "[rifle]";
+    case "deagle":   return "[Deagle]";
+    case "mp9":      return "[MP9]";
+    case "mac10":    return "[Mac10]";
+    case "m4":       return "[M4]";
+    case "ak":       return "[AK]";
     case "awp":      return "[AWP]";
     case "molotov":  return "🔥";
     case "he":       return "💥";

@@ -1,6 +1,7 @@
 import { Application, Container, Graphics, Text } from "pixi.js";
 import type { DroppedWeapon, Flash, GameMap, GrenadeInFlight, HE, Molotov, Side, Smoke, SmokeHole, Vec2, WeaponId } from "../domain/types.ts";
 import type { TickShot } from "../sim/round.ts";
+import { WEAPONS } from "../domain/weapons.ts";
 
 // Subset of state the renderer reads — satisfied by both live RoundSim and a replay snapshot.
 export interface SimView {
@@ -380,9 +381,11 @@ export class Renderer {
     const dropGfx = new Graphics();
     for (const d of sim.drops) {
       // Color hint by weapon
-      const c = d.weapon === "awp" ? 0xe35757
-        : d.weapon === "rifle" ? 0xe3a857
-        : d.weapon === "smg" ? 0xa8c8e3
+      const slot = WEAPONS[d.weapon].slot;
+      const c = slot === "awp" ? 0xe35757
+        : slot === "rifle" ? 0xe3a857
+        : slot === "smg" ? 0xa8c8e3
+        : d.weapon === "deagle" ? 0xc4a268
         : 0x7e858f;
       dropGfx.rect(d.pos.x - 4, d.pos.y - 1.5, 8, 3).fill(c).stroke({ color: 0x0a0c10, width: 0.5 });
     }
@@ -448,8 +451,11 @@ export class Renderer {
 function weaponAbbrev(w: string): string {
   switch (w) {
     case "pistol": return "P";
-    case "smg":    return "SMG";
-    case "rifle":  return "R";
+    case "deagle": return "DE";
+    case "mp9":    return "MP9";
+    case "mac10":  return "MAC";
+    case "m4":     return "M4";
+    case "ak":     return "AK";
     case "awp":    return "AWP";
     default:       return "";
   }

@@ -1,6 +1,7 @@
 import { makeMap, makeTeam, setSeed } from "./domain/factory.ts";
 import { RoundSim } from "./sim/round.ts";
 import { applyRoundReward } from "./sim/economy.ts";
+import { WEAPONS as WEAPONS_DICT } from "./domain/weapons.ts";
 import { ReplayPlayer } from "./sim/replay.ts";
 import { Renderer } from "./render/renderer.ts";
 import { BuyPanel } from "./ui/buyPanel.ts";
@@ -145,12 +146,14 @@ export async function initGame(app: HTMLElement) {
   function aiBuyForAway() {
     type WId = import("./domain/types.ts").WeaponId;
     type UId = import("./domain/types.ts").UtilityId;
-    const WPRICE: Record<WId, number> = { knife: 0, pistol: 0, smg: 1250, rifle: 2700, awp: 4750 };
     const VEST = 650;
     const HELMET = 350;
     const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
+    const rifle: WId = away.side === "T" ? "ak" : "m4";
+    const smg: WId   = away.side === "T" ? "mac10" : "mp9";
 
     const players = away.players;
+    const W = (id: WId) => WEAPONS_DICT[id];
 
     for (let i = 0; i < players.length; i++) {
       const p = players[i];
@@ -160,7 +163,7 @@ export async function initGame(app: HTMLElement) {
       const keptHelmet = existing.keptHelmet;
       const keptUtil = [...existing.keptUtility];
       const share = p.money;
-      const wCost = (w: WId) => w === kept ? 0 : WPRICE[w];
+      const wCost = (id: WId) => id === kept ? 0 : W(id).cost;
       const uCost = (u: UId) => keptUtil.includes(u) ? 0 : UPRICE[u];
 
       let weapon: WId = kept ?? "pistol";
@@ -182,13 +185,16 @@ export async function initGame(app: HTMLElement) {
           spent += uCost(want);
         }
       } else {
+        const isRifle = (w: WId) => W(w).slot === "rifle";
         if (p.role === "awper" && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
-        else if (weapon !== "rifle" && weapon !== "awp" && share >= wCost("rifle")) weapon = "rifle";
-        else if (weapon === "pistol" && share >= wCost("smg")) weapon = "smg";
+        else if (!isRifle(weapon) && weapon !== "awp" && share >= wCost(rifle)) weapon = rifle;
+        else if (W(weapon).slot === "pistol" && share >= wCost(smg)) weapon = smg;
+        // Pistol upgrade if we're stuck on pistol and have spare cash for a deagle.
+        if (W(weapon).slot === "pistol" && weapon !== "deagle" && share >= wCost("deagle")) weapon = "deagle";
 
         spent = wCost(weapon);
-        if (!armor && weapon !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
-        if (armor && !helmet && weapon !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
+        if (!armor && W(weapon).slot !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
+        if (armor && !helmet && W(weapon).slot !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
         if (!util.includes(want) && share - spent >= uCost(want)) {
           util.push(want);
           spent += uCost(want);
