@@ -16,11 +16,14 @@ export class ReplayPlayer {
   private playing = false;
   private intervalHandle: number | null = null;
   private onFrame: ((view: SimView, idx: number) => void) | null = null;
+  private endHoldUntil = 0;
+  private static END_HOLD_MS = 1500;
 
   load(recorded: RecordedRound) {
     this.stop();
     this.recorded = recorded;
     this.index = 0;
+    this.endHoldUntil = 0;
   }
 
   setOnFrame(fn: (view: SimView, idx: number) => void) {
@@ -54,6 +57,7 @@ export class ReplayPlayer {
   seek(idx: number) {
     if (!this.recorded) return;
     this.index = Math.max(0, Math.min(idx, this.recorded.snapshots.length - 1));
+    this.endHoldUntil = 0;
     this.emit();
   }
 
@@ -65,10 +69,19 @@ export class ReplayPlayer {
 
   private step() {
     if (!this.recorded) return;
+    // Holding at the last frame before looping.
+    if (this.endHoldUntil > 0) {
+      if (performance.now() >= this.endHoldUntil) {
+        this.endHoldUntil = 0;
+        this.index = 0;
+        this.emit();
+      }
+      return;
+    }
     this.index++;
     if (this.index >= this.recorded.snapshots.length) {
-      // Loop
-      this.index = 0;
+      this.index = this.recorded.snapshots.length - 1;
+      this.endHoldUntil = performance.now() + ReplayPlayer.END_HOLD_MS;
     }
     this.emit();
   }
