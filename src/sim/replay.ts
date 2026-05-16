@@ -92,6 +92,7 @@ export class ReplayPlayer {
       bombPlanted: snap.bombPlanted,
       bombPlantedAt: snap.bombPlantedAt,
       bombCarrier: snap.bombCarrier,
+      bombDropped: snap.bombDropped,
       bombPlantedTime: snap.bombPlantedTime,
       tickShots: snap.tickShots,
     };

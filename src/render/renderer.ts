@@ -25,6 +25,7 @@ export interface SimView {
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
   bombCarrier: string | null;
+  bombDropped: Vec2 | null;
   bombPlantedTime: number;
   tickShots: TickShot[];
 }
@@ -267,15 +268,24 @@ export class Renderer {
     for (const sm of sim.smokes) {
       const remaining = sm.expiresAt - sim.t;
       const fade = Math.min(1, remaining / 1500);
-      // Soft puffy circle: a few overlapping discs
-      const baseAlpha = 0.85 * fade;
-      smokeGfx.circle(sm.pos.x, sm.pos.y, sm.radius).fill({ color: 0xc8ccd2, alpha: baseAlpha });
-      smokeGfx.circle(sm.pos.x - sm.radius * 0.35, sm.pos.y - sm.radius * 0.15, sm.radius * 0.8)
-        .fill({ color: 0xb8bdc6, alpha: baseAlpha * 0.7 });
-      smokeGfx.circle(sm.pos.x + sm.radius * 0.3, sm.pos.y + sm.radius * 0.25, sm.radius * 0.75)
-        .fill({ color: 0xd2d5db, alpha: baseAlpha * 0.6 });
+      const color = sm.side === "CT" ? 0xd0d4da : 0xa89682; // white-grey / brown-grey
+      smokeGfx.circle(sm.pos.x, sm.pos.y, sm.radius).fill({ color, alpha: 0.85 * fade });
     }
     this.smokeLayer.addChild(smokeGfx);
+
+    // Smoke countdown labels
+    for (const sm of sim.smokes) {
+      const remaining = Math.max(0, sm.expiresAt - sim.t);
+      const label = new Text({
+        text: (remaining / 1000).toFixed(1),
+        style: { fill: 0x111418, fontSize: 11, fontWeight: "bold", fontFamily: "ui-sans-serif" },
+      });
+      label.anchor.set(0.5);
+      label.x = sm.pos.x;
+      label.y = sm.pos.y;
+      label.alpha = 0.85;
+      this.smokeLayer.addChild(label);
+    }
 
     // Grenades in flight — arc body + ground shadow.
     const flightGfx = new Graphics();
@@ -383,6 +393,11 @@ export class Renderer {
     if (sim.bombPlanted && sim.bombPlantedAt) {
       const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
       this.bombGfx.circle(sim.bombPlantedAt.x, sim.bombPlantedAt.y, 6).fill({ color: COLORS.bomb, alpha: pulse });
+    } else if (sim.bombDropped) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
+      this.bombGfx.circle(sim.bombDropped.x, sim.bombDropped.y, 22).fill({ color: 0xf5c842, alpha: 0.18 * pulse });
+      this.bombGfx.circle(sim.bombDropped.x, sim.bombDropped.y, 13).fill({ color: 0xf5c842, alpha: 0.35 });
+      this.bombGfx.circle(sim.bombDropped.x, sim.bombDropped.y, 4).fill({ color: 0xf5c842 });
     } else if (sim.bombCarrier) {
       const carrier = sim.agents.find(x => x.playerId === sim.bombCarrier && x.alive);
       if (carrier) {

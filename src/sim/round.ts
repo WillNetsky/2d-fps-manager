@@ -110,6 +110,7 @@ export interface RoundSnapshot {
   bombPlanted: boolean;
   bombPlantedAt: Vec2 | null;
   bombCarrier: string | null;
+  bombDropped: Vec2 | null;
   bombPlantedTime: number;
   tickShots: TickShot[];
 }
@@ -135,6 +136,7 @@ export class RoundSim {
   snapshots: RoundSnapshot[] = [];
 
   bombCarrier: string | null = null;
+  bombDropped: Vec2 | null = null;
   bombPlanted = false;
   bombPlantedAt: Vec2 | null = null;
   bombPlantedTime = 0;
@@ -455,6 +457,7 @@ export class RoundSim {
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
       bombCarrier: this.bombCarrier,
+      bombDropped: this.bombDropped ? { x: this.bombDropped.x, y: this.bombDropped.y } : null,
       bombPlantedTime: this.bombPlantedTime,
       tickShots: this.tickShots.map(s => ({
         from: { x: s.from.x, y: s.from.y }, to: { x: s.to.x, y: s.to.y },
@@ -616,6 +619,7 @@ export class RoundSim {
           if (a.weapon !== "knife") {
             this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
           }
+          if (a.playerId === this.bombCarrier) this.dropBomb(a);
           this.push({ t: this.t, kind: "kill", killer: m.thrower, victim: a.playerId, weapon: "molotov", headshot: false });
           this.bumpStat(m.thrower, "kills", 1);
           this.bumpStat(a.playerId, "deaths", 1);
@@ -691,6 +695,7 @@ export class RoundSim {
         if (a.weapon !== "knife") {
           this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
         }
+        if (a.playerId === this.bombCarrier) this.dropBomb(a);
         this.push({ t: this.t, kind: "kill", killer: he.thrower, victim: a.playerId, weapon: "he", headshot: false });
         this.bumpStat(he.thrower, "kills", 1);
         this.bumpStat(a.playerId, "deaths", 1);
@@ -875,6 +880,19 @@ export class RoundSim {
     if (this.bombPlanted && this.bombPlantedAt) {
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
+    // Bomb dropped: closest T retrieves it; others hold near it to support.
+    if (this.bombDropped) {
+      const ts = this.agents.filter(x => x.side === "T" && x.alive);
+      let closest = ts[0]; let bestD = Infinity;
+      for (const t of ts) {
+        const d = dist(t.pos, this.bombDropped);
+        if (d < bestD) { bestD = d; closest = t; }
+      }
+      if (closest && a.playerId === closest.playerId) {
+        return { x: this.bombDropped.x, y: this.bombDropped.y };
+      }
+      return jitter(this.bombDropped, 90, this.rng);
+    }
 
     // Intel-driven rotation: Ts prefer the lighter (less CT-defended) site.
     const player = this.players(a.playerId)!;
@@ -908,6 +926,19 @@ export class RoundSim {
   }
 
   private ctGoal(a: Agent): Vec2 | null {
+    // Bomb dropped (not yet picked up): closest CT guards the drop; others orbit.
+    if (this.bombDropped && !this.bombPlanted) {
+      const cts = this.agents.filter(x => x.side === "CT" && x.alive);
+      let closest = cts[0]; let bestD = Infinity;
+      for (const c of cts) {
+        const d = dist(c.pos, this.bombDropped);
+        if (d < bestD) { bestD = d; closest = c; }
+      }
+      if (closest && a.playerId === closest.playerId) {
+        return jitter(this.bombDropped, 110, this.rng);
+      }
+      return jitter(this.bombDropped, 160, this.rng);
+    }
     // Bomb planted: designated defuser routes exactly to the bomb; others orbit for cover.
     if (this.bombPlanted && this.bombPlantedAt) {
       const cts = this.agents.filter(x => x.side === "CT" && x.alive);
@@ -1229,16 +1260,14 @@ export class RoundSim {
         expiresAt: this.t + TRADE_WINDOW_MS,
       });
 
-      if (enemy.playerId === this.bombCarrier) {
-        const ts = this.agents.filter(x => x.side === "T" && x.alive);
-        this.bombCarrier = ts.length ? ts[0].playerId : null;
-        // New carrier reassesses path to a bombsite right away.
-        if (this.bombCarrier) {
-          const carrierAgent = this.agents.find(x => x.playerId === this.bombCarrier);
-          if (carrierAgent) carrierAgent.dirty = true;
-        }
-      }
+      if (enemy.playerId === this.bombCarrier) this.dropBomb(enemy);
     }
+  }
+
+  private dropBomb(victim: Agent) {
+    this.bombDropped = { x: victim.pos.x, y: victim.pos.y };
+    this.bombCarrier = null;
+    for (const ag of this.agents) if (ag.alive) ag.dirty = true;
   }
 
   // ---- Engagement stance ----
@@ -1395,14 +1424,7 @@ export class RoundSim {
       this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: target.playerId, weapon: a.weapon, headshot: false });
       this.bumpStat(a.playerId, "kills", 1);
       this.bumpStat(target.playerId, "deaths", 1);
-      if (target.playerId === this.bombCarrier) {
-        const ts = this.agents.filter(x => x.side === "T" && x.alive);
-        this.bombCarrier = ts.length ? ts[0].playerId : null;
-        if (this.bombCarrier) {
-          const carrierAgent = this.agents.find(x => x.playerId === this.bombCarrier);
-          if (carrierAgent) carrierAgent.dirty = true;
-        }
-      }
+      if (target.playerId === this.bombCarrier) this.dropBomb(target);
     }
   }
 
@@ -1530,6 +1552,23 @@ export class RoundSim {
         this.finish("bomb-detonated", "T");
       }
       return;
+    }
+
+    // Dropped bomb pickup: any alive T who walks over it grabs it.
+    if (this.bombDropped && !this.bombCarrier) {
+      const PICKUP_RANGE = this.map.tileSize * 0.9;
+      let closest: Agent | null = null;
+      let bestD = Infinity;
+      for (const ag of this.agents) {
+        if (!ag.alive || ag.side !== "T") continue;
+        const d = dist(ag.pos, this.bombDropped);
+        if (d < PICKUP_RANGE && d < bestD) { bestD = d; closest = ag; }
+      }
+      if (closest) {
+        this.bombCarrier = closest.playerId;
+        this.bombDropped = null;
+        closest.dirty = true;
+      }
     }
 
     if (!this.bombCarrier) return;
