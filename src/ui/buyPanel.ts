@@ -165,12 +165,10 @@ export class BuyPanel {
         onClick: () => this.setLoadout(p, ll => { ll.weapon = w; }),
       }))));
 
-      // On pistol rounds, each player picks vest OR util (not both); helmet is locked off.
-      // Kept (free) utility doesn't count against the vest-OR-util constraint.
-      const hasArmor = l.armor;
-      const hasBoughtUtil = l.utility.some(u => !l.keptUtility.includes(u));
-      const utilDisabled = pistolRound && hasArmor;
-      const vestDisabled = pistolRound && hasBoughtUtil;
+      // Pistol-round vest/util tradeoff is now enforced naturally by the
+      // per-player bank ($800 — can't afford both).
+      const utilDisabled = false;
+      const vestDisabled = false;
 
       // Utility row (multi-select toggle)
       buy.appendChild(this.makeRow("Util", UTILITY_OPTIONS.map(u => ({
