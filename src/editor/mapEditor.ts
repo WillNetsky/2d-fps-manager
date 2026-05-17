@@ -1,5 +1,6 @@
 import type { GameMap, Vec2 } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
+import { builtinMaps } from "../domain/builtinMaps.ts";
 
 type Tool =
   | "wall" | "floor"
@@ -31,7 +32,7 @@ function makeBlankMap(): GameMap {
     width: base.width,
     height: base.height,
     tileSize: base.tileSize,
-    walls: new Array(base.width * base.height).fill(true),
+    walls: new Array(base.width * base.height).fill(false),
     ctSpawns: [],
     tSpawns: [],
     bombsites: [],
@@ -49,6 +50,9 @@ export class MapEditor {
   private lastTile: Vec2 | null = null;
   private root: HTMLElement;
   private nameLabel!: HTMLElement;
+  private showCenterLines = false;
+  private wallColorInput!: HTMLInputElement;
+  private floorColorInput!: HTMLInputElement;
 
   constructor(parent: HTMLElement) {
     this.map = loadCustomMap() ?? makeMap();
@@ -121,6 +125,7 @@ export class MapEditor {
       return b;
     };
     mkBtn("Play this map", "primary", () => this.playMap());
+    mkBtn("Balance test this map", "", () => this.balanceMap());
 
     const nameRow = document.createElement("div");
     nameRow.className = "editor-name-row";
@@ -140,7 +145,37 @@ export class MapEditor {
       this.updateNameLabel();
       this.draw();
     });
-    mkBtn("Clear (all walls)", "", () => { this.clearMap(); this.draw(); });
+    mkBtn("Clear (all floor)", "", () => { this.clearMap(); this.draw(); });
+
+    const colorRow = document.createElement("div");
+    colorRow.style.cssText = "display:flex;flex-direction:column;gap:4px;margin:8px 0;font-size:12px;opacity:0.85;";
+    const mkColor = (labelText: string, initial: string, onChange: (v: string) => void) => {
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;cursor:pointer;";
+      const input = document.createElement("input");
+      input.type = "color";
+      input.value = initial;
+      input.style.cssText = "width:28px;height:20px;border:none;padding:0;background:transparent;cursor:pointer;";
+      input.onchange = () => { onChange(input.value); this.draw(); };
+      row.appendChild(input);
+      row.appendChild(document.createTextNode(labelText));
+      colorRow.appendChild(row);
+      return input;
+    };
+    this.wallColorInput = mkColor("Wall color", this.map.wallColor ?? "#3a414f", v => { this.map.wallColor = v; });
+    this.floorColorInput = mkColor("Floor color", this.map.floorColor ?? "#1a1e27", v => { this.map.floorColor = v; });
+    actions.appendChild(colorRow);
+
+    const centerRow = document.createElement("label");
+    centerRow.style.cssText = "display:flex;align-items:center;gap:6px;margin:6px 0;font-size:12px;opacity:0.85;cursor:pointer;";
+    const centerCb = document.createElement("input");
+    centerCb.type = "checkbox";
+    centerCb.checked = this.showCenterLines;
+    centerCb.onchange = () => { this.showCenterLines = centerCb.checked; this.draw(); };
+    centerRow.appendChild(centerCb);
+    centerRow.appendChild(document.createTextNode("Show center lines"));
+    actions.appendChild(centerRow);
+
     mkBtn("Back to game", "", () => { window.location.hash = ""; window.location.reload(); });
     sidebar.appendChild(actions);
 
@@ -261,7 +296,7 @@ export class MapEditor {
   }
 
   private clearMap() {
-    this.map.walls = new Array(this.map.width * this.map.height).fill(true);
+    this.map.walls = new Array(this.map.width * this.map.height).fill(false);
     this.map.ctSpawns = [];
     this.map.tSpawns = [];
     this.map.bombsites = [];
@@ -271,12 +306,18 @@ export class MapEditor {
     if (this.nameLabel) this.nameLabel.textContent = `Current: ${this.currentName}`;
   }
 
+  private syncColorInputs() {
+    if (this.wallColorInput) this.wallColorInput.value = this.map.wallColor ?? "#3a414f";
+    if (this.floorColorInput) this.floorColorInput.value = this.map.floorColor ?? "#1a1e27";
+  }
+
   private newMap() {
     if (!confirm("Discard current map and start a new blank one?")) return;
     this.map = makeBlankMap();
     this.currentName = "Untitled";
     this.map.name = this.currentName;
     this.updateNameLabel();
+    this.syncColorInputs();
     this.draw();
   }
 
@@ -299,53 +340,71 @@ export class MapEditor {
   }
 
   private loadMapDialog() {
-    const maps = loadSavedMaps();
-    const names = Object.keys(maps).sort();
-    if (!names.length) { alert("No saved maps yet. Use Save As… first."); return; }
-    const list = names.map((n, i) => `${i + 1}. ${n}`).join("\n");
-    const choice = prompt(`Load which map? (enter number or name)\n\n${list}\n\nType 'del N' to delete entry N.`);
+    const userMaps = loadSavedMaps();
+    const builtins: Record<string, GameMap> = {};
+    for (const m of builtinMaps()) builtins[m.name] = m;
+    const userNames = Object.keys(userMaps).sort();
+    const builtinNames = Object.keys(builtins);
+    const all = [...builtinNames.map(n => ({ name: n, builtin: true })),
+                 ...userNames.map(n => ({ name: n, builtin: false }))];
+    if (!all.length) { alert("No maps available."); return; }
+    const list = all.map((m, i) => `${i + 1}. ${m.name}${m.builtin ? "  (built-in)" : ""}`).join("\n");
+    const choice = prompt(`Load which map? (enter number or name)\n\n${list}\n\nType 'del N' to delete a saved entry (built-ins can't be deleted).`);
     if (!choice) return;
     const trimmed = choice.trim();
     if (/^del\s+/i.test(trimmed)) {
       const rest = trimmed.replace(/^del\s+/i, "").trim();
       const idx = Number(rest);
-      const target = !isNaN(idx) && idx >= 1 && idx <= names.length ? names[idx - 1] : (maps[rest] ? rest : null);
-      if (!target) { alert("No matching map to delete."); return; }
-      if (!confirm(`Delete "${target}"?`)) return;
-      delete maps[target];
-      writeSavedMaps(maps);
+      const picked = !isNaN(idx) && idx >= 1 && idx <= all.length ? all[idx - 1].name : (userMaps[rest] ? rest : null);
+      if (!picked || !userMaps[picked]) { alert("No matching user map to delete (built-ins can't be deleted)."); return; }
+      if (!confirm(`Delete "${picked}"?`)) return;
+      delete userMaps[picked];
+      writeSavedMaps(userMaps);
       return;
     }
     const asNum = Number(trimmed);
-    const name = !isNaN(asNum) && asNum >= 1 && asNum <= names.length ? names[asNum - 1] : (maps[trimmed] ? trimmed : null);
-    if (!name) { alert("No matching map."); return; }
-    this.map = JSON.parse(JSON.stringify(maps[name])) as GameMap;
-    this.currentName = name;
-    this.map.name = name;
+    const picked = !isNaN(asNum) && asNum >= 1 && asNum <= all.length
+      ? all[asNum - 1]
+      : (builtins[trimmed] ? { name: trimmed, builtin: true } :
+         userMaps[trimmed] ? { name: trimmed, builtin: false } : null);
+    if (!picked) { alert("No matching map."); return; }
+    const src = picked.builtin ? builtins[picked.name] : userMaps[picked.name];
+    this.map = JSON.parse(JSON.stringify(src)) as GameMap;
+    this.currentName = picked.name;
+    this.map.name = picked.name;
     this.updateNameLabel();
+    this.syncColorInputs();
     this.draw();
   }
 
-  private playMap() {
-    if (this.map.ctSpawns.length < 5) return alert("Need at least 5 CT spawns.");
-    if (this.map.tSpawns.length < 5) return alert("Need at least 5 T spawns.");
-    if (!this.map.bombsites.find(s => s.id === "A")) return alert("Place bombsite A.");
-    if (!this.map.bombsites.find(s => s.id === "B")) return alert("Place bombsite B.");
+  private validateAndStage(): boolean {
+    if (this.map.ctSpawns.length < 5) { alert("Need at least 5 CT spawns."); return false; }
+    if (this.map.tSpawns.length < 5) { alert("Need at least 5 T spawns."); return false; }
+    if (!this.map.bombsites.find(s => s.id === "A")) { alert("Place bombsite A."); return false; }
+    if (!this.map.bombsites.find(s => s.id === "B")) { alert("Place bombsite B."); return false; }
 
-    // Reject spawn tiles painted on walls.
     const onWall = (t: Vec2) => this.map.walls[t.y * this.map.width + t.x];
-    if (this.map.ctSpawns.some(onWall)) return alert("Some CT spawn tiles are on walls — clear the floor under them.");
-    if (this.map.tSpawns.some(onWall)) return alert("Some T spawn tiles are on walls — clear the floor under them.");
+    if (this.map.ctSpawns.some(onWall)) { alert("Some CT spawn tiles are on walls — clear the floor under them."); return false; }
+    if (this.map.tSpawns.some(onWall)) { alert("Some T spawn tiles are on walls — clear the floor under them."); return false; }
     for (const s of this.map.bombsites) {
-      if (onWall(s.center)) return alert(`Bombsite ${s.id} is on a wall — move it to a floor tile.`);
+      if (onWall(s.center)) { alert(`Bombsite ${s.id} is on a wall — move it to a floor tile.`); return false; }
     }
-
-    // Connectivity check: every spawn must reach every bombsite.
     const issue = this.checkConnectivity();
-    if (issue) return alert(issue);
+    if (issue) { alert(issue); return false; }
 
     localStorage.setItem(CUSTOM_MAP_KEY, JSON.stringify(this.map));
+    return true;
+  }
+
+  private playMap() {
+    if (!this.validateAndStage()) return;
     window.location.hash = "";
+    window.location.reload();
+  }
+
+  private balanceMap() {
+    if (!this.validateAndStage()) return;
+    window.location.hash = "balance";
     window.location.reload();
   }
 
@@ -388,6 +447,8 @@ export class MapEditor {
   private draw() {
     const ctx = this.ctx;
     const ts = this.map.tileSize;
+    const floorCol = normalizeHex(this.map.floorColor) ?? "#1a1e27";
+    const wallCol = normalizeHex(this.map.wallColor) ?? "#3a414f";
     ctx.fillStyle = "#0a0c10";
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
@@ -395,7 +456,7 @@ export class MapEditor {
     for (let y = 0; y < this.map.height; y++) {
       for (let x = 0; x < this.map.width; x++) {
         const wall = this.map.walls[y * this.map.width + x];
-        ctx.fillStyle = wall ? "#3a414f" : "#1a1e27";
+        ctx.fillStyle = wall ? wallCol : floorCol;
         ctx.fillRect(x * ts, y * ts, ts, ts);
       }
     }
@@ -429,6 +490,19 @@ export class MapEditor {
     // Spawn zones
     this.drawZone(this.map.ctSpawns, "#4a90e2", "CT");
     this.drawZone(this.map.tSpawns, "#c9692e", "T");
+
+    if (this.showCenterLines) {
+      const cx = Math.floor(this.canvas.width / 2) + 0.5;
+      const cy = Math.floor(this.canvas.height / 2) + 0.5;
+      ctx.strokeStyle = "rgba(255, 220, 90, 0.55)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(cx, 0); ctx.lineTo(cx, this.canvas.height);
+      ctx.moveTo(0, cy); ctx.lineTo(this.canvas.width, cy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   private drawZone(tiles: Vec2[], color: string, label: string) {
@@ -455,6 +529,13 @@ function toggleTileInList(list: Vec2[], tile: Vec2) {
   const i = list.findIndex(s => s.x === tile.x && s.y === tile.y);
   if (i >= 0) list.splice(i, 1);
   else list.push(tile);
+}
+
+function normalizeHex(h: string | undefined): string | null {
+  if (!h) return null;
+  const m = h.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(m)) return null;
+  return m.toLowerCase();
 }
 
 function hexWithAlpha(hex: string, alpha: number): string {

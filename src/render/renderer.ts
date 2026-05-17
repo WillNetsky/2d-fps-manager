@@ -103,7 +103,9 @@ export class Renderer {
     const g = new Graphics();
     const ts = this.map.tileSize;
     // floor
-    g.rect(0, 0, this.map.width * ts, this.map.height * ts).fill(COLORS.floor);
+    const floorColor = parseHex(this.map.floorColor) ?? COLORS.floor;
+    const wallColor = parseHex(this.map.wallColor) ?? COLORS.wall;
+    g.rect(0, 0, this.map.width * ts, this.map.height * ts).fill(floorColor);
     // bombsites
     for (const s of this.map.bombsites) {
       g.circle((s.center.x + 0.5) * ts, (s.center.y + 0.5) * ts, s.radius * ts).fill({ color: COLORS.site, alpha: 0.6 });
@@ -112,7 +114,7 @@ export class Renderer {
     for (let y = 0; y < this.map.height; y++) {
       for (let x = 0; x < this.map.width; x++) {
         if (this.map.walls[y * this.map.width + x]) {
-          g.rect(x * ts, y * ts, ts, ts).fill(COLORS.wall);
+          g.rect(x * ts, y * ts, ts, ts).fill(wallColor);
         }
       }
     }
@@ -490,4 +492,11 @@ function grenadeColor(kind: string): number {
     case "he":      return 0x6b707b;
     default:        return 0xffffff;
   }
+}
+
+function parseHex(h: string | undefined): number | null {
+  if (!h) return null;
+  const m = h.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(m)) return null;
+  return parseInt(m, 16);
 }

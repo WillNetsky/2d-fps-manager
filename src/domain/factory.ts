@@ -183,9 +183,9 @@ export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {
 // T spawn bottom-center. Three routes — B tunnels (left), mid (center),
 // long A (right) — meet at the bombsites.
 export function makeMap(): GameMap {
-  const width = 32;
-  const height = 20;
-  const tileSize = 28;
+  const width = 33;
+  const height = 21;
+  const tileSize = 29;
   // Start fully walled; carve rooms and corridors.
   const walls = new Array<boolean>(width * height).fill(true);
   const at = (x: number, y: number) => y * width + x;

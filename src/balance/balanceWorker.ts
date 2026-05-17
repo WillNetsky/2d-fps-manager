@@ -1,6 +1,11 @@
 // Headless balance simulator. Runs in a Web Worker so the UI stays responsive.
 import type { GameMap, RoundOutcome, Side } from "../domain/types.ts";
-import { makeTeam, neutralizeTeamStats, setSeed, STARTING_PER_PLAYER } from "../domain/factory.ts";
+import { makeTeam, neutralizeTeamStats, setSeed } from "../domain/factory.ts";
+
+// In "independent rounds" mode we give every player a full-buy stipend each
+// round, so the sim measures rifle-vs-rifle balance instead of a permanent
+// pistol round. Covers rifle + vest + helmet + a piece of utility.
+const INDEPENDENT_ROUND_STIPEND = 4500;
 import { RoundSim } from "../sim/round.ts";
 import { applyRoundReward } from "../sim/economy.ts";
 
@@ -91,7 +96,20 @@ function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunS
 
   for (let i = 0; i < req.rounds; i++) {
     if (req.resetEachRound) {
-      for (const team of [home, away]) for (const p of team.players) p.money = STARTING_PER_PLAYER;
+      // Truly independent rounds: wipe money AND kept loadouts so the previous
+      // round's outcome can't bias this one (otherwise survivors keep rifles
+      // for free and the early-lead side snowballs).
+      for (const team of [home, away]) {
+        for (const p of team.players) {
+          p.money = INDEPENDENT_ROUND_STIPEND;
+          team.loadouts[p.id] = {
+            weapon: "pistol", utility: [], armor: false, helmet: false,
+            keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
+          };
+        }
+      }
+      ctLossStreak = 0;
+      tLossStreak = 0;
     }
     simpleBuy(home);
     simpleBuy(away);

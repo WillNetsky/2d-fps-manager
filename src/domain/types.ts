@@ -161,6 +161,9 @@ export interface GameMap {
   ctSpawns: Vec2[];
   tSpawns: Vec2[];
   bombsites: { id: "A" | "B"; center: Vec2; radius: number }[];
+  // Optional per-map flavor colors (hex strings, e.g. "#3a414f"). Renderer/editor fall back to defaults if absent.
+  wallColor?: string;
+  floorColor?: string;
 }
 
 export interface Vec2 { x: number; y: number; }

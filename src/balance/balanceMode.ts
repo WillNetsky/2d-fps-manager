@@ -46,6 +46,8 @@ export class BalanceMode {
       opt.textContent = o.label;
       this.mapSelect.appendChild(opt);
     }
+    // Prefer the active custom map (e.g. just-staged from the editor) if present.
+    if (opts.find(o => o.key === "__active__")) this.mapSelect.value = "__active__";
     sidebar.appendChild(this.mapSelect);
 
     // Rounds
@@ -56,7 +58,7 @@ export class BalanceMode {
     this.roundsInput = document.createElement("input");
     this.roundsInput.type = "number";
     this.roundsInput.min = "1";
-    this.roundsInput.max = "10000";
+    this.roundsInput.max = "100000";
     this.roundsInput.value = "100";
     this.roundsInput.className = "balance-input";
     sidebar.appendChild(this.roundsInput);
@@ -138,7 +140,7 @@ export class BalanceMode {
   }
 
   private run() {
-    const rounds = Math.max(1, Math.min(10000, parseInt(this.roundsInput.value, 10) || 100));
+    const rounds = Math.max(1, Math.min(100000, parseInt(this.roundsInput.value, 10) || 100));
     this.runBtn.disabled = true;
     this.resultsEl.innerHTML = "";
 
