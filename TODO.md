@@ -4,6 +4,7 @@
 - [x] Git this project
 
 ## Simulation
+- [ ] Steal weapon math (damage, fire rate, accuracy, recoil, armor pen, HS multipliers) straight from CS2 (or CS 1.6) instead of hand-tuned guesses
 - [x] Add headshots, kevlar+helmet
 - [x] Figure out how CT smokes are effective
 - [x] Flashes
@@ -34,6 +35,10 @@
 - [x] Abillity to create new maps, edit saved maps
 - [x] Load saved maps
 - [x] Save as new map
+
+## Universe
+- [ ] Pool of players
+- [ ] They play casual games (that are tracked) and skill up from them
 
 ## Issues
 - [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
