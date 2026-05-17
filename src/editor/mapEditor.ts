@@ -492,14 +492,21 @@ export class MapEditor {
     this.drawZone(this.map.tSpawns, "#c9692e", "T");
 
     if (this.showCenterLines) {
-      const cx = Math.floor(this.canvas.width / 2) + 0.5;
-      const cy = Math.floor(this.canvas.height / 2) + 0.5;
-      ctx.strokeStyle = "rgba(255, 220, 90, 0.55)";
+      // With odd width/height there's a single middle column and middle row;
+      // highlight those tiles as a band so the center cell is obvious.
+      const midCol = Math.floor(this.map.width / 2);
+      const midRow = Math.floor(this.map.height / 2);
+      ctx.fillStyle = "rgba(255, 220, 90, 0.18)";
+      ctx.fillRect(midCol * ts, 0, ts, this.canvas.height);
+      ctx.fillRect(0, midRow * ts, this.canvas.width, ts);
+      ctx.strokeStyle = "rgba(255, 220, 90, 0.7)";
       ctx.lineWidth = 1;
       ctx.setLineDash([6, 4]);
       ctx.beginPath();
-      ctx.moveTo(cx, 0); ctx.lineTo(cx, this.canvas.height);
-      ctx.moveTo(0, cy); ctx.lineTo(this.canvas.width, cy);
+      ctx.moveTo(midCol * ts + 0.5, 0); ctx.lineTo(midCol * ts + 0.5, this.canvas.height);
+      ctx.moveTo((midCol + 1) * ts + 0.5, 0); ctx.lineTo((midCol + 1) * ts + 0.5, this.canvas.height);
+      ctx.moveTo(0, midRow * ts + 0.5); ctx.lineTo(this.canvas.width, midRow * ts + 0.5);
+      ctx.moveTo(0, (midRow + 1) * ts + 0.5); ctx.lineTo(this.canvas.width, (midRow + 1) * ts + 0.5);
       ctx.stroke();
       ctx.setLineDash([]);
     }

@@ -2,7 +2,11 @@ import type { GameMap } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import BalanceWorker from "./balanceWorker.ts?worker";
-import type { BalanceProgress, BalanceRequest, BalanceResult, RunStats } from "./balanceWorker.ts";
+import type {
+  BalanceMatrixResult, BalanceProgress, BalanceRequest, BalanceResult,
+  LoadoutPreset, RunStats,
+} from "./balanceWorker.ts";
+import { ALL_PRESETS, PRESET_LABELS } from "./balanceWorker.ts";
 
 export class BalanceMode {
   private root: HTMLElement;
@@ -10,6 +14,9 @@ export class BalanceMode {
   private roundsInput!: HTMLInputElement;
   private neutralToggle!: HTMLInputElement;
   private resetEconToggle!: HTMLInputElement;
+  private ctLoadoutSelect!: HTMLSelectElement;
+  private tLoadoutSelect!: HTMLSelectElement;
+  private matrixToggle!: HTMLInputElement;
   private runBtn!: HTMLButtonElement;
   private status!: HTMLElement;
   private resultsEl!: HTMLElement;
@@ -46,7 +53,6 @@ export class BalanceMode {
       opt.textContent = o.label;
       this.mapSelect.appendChild(opt);
     }
-    // Prefer the active custom map (e.g. just-staged from the editor) if present.
     if (opts.find(o => o.key === "__active__")) this.mapSelect.value = "__active__";
     sidebar.appendChild(this.mapSelect);
 
@@ -63,7 +69,56 @@ export class BalanceMode {
     this.roundsInput.className = "balance-input";
     sidebar.appendChild(this.roundsInput);
 
-    // Toggles
+    // Loadouts
+    const loadoutLabel = document.createElement("div");
+    loadoutLabel.className = "editor-group";
+    loadoutLabel.textContent = "Loadouts";
+    sidebar.appendChild(loadoutLabel);
+
+    const mkLoadoutSelect = (defaultVal: LoadoutPreset = "auto") => {
+      const sel = document.createElement("select");
+      sel.className = "balance-select";
+      for (const k of ["auto", ...ALL_PRESETS] as LoadoutPreset[]) {
+        const opt = document.createElement("option");
+        opt.value = k;
+        opt.textContent = PRESET_LABELS[k];
+        sel.appendChild(opt);
+      }
+      sel.value = defaultVal;
+      return sel;
+    };
+
+    const ctRow = document.createElement("label");
+    ctRow.className = "balance-toggle";
+    ctRow.style.flexDirection = "column";
+    ctRow.style.alignItems = "stretch";
+    ctRow.append("CT loadout");
+    this.ctLoadoutSelect = mkLoadoutSelect("auto");
+    ctRow.appendChild(this.ctLoadoutSelect);
+    sidebar.appendChild(ctRow);
+
+    const tRow = document.createElement("label");
+    tRow.className = "balance-toggle";
+    tRow.style.flexDirection = "column";
+    tRow.style.alignItems = "stretch";
+    tRow.append("T loadout");
+    this.tLoadoutSelect = mkLoadoutSelect("auto");
+    tRow.appendChild(this.tLoadoutSelect);
+    sidebar.appendChild(tRow);
+
+    const matrixRow = document.createElement("label");
+    matrixRow.className = "balance-toggle";
+    this.matrixToggle = document.createElement("input");
+    this.matrixToggle.type = "checkbox";
+    this.matrixToggle.onchange = () => {
+      const on = this.matrixToggle.checked;
+      this.ctLoadoutSelect.disabled = on;
+      this.tLoadoutSelect.disabled = on;
+    };
+    matrixRow.append(this.matrixToggle, ` Compare all matchups (${ALL_PRESETS.length}×${ALL_PRESETS.length} grid)`);
+    sidebar.appendChild(matrixRow);
+
+    // Options
     const togGroup = document.createElement("div");
     togGroup.className = "editor-group";
     togGroup.textContent = "Options";
@@ -144,21 +199,35 @@ export class BalanceMode {
     this.runBtn.disabled = true;
     this.resultsEl.innerHTML = "";
 
-    // Terminate any previous run.
     this.worker?.terminate();
     this.worker = new BalanceWorker();
     this.runStartedAt = performance.now();
     this.status.textContent = "Running… 0%";
 
-    this.worker.addEventListener("message", (e: MessageEvent<BalanceProgress | BalanceResult>) => {
+    const matrix = this.matrixToggle.checked;
+
+    this.worker.addEventListener("message", (e: MessageEvent<BalanceProgress | BalanceResult | BalanceMatrixResult>) => {
       const msg = e.data;
       if (msg.kind === "progress") {
         const pct = ((msg.done / msg.total) * 100).toFixed(0);
-        this.status.textContent = `Running… ${pct}% (${msg.done}/${msg.total})`;
+        if (msg.cell) {
+          this.status.textContent =
+            `Cell ${msg.cell.index}/${msg.cell.count} (CT=${PRESET_LABELS[msg.cell.ct]} vs T=${PRESET_LABELS[msg.cell.t]}) — ${pct}%`;
+        } else {
+          this.status.textContent = `Running… ${pct}% (${msg.done}/${msg.total})`;
+        }
       } else if (msg.kind === "done") {
         const elapsed = ((performance.now() - this.runStartedAt) / 1000).toFixed(1);
         this.status.textContent = `Done — ${msg.stats.rounds} rounds in ${elapsed}s`;
         this.renderResults(msg.stats);
+        this.runBtn.disabled = false;
+        this.worker?.terminate();
+        this.worker = null;
+      } else if (msg.kind === "done-matrix") {
+        const elapsed = ((performance.now() - this.runStartedAt) / 1000).toFixed(1);
+        const totalRounds = msg.cells.reduce((a, c) => a + c.stats.rounds, 0);
+        this.status.textContent = `Done — ${msg.cells.length} cells, ${totalRounds} rounds in ${elapsed}s`;
+        this.renderMatrix(msg.cells);
         this.runBtn.disabled = false;
         this.worker?.terminate();
         this.worker = null;
@@ -171,6 +240,9 @@ export class BalanceMode {
       rounds,
       neutralize: this.neutralToggle.checked,
       resetEachRound: this.resetEconToggle.checked,
+      ctLoadout: this.ctLoadoutSelect.value as LoadoutPreset,
+      tLoadout: this.tLoadoutSelect.value as LoadoutPreset,
+      matrix,
     };
     this.worker.postMessage(req);
   }
@@ -194,5 +266,47 @@ export class BalanceMode {
         <tr><th>T elim wins</th><td>${s.ctElims}</td></tr>
         <tr><th>Time-expired</th><td>${s.timeouts}</td></tr>
       </table>`;
+  }
+
+  private renderMatrix(cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[]) {
+    const get = (ct: LoadoutPreset, t: LoadoutPreset) => cells.find(c => c.ct === ct && c.t === t)!;
+    const cellPct = (s: RunStats) => (s.ctWins / Math.max(1, s.rounds)) * 100;
+    // Heat color: red (0%, T dominant) → yellow (50%, fair) → green (100%, CT dominant)
+    const heat = (p: number) => {
+      const t = p / 100;
+      const r = t < 0.5 ? 220 : Math.round(220 - (t - 0.5) * 320);
+      const g = t < 0.5 ? Math.round(60 + t * 320) : 220;
+      return `rgb(${r}, ${g}, 80)`;
+    };
+
+    let html = `<h3>Matrix (rows = CT, columns = T) — cell shows CT win %</h3>`;
+    html += `<table class="balance-table" style="border-collapse:collapse;">`;
+    html += `<tr><th></th>`;
+    for (const t of ALL_PRESETS) html += `<th style="padding:8px;">${PRESET_LABELS[t]}</th>`;
+    html += `</tr>`;
+    for (const ct of ALL_PRESETS) {
+      html += `<tr><th style="padding:8px;text-align:right;">${PRESET_LABELS[ct]}</th>`;
+      for (const t of ALL_PRESETS) {
+        const s = get(ct, t).stats;
+        const p = cellPct(s);
+        html += `<td style="padding:10px;text-align:center;background:${heat(p)};color:#111;font-weight:600;min-width:80px;" title="${s.ctWins}/${s.rounds}">${p.toFixed(1)}%</td>`;
+      }
+      html += `</tr>`;
+    }
+    html += `</table>`;
+
+    // Per-cell detail toggle: a small table beneath
+    html += `<h4 style="margin-top:20px;">Per-cell details</h4>`;
+    html += `<table class="balance-table"><tr><th>CT</th><th>T</th><th>Rounds</th><th>CT win %</th><th>Plant %</th><th>Avg dur (s)</th></tr>`;
+    for (const c of cells) {
+      const s = c.stats;
+      const ctW = (s.ctWins / Math.max(1, s.rounds)) * 100;
+      const plantP = (s.plants / Math.max(1, s.rounds)) * 100;
+      const dur = (s.totalDurationMs / Math.max(1, s.rounds) / 1000).toFixed(1);
+      html += `<tr><td>${PRESET_LABELS[c.ct]}</td><td>${PRESET_LABELS[c.t]}</td><td>${s.rounds}</td><td>${ctW.toFixed(1)}%</td><td>${plantP.toFixed(0)}%</td><td>${dur}</td></tr>`;
+    }
+    html += `</table>`;
+
+    this.resultsEl.innerHTML = html;
   }
 }

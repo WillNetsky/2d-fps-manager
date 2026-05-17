@@ -1,13 +1,26 @@
 // Headless balance simulator. Runs in a Web Worker so the UI stays responsive.
-import type { GameMap, RoundOutcome, Side } from "../domain/types.ts";
+import type { GameMap, RoundOutcome, Side, WeaponId, UtilityId } from "../domain/types.ts";
 import { makeTeam, neutralizeTeamStats, setSeed } from "../domain/factory.ts";
+import { RoundSim } from "../sim/round.ts";
+import { applyRoundReward } from "../sim/economy.ts";
 
 // In "independent rounds" mode we give every player a full-buy stipend each
 // round, so the sim measures rifle-vs-rifle balance instead of a permanent
 // pistol round. Covers rifle + vest + helmet + a piece of utility.
 const INDEPENDENT_ROUND_STIPEND = 4500;
-import { RoundSim } from "../sim/round.ts";
-import { applyRoundReward } from "../sim/economy.ts";
+
+// Named loadout presets the matrix iterates over. "auto" defers to simpleBuy
+// (eco-driven, depends on money/kept gear).
+export type LoadoutPreset = "auto" | "pistol" | "pistol+armor" | "smg" | "rifle" | "awp";
+export const ALL_PRESETS: LoadoutPreset[] = ["pistol", "pistol+armor", "smg", "rifle", "awp"];
+export const PRESET_LABELS: Record<LoadoutPreset, string> = {
+  "auto": "Auto (eco-driven)",
+  "pistol": "Pistol",
+  "pistol+armor": "Pistol + vest",
+  "smg": "SMG + vest",
+  "rifle": "Rifle (full buy)",
+  "awp": "4 rifles + 1 AWP",
+};
 
 export interface BalanceRequest {
   kind: "run";
@@ -15,17 +28,26 @@ export interface BalanceRequest {
   rounds: number;
   neutralize: boolean;
   resetEachRound: boolean;
+  ctLoadout: LoadoutPreset;
+  tLoadout: LoadoutPreset;
+  matrix: boolean; // if true, ignore ctLoadout/tLoadout and run all combos in ALL_PRESETS
 }
 
 export interface BalanceProgress {
   kind: "progress";
   done: number;
   total: number;
+  cell?: { ct: LoadoutPreset; t: LoadoutPreset; index: number; count: number };
 }
 
 export interface BalanceResult {
   kind: "done";
   stats: RunStats;
+}
+
+export interface BalanceMatrixResult {
+  kind: "done-matrix";
+  cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[];
 }
 
 export interface RunStats {
@@ -58,8 +80,17 @@ function emptyStats(): RunStats {
   };
 }
 
-function simpleBuy(team: { side: Side; players: { id: string; role: string; money: number }[]; loadouts: Record<string, any> }) {
-  const rifle = team.side === "CT" ? "m4" : "ak";
+interface MiniTeam {
+  side: Side;
+  players: { id: string; role: string; money: number }[];
+  loadouts: Record<string, {
+    weapon: WeaponId; utility: UtilityId[]; armor: boolean; helmet: boolean;
+    keptWeapon: WeaponId | null; keptArmor: boolean; keptHelmet: boolean; keptUtility: UtilityId[];
+  }>;
+}
+
+function simpleBuy(team: MiniTeam) {
+  const rifle: WeaponId = team.side === "CT" ? "m4" : "ak";
   const rifleCost = team.side === "CT" ? 3100 : 2700;
   const VEST = 650, HELMET = 350;
   for (const p of team.players) {
@@ -73,36 +104,73 @@ function simpleBuy(team: { side: Side; players: { id: string; role: string; mone
   }
 }
 
-function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunStats {
-  setSeed(Date.now());
-  const home = makeTeam("home", "Home", "CT");
-  const away = makeTeam("away", "Away", "T");
+// Force every player on `team` to the given preset, ignoring money. Used when
+// the operator picks a specific loadout (or for matrix mode).
+function applyPreset(team: MiniTeam, preset: LoadoutPreset) {
+  if (preset === "auto") { simpleBuy(team); return; }
+  const rifle: WeaponId = team.side === "CT" ? "m4" : "ak";
+  const smg: WeaponId = team.side === "CT" ? "mp9" : "mac10";
+  team.players.forEach((p, i) => {
+    let weapon: WeaponId = "pistol";
+    let armor = false, helmet = false;
+    switch (preset) {
+      case "pistol": weapon = "pistol"; break;
+      case "pistol+armor": weapon = "pistol"; armor = true; break;
+      case "smg": weapon = smg; armor = true; break;
+      case "rifle": weapon = rifle; armor = true; helmet = true; break;
+      case "awp": weapon = i === 0 ? "awp" : rifle; armor = true; helmet = true; break;
+    }
+    team.loadouts[p.id] = {
+      weapon, utility: [], armor, helmet,
+      keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
+    };
+  });
+}
 
-  if (req.neutralize) {
-    neutralizeTeamStats(home, 60);
-    neutralizeTeamStats(away, 60);
+interface CellParams {
+  map: GameMap;
+  rounds: number;
+  neutralize: boolean;
+  resetEachRound: boolean;
+  ctLoadout: LoadoutPreset;
+  tLoadout: LoadoutPreset;
+  onProgress: (done: number) => void;
+}
+
+function simulateCell(p: CellParams): RunStats {
+  setSeed(Date.now());
+  const home = makeTeam("home", "Home", "CT") as unknown as MiniTeam;
+  const away = makeTeam("away", "Away", "T") as unknown as MiniTeam;
+
+  if (p.neutralize) {
+    neutralizeTeamStats(home as any, 60);
+    neutralizeTeamStats(away as any, 60);
   }
 
-  for (const team of [home, away]) for (const p of team.players) {
-    team.loadouts[p.id] = {
+  for (const team of [home, away]) for (const pl of team.players) {
+    team.loadouts[pl.id] = {
       weapon: "pistol", utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     };
   }
 
+  // If a fixed loadout is specified, force it every round; eco state doesn't
+  // matter (and we always reset money to be safe). simpleBuy is only used in
+  // "auto" mode.
+  const ctForced = p.ctLoadout !== "auto";
+  const tForced = p.tLoadout !== "auto";
+  const forced = ctForced || tForced;
+
   let ctLossStreak = 0, tLossStreak = 0;
   const stats = emptyStats();
-  const progressEvery = Math.max(1, Math.floor(req.rounds / 50));
+  const progressEvery = Math.max(1, Math.floor(p.rounds / 50));
 
-  for (let i = 0; i < req.rounds; i++) {
-    if (req.resetEachRound) {
-      // Truly independent rounds: wipe money AND kept loadouts so the previous
-      // round's outcome can't bias this one (otherwise survivors keep rifles
-      // for free and the early-lead side snowballs).
+  for (let i = 0; i < p.rounds; i++) {
+    if (p.resetEachRound || forced) {
       for (const team of [home, away]) {
-        for (const p of team.players) {
-          p.money = INDEPENDENT_ROUND_STIPEND;
-          team.loadouts[p.id] = {
+        for (const pl of team.players) {
+          pl.money = INDEPENDENT_ROUND_STIPEND;
+          team.loadouts[pl.id] = {
             weapon: "pistol", utility: [], armor: false, helmet: false,
             keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
           };
@@ -111,10 +179,10 @@ function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunS
       ctLossStreak = 0;
       tLossStreak = 0;
     }
-    simpleBuy(home);
-    simpleBuy(away);
+    applyPreset(home, p.ctLoadout);
+    applyPreset(away, p.tLoadout);
 
-    const sim = new RoundSim(home, away, req.map, Math.floor(Math.random() * 1e9));
+    const sim = new RoundSim(home as any, away as any, p.map, Math.floor(Math.random() * 1e9));
     let safety = 100000;
     while (!sim.finished && safety-- > 0) sim.tick();
     if (!sim.result) continue;
@@ -132,15 +200,16 @@ function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunS
 
     for (const e of r.events) {
       if (e.kind === "kill") {
-        if (home.players.some(p => p.id === e.killer)) stats.ctKills++;
+        if (home.players.some(pl => pl.id === e.killer)) stats.ctKills++;
         else stats.tKills++;
       } else if (e.kind === "bomb-plant") {
         stats.plants++;
       }
     }
 
+    // Carry over surviving loadouts (only meaningful in "auto" mode without reset).
     for (const ag of sim.agents) {
-      const team = home.players.some(p => p.id === ag.playerId) ? home : away;
+      const team = home.players.some(pl => pl.id === ag.playerId) ? home : away;
       if (ag.alive) {
         const hasVest = ag.armor > 30;
         const keptUtil = [...ag.utility];
@@ -157,11 +226,11 @@ function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunS
       }
     }
 
-    const next = applyRoundReward(home, away, r, ctLossStreak, tLossStreak);
+    const next = applyRoundReward(home as any, away as any, r, ctLossStreak, tLossStreak);
     ctLossStreak = next.ctLossStreak;
     tLossStreak = next.tLossStreak;
 
-    if ((i + 1) % progressEvery === 0) onProgress(i + 1);
+    if ((i + 1) % progressEvery === 0) p.onProgress(i + 1);
   }
   return stats;
 }
@@ -169,10 +238,42 @@ function simulate(req: BalanceRequest, onProgress: (done: number) => void): RunS
 self.addEventListener("message", (e: MessageEvent<BalanceRequest>) => {
   const req = e.data;
   if (req.kind !== "run") return;
-  const stats = simulate(req, (done) => {
-    const msg: BalanceProgress = { kind: "progress", done, total: req.rounds };
-    self.postMessage(msg);
-  });
-  const result: BalanceResult = { kind: "done", stats };
-  self.postMessage(result);
+
+  if (req.matrix) {
+    const cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[] = [];
+    const total = ALL_PRESETS.length * ALL_PRESETS.length;
+    let cellIndex = 0;
+    for (const ct of ALL_PRESETS) {
+      for (const t of ALL_PRESETS) {
+        cellIndex++;
+        const stats = simulateCell({
+          map: req.map, rounds: req.rounds,
+          neutralize: req.neutralize, resetEachRound: req.resetEachRound,
+          ctLoadout: ct, tLoadout: t,
+          onProgress: (done) => {
+            const msg: BalanceProgress = {
+              kind: "progress", done, total: req.rounds,
+              cell: { ct, t, index: cellIndex, count: total },
+            };
+            self.postMessage(msg);
+          },
+        });
+        cells.push({ ct, t, stats });
+      }
+    }
+    const result: BalanceMatrixResult = { kind: "done-matrix", cells };
+    self.postMessage(result);
+  } else {
+    const stats = simulateCell({
+      map: req.map, rounds: req.rounds,
+      neutralize: req.neutralize, resetEachRound: req.resetEachRound,
+      ctLoadout: req.ctLoadout, tLoadout: req.tLoadout,
+      onProgress: (done) => {
+        const msg: BalanceProgress = { kind: "progress", done, total: req.rounds };
+        self.postMessage(msg);
+      },
+    });
+    const result: BalanceResult = { kind: "done", stats };
+    self.postMessage(result);
+  }
 });
