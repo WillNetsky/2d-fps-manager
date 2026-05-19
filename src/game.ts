@@ -181,9 +181,38 @@ export async function initGame(app: HTMLElement) {
     },
   });
   timeline.el.style.display = "none";
+  // Replay kill-feed state: replay frames are stateless, so we keep a cursor
+  // into the recorded events and feed kills as the playback time passes them.
+  let replayEvents: import("./domain/types.ts").SimEvent[] = [];
+  let replayEventCursor = 0;
+  let replayLastT = -1;
   replayPlayer.setOnFrame((view, idx) => {
     renderer.syncAgents(view);
     timeline.setIndex(idx);
+
+    if (replayEvents.length > 0) {
+      // Backward jump or loop-wrap: rewind feed + cursor.
+      if (view.t < replayLastT) {
+        killFeed.clear();
+        replayEventCursor = 0;
+      }
+      while (replayEventCursor < replayEvents.length && replayEvents[replayEventCursor].t <= view.t) {
+        const e = replayEvents[replayEventCursor++];
+        if (e.kind !== "kill") continue;
+        const k = playerLookup(e.killer);
+        const v = playerLookup(e.victim);
+        const kSide = sideOfPlayer(e.killer);
+        const vSide = sideOfPlayer(e.victim);
+        if (k && v && kSide && vSide) {
+          killFeed.push(
+            { name: shortName(k), side: kSide },
+            { name: shortName(v), side: vSide },
+            e.weapon, e.headshot,
+          );
+        }
+      }
+      replayLastT = view.t;
+    }
   });
 
   function paintHud() {
@@ -303,6 +332,7 @@ export async function initGame(app: HTMLElement) {
     timeline.el.style.display = "none";
     renderer.clearTransient();
     killFeed.clear();
+    replayEvents = [];
     setStatus("live");
 
     sim = new RoundSim(ctSideTeam(), tSideTeam(), map, Math.floor(Math.random() * 1e9));
@@ -511,10 +541,15 @@ export async function initGame(app: HTMLElement) {
           });
           timeline.setReplay(finishedSim.snapshots.length, finishedSim.events, 50, `REPLAY · round ${roundNumber - 1}`, sideOfPlayer);
           timeline.el.style.display = "";
+          // Reset replay kill-feed cursor; the onFrame callback will repopulate
+          // the feed as the recorded kill events scroll past.
+          killFeed.clear();
+          replayEvents = finishedSim.events;
+          replayEventCursor = 0;
+          replayLastT = -1;
           replayPlayer.play();
           timeline.setPlaying(true);
           setStatus("replay");
-          killFeed.clear();
         }
       }, 1200);
     }
