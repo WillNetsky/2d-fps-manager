@@ -1,6 +1,7 @@
 import { makeMap, makeTeam, setSeed } from "./domain/factory.ts";
 import { RoundSim } from "./sim/round.ts";
 import { applyRoundReward } from "./sim/economy.ts";
+import { aiBuyFor as runAiBuy } from "./sim/aiBuy.ts";
 import { WEAPONS as WEAPONS_DICT, defaultPistol } from "./domain/weapons.ts";
 import { ReplayPlayer } from "./sim/replay.ts";
 import { Renderer } from "./render/renderer.ts";
@@ -29,7 +30,7 @@ export async function initGame(app: HTMLElement) {
   const HALFTIME_ROUND = 12;
   const WIN_THRESHOLD = 13;
   const MAX_ROUNDS = 24;
-  const isPistolRound = (n: number) => n === 1 || n === HALFTIME_ROUND + 1;
+  const isPistolRound = (n: number): boolean => n === 1 || n === HALFTIME_ROUND + 1;
 
   // --- Teams + map (custom takes precedence if present) ---
   const map = loadCustomMap() ?? makeMap();
@@ -233,79 +234,7 @@ export async function initGame(app: HTMLElement) {
   let lastRotationIdx = 0;
 
   function aiBuyFor(team: Team) {
-    type WId = import("./domain/types.ts").WeaponId;
-    type UId = import("./domain/types.ts").UtilityId;
-    const VEST = 650;
-    const HELMET = 350;
-    const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
-    const rifle: WId = team.side === "T" ? "ak" : "m4";
-    const smg: WId   = team.side === "T" ? "mac10" : "mp9";
-
-    const players = team.players;
-    const W = (id: WId) => WEAPONS_DICT[id];
-
-    for (let i = 0; i < players.length; i++) {
-      const p = players[i];
-      const existing = team.loadouts[p.id];
-      const kept = existing.keptWeapon;
-      const keptArmor = existing.keptArmor;
-      const keptHelmet = existing.keptHelmet;
-      const keptUtil = [...existing.keptUtility];
-      const share = p.money;
-      const wCost = (id: WId) => id === kept ? 0 : W(id).cost;
-      const uCost = (u: UId) => keptUtil.includes(u) ? 0 : UPRICE[u];
-
-      let weapon: WId = kept ?? defaultPistol(team.side);
-      let spent = 0;
-      let armor = keptArmor;
-      let helmet = keptHelmet;
-      const util: UId[] = [...keptUtil];
-      // Utility preference: weighted roll between smoke and flash by the
-      // player's lineup/timing ratings instead of a role-based pick.
-      const smokeW = Math.max(1, p.stats.smokeLineups);
-      const flashW = Math.max(1, p.stats.flashTiming);
-      const want: UId = Math.random() * (smokeW + flashW) < smokeW ? "smoke" : "flash";
-
-      if (isPistolRound(roundNumber)) {
-        weapon = defaultPistol(team.side);
-        helmet = false;
-        // Composed/disciplined players are more willing to spend on armor.
-        const vestChance = 0.25 + (p.stats.composure + p.stats.discipline) / 400;
-        const wantsVest = Math.random() < vestChance;
-        if (wantsVest && share >= VEST) {
-          armor = true;
-          spent += VEST;
-        } else if (!util.includes(want) && share - spent >= uCost(want)) {
-          util.push(want);
-          spent += uCost(want);
-        }
-      } else {
-        const isRifle = (w: WId) => W(w).slot === "rifle";
-        // Likelihood of going for the AWP scales with the player's awpPref
-        // rating — roll it instead of locking the buy to a role label.
-        const awpChance = Math.max(0, (p.stats.awpPref - 50) / 50);
-        const wantsAwp = Math.random() < awpChance;
-        if (wantsAwp && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
-        else if (!isRifle(weapon) && weapon !== "awp" && share >= wCost(rifle)) weapon = rifle;
-        else if (W(weapon).slot === "pistol" && share >= wCost(smg)) weapon = smg;
-        // Pistol upgrade if we're stuck on pistol and have spare cash for a deagle.
-        if (W(weapon).slot === "pistol" && weapon !== "deagle" && share >= wCost("deagle")) weapon = "deagle";
-
-        spent = wCost(weapon);
-        if (!armor && W(weapon).slot !== "pistol" && share - spent >= VEST) { armor = true; spent += VEST; }
-        if (armor && !helmet && W(weapon).slot !== "pistol" && share - spent >= HELMET) { helmet = true; spent += HELMET; }
-        if (!util.includes(want) && share - spent >= uCost(want)) {
-          util.push(want);
-          spent += uCost(want);
-        }
-      }
-
-      team.loadouts[p.id] = {
-        weapon, utility: util, armor, helmet,
-        keptWeapon: kept, keptArmor, keptHelmet, keptUtility: keptUtil,
-      };
-      p.money = Math.max(0, p.money - spent);
-    }
+    runAiBuy(team, roundNumber, isPistolRound);
   }
 
   function halftimeSwap() {

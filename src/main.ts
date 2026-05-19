@@ -2,6 +2,7 @@ import "./styles.css";
 import { MapEditor } from "./editor/mapEditor.ts";
 import { BalanceMode } from "./balance/balanceMode.ts";
 import { MainMenu } from "./menu/mainMenu.ts";
+import { UniverseMode } from "./universe/universeMode.ts";
 import { initGame } from "./game.ts";
 
 const app = document.getElementById("app")!;
@@ -12,6 +13,8 @@ if (window.location.hash === "#editor") {
   new MapEditor(app);
 } else if (window.location.hash === "#balance") {
   new BalanceMode(app);
+} else if (window.location.hash === "#universe") {
+  new UniverseMode(app);
 } else if (window.location.hash === "#play") {
   initGame(app);
 } else {

@@ -8,7 +8,7 @@ type MenuItem = {
 
 const ITEMS: MenuItem[] = [
   { label: "Demo Match",     desc: "Quick match with random players on the current map", hash: "#play" },
-  { label: "Universe Mode",  desc: "Career & franchise management", hash: "", disabled: true, badge: "Coming soon" },
+  { label: "Universe Mode",  desc: "Generate a player pool, play daily matchups, watch elo move", hash: "#universe" },
   { label: "Map Editor",     desc: "Design and validate custom maps", hash: "#editor" },
   { label: "Balance Testing", desc: "Run loadout sims and balance experiments", hash: "#balance" },
 ];
