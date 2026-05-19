@@ -143,6 +143,7 @@ export interface DroppedWeapon {
 export interface MatchStats {
   kills: number;
   deaths: number;
+  assists: number;      // damaged the victim before they died, but didn't get the kill
   damage: number;       // total damage dealt this match
   roundsPlayed: number;
 }

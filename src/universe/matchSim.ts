@@ -33,7 +33,7 @@ export function buildTeam(id: string, name: string, players: Player[], side: Sid
       weapon: defaultPistol(side), utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     }])),
-    matchStats: Object.fromEntries(cloned.map(p => [p.id, { kills: 0, deaths: 0, damage: 0, roundsPlayed: 0 }])),
+    matchStats: Object.fromEntries(cloned.map(p => [p.id, { kills: 0, deaths: 0, assists: 0, damage: 0, roundsPlayed: 0 }])),
   };
 }
 

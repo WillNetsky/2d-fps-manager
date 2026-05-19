@@ -790,7 +790,7 @@ export class RoundSim {
         if (d2 > m.radius * m.radius) continue;
         const applied = Math.min(a.hp, dmgPerTick);
         a.hp -= dmgPerTick;
-        this.addDamage(m.thrower, applied);
+        this.addDamage(m.thrower, a.playerId, applied);
         // Flee — set a goal away from the fire.
         const d = Math.sqrt(d2) || 1;
         const flee: Vec2 = { x: a.pos.x + (dx / d) * 200, y: a.pos.y + (dy / d) * 200 };
@@ -806,6 +806,7 @@ export class RoundSim {
           this.push({ t: this.t, kind: "kill", killer: m.thrower, victim: a.playerId, weapon: "molotov", headshot: false });
           this.bumpStat(m.thrower, "kills", 1);
           this.bumpStat(a.playerId, "deaths", 1);
+          this.awardAssists(a.playerId, m.thrower);
         }
         break; // one fire DOT per tick per agent
       }
@@ -872,7 +873,7 @@ export class RoundSim {
       }
       const applied = Math.min(a.hp, dmg);
       a.hp -= dmg;
-      this.addDamage(he.thrower, applied);
+      this.addDamage(he.thrower, a.playerId, applied);
       if (a.hp <= 0) {
         a.alive = false; a.hp = 0;
         if (a.weapon !== "knife") {
@@ -882,6 +883,7 @@ export class RoundSim {
         this.push({ t: this.t, kind: "kill", killer: he.thrower, victim: a.playerId, weapon: "he", headshot: false });
         this.bumpStat(he.thrower, "kills", 1);
         this.bumpStat(a.playerId, "deaths", 1);
+        this.awardAssists(a.playerId, he.thrower);
       }
     }
   }
@@ -1763,7 +1765,7 @@ export class RoundSim {
     }
     const applied = Math.min(enemy.hp, dmg);
     enemy.hp -= dmg;
-    this.addDamage(a.playerId, applied);
+    this.addDamage(a.playerId, enemy.playerId, applied);
     // Taking damage breaks save mode — you've been found.
     if (enemy.saving) { enemy.saving = false; enemy.dirty = true; }
 
@@ -1780,6 +1782,7 @@ export class RoundSim {
       victim.mood = clamp(victim.mood - 3, 0, 100);
       this.bumpStat(a.playerId, "kills", 1);
       this.bumpStat(enemy.playerId, "deaths", 1);
+      this.awardAssists(enemy.playerId, a.playerId);
 
       // Open trade window: enemy's teammates can punish a.playerId.
       this.tradeMarks.push({
@@ -1964,7 +1967,7 @@ export class RoundSim {
     }
     const applied = Math.min(target.hp, dmg);
     target.hp -= dmg;
-    this.addDamage(a.playerId, applied);
+    this.addDamage(a.playerId, target.playerId, applied);
     if (target.saving) { target.saving = false; target.dirty = true; }
     if (target.hp <= 0) {
       target.alive = false;
@@ -1975,6 +1978,7 @@ export class RoundSim {
       this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: target.playerId, weapon: a.weapon, headshot: false });
       this.bumpStat(a.playerId, "kills", 1);
       this.bumpStat(target.playerId, "deaths", 1);
+      this.awardAssists(target.playerId, a.playerId);
       if (target.playerId === this.bombCarrier) this.dropBomb(target);
     }
   }
@@ -2183,16 +2187,33 @@ export class RoundSim {
     return null;
   }
 
-  private bumpStat(playerId: string, key: "kills" | "deaths" | "roundsPlayed", amount: number) {
+  private bumpStat(playerId: string, key: "kills" | "deaths" | "assists" | "roundsPlayed", amount: number) {
     const team = this.teamOfPlayer(playerId);
     if (!team) return;
     team.matchStats[playerId][key] += amount;
   }
 
-  private addDamage(playerId: string, amount: number) {
-    const team = this.teamOfPlayer(playerId);
-    if (!team) return;
-    team.matchStats[playerId].damage += amount;
+  // Per-round damage ledger: attackerId → victimId → cumulative damage. Used
+  // to award assists when a victim dies.
+  private damageLedger: Map<string, Map<string, number>> = new Map();
+
+  private addDamage(attackerId: string, victimId: string, amount: number) {
+    const team = this.teamOfPlayer(attackerId);
+    if (team) team.matchStats[attackerId].damage += amount;
+    let perVictim = this.damageLedger.get(attackerId);
+    if (!perVictim) { perVictim = new Map(); this.damageLedger.set(attackerId, perVictim); }
+    perVictim.set(victimId, (perVictim.get(victimId) ?? 0) + amount);
+  }
+
+  // After a kill is registered, anyone who damaged the victim before they
+  // died but isn't the killer earns an assist.
+  private awardAssists(victimId: string, killerId: string) {
+    for (const [attackerId, perVictim] of this.damageLedger) {
+      if (attackerId === killerId) continue;
+      if ((perVictim.get(victimId) ?? 0) > 0) {
+        this.bumpStat(attackerId, "assists", 1);
+      }
+    }
   }
 }
 

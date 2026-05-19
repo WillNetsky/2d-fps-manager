@@ -97,6 +97,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   let simRestInstantly = false;
   let lastEventIdx = 0;
   let cleaned = false;
+  const roundMvps: Record<string, number> = {};
 
   paintHud();
   startRound();
@@ -189,6 +190,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     carryOverLoadouts(ctSide, sim);
     carryOverLoadouts(tSideRef, sim);
 
+    // Round MVP: most kills on the winning team, fallback to plant / defuse.
+    const mvpId = pickRoundMvp(r, winner);
+    if (mvpId) roundMvps[mvpId] = (roundMvps[mvpId] ?? 0) + 1;
+
     paintHud();
 
     const matchOver =
@@ -199,8 +204,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     if (matchOver) {
       const winnerSide: "CT" | "T" = ct.roundsWon > tSide.roundsWon ? "CT" : "T";
       const result: MatchResult = { ctScore: ct.roundsWon, tScore: tSide.roundsWon, winnerSide };
-      cleanup();
-      opts.onDone(result);
+      showPostgame(result);
       return;
     }
 
@@ -254,7 +258,23 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     }
   }
 
+  function showPostgame(result: MatchResult) {
+    // Tear down live UI but defer the onDone callback until the user dismisses
+    // the postgame card.
+    if (simInterval) { clearInterval(simInterval); simInterval = null; }
+    killFeed.dispose();
+    renderer.destroy();
+    cleaned = true;
+    host.innerHTML = "";
+    host.className = "universe-postgame";
+    renderPostgame(host, {
+      ct, tSide, result, roundMvps,
+      onContinue: () => opts.onDone(result),
+    });
+  }
+
   function cleanup() {
+    if (cleaned) return;
     cleaned = true;
     if (simInterval) { clearInterval(simInterval); simInterval = null; }
     killFeed.dispose();
@@ -262,4 +282,152 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   }
 
   return { dispose: cleanup };
+}
+
+// ---- Round MVP ----
+
+function pickRoundMvp(r: import("../domain/types.ts").RoundResult, winner: Team): string | null {
+  const kills = new Map<string, number>();
+  for (const e of r.events) {
+    if (e.kind !== "kill") continue;
+    if (!winner.players.some(p => p.id === e.killer)) continue;
+    kills.set(e.killer, (kills.get(e.killer) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let bestKills = 0;
+  for (const [id, k] of kills) {
+    if (k > bestKills) { bestKills = k; best = id; }
+  }
+  if (best) return best;
+  // No kills on the winning side — credit the objective player.
+  if (r.winningSide === "T") {
+    const plant = r.events.find(e => e.kind === "bomb-plant");
+    if (plant && plant.kind === "bomb-plant") return plant.planter;
+  } else {
+    const def = r.events.find(e => e.kind === "bomb-defuse");
+    if (def && def.kind === "bomb-defuse") return def.defuser;
+  }
+  return null;
+}
+
+// ---- Postgame screen ----
+
+interface PostgameOptions {
+  ct: Team;
+  tSide: Team;
+  result: MatchResult;
+  roundMvps: Record<string, number>;
+  onContinue: () => void;
+}
+
+function renderPostgame(host: HTMLElement, opts: PostgameOptions): void {
+  const { ct, tSide, result, roundMvps, onContinue } = opts;
+  const winningTeam = result.winnerSide === "CT" ? ct : tSide;
+
+  const wrap = document.createElement("div");
+  wrap.className = "postgame-wrap";
+
+  // Header — score
+  const header = document.createElement("div");
+  header.className = "postgame-header";
+  header.innerHTML =
+    `<div class="postgame-team-name ct">${escapePg(ct.name)}</div>` +
+    `<div class="postgame-score">` +
+      `<span class="ct${result.winnerSide === "CT" ? " winner" : ""}">${result.ctScore}</span>` +
+      `<span class="sep">:</span>` +
+      `<span class="t${result.winnerSide === "T" ? " winner" : ""}">${result.tScore}</span>` +
+    `</div>` +
+    `<div class="postgame-team-name t">${escapePg(tSide.name)}</div>`;
+  wrap.appendChild(header);
+
+  // Match MVP
+  const allPlayers = [...ct.players, ...tSide.players];
+  const mvpScore = (id: string) => {
+    const team = ct.players.some(p => p.id === id) ? ct : tSide;
+    const s = team.matchStats[id];
+    return (roundMvps[id] ?? 0) * 5 + s.kills * 2 + s.assists + s.damage / 50;
+  };
+  let mvpId: string | null = null;
+  let bestScore = -Infinity;
+  for (const p of allPlayers) {
+    const sc = mvpScore(p.id);
+    if (sc > bestScore) { bestScore = sc; mvpId = p.id; }
+  }
+  if (mvpId) {
+    const mvpPlayer = allPlayers.find(p => p.id === mvpId)!;
+    const team = ct.players.some(p => p.id === mvpId) ? ct : tSide;
+    const onWinner = team === winningTeam;
+    const s = team.matchStats[mvpId];
+    const mvpCard = document.createElement("div");
+    mvpCard.className = "postgame-mvp";
+    mvpCard.innerHTML =
+      `<div class="pg-mvp-label">Match MVP${onWinner ? "" : " <span class='pg-mvp-sub'>(losing side)</span>"}</div>` +
+      `<div class="pg-mvp-name">${escapePg(mvpPlayer.name)}</div>` +
+      `<div class="pg-mvp-line">${s.kills} K · ${s.deaths} D · ${s.assists} A · ${roundMvps[mvpId] ?? 0} round MVP${(roundMvps[mvpId] ?? 0) === 1 ? "" : "s"} · ${Math.round(s.damage)} dmg</div>`;
+    wrap.appendChild(mvpCard);
+  }
+
+  // Two team tables side by side.
+  const tables = document.createElement("div");
+  tables.className = "postgame-tables";
+  tables.appendChild(teamStatsTable(ct, roundMvps, mvpId, "ct"));
+  tables.appendChild(teamStatsTable(tSide, roundMvps, mvpId, "t"));
+  wrap.appendChild(tables);
+
+  // Continue button
+  const actions = document.createElement("div");
+  actions.className = "postgame-actions";
+  const btn = document.createElement("button");
+  btn.className = "universe-btn primary big";
+  btn.textContent = "Continue →";
+  btn.onclick = onContinue;
+  actions.appendChild(btn);
+  wrap.appendChild(actions);
+
+  host.appendChild(wrap);
+}
+
+function teamStatsTable(team: Team, roundMvps: Record<string, number>, mvpId: string | null, side: "ct" | "t"): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = `postgame-team postgame-team-${side}`;
+
+  const title = document.createElement("div");
+  title.className = "postgame-team-title";
+  title.textContent = team.name;
+  wrap.appendChild(title);
+
+  const table = document.createElement("table");
+  table.className = "postgame-table";
+  table.innerHTML =
+    `<thead><tr><th>Player</th><th>K</th><th>D</th><th>A</th><th>MVP</th><th>DMG</th></tr></thead>`;
+  const tbody = document.createElement("tbody");
+  const sorted = [...team.players].sort((a, b) => {
+    const sa = team.matchStats[a.id], sb = team.matchStats[b.id];
+    return (sb.kills - sa.kills) || (sb.damage - sa.damage);
+  });
+  for (const p of sorted) {
+    const s = team.matchStats[p.id];
+    const tr = document.createElement("tr");
+    if (p.id === mvpId) tr.className = "is-mvp";
+    tr.innerHTML =
+      `<td class="pg-name">${escapePg(shortNamePg(p))}</td>` +
+      `<td>${s.kills}</td>` +
+      `<td>${s.deaths}</td>` +
+      `<td>${s.assists}</td>` +
+      `<td>${roundMvps[p.id] ?? 0}</td>` +
+      `<td>${Math.round(s.damage)}</td>`;
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function shortNamePg(p: Player): string {
+  const m = p.name.match(/"([^"]+)"/);
+  return m ? m[1] : p.name.split(" ")[0];
+}
+
+function escapePg(s: string): string {
+  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
 }

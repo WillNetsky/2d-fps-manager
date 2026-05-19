@@ -162,7 +162,7 @@ export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {
       weapon: defaultPistol(side), utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     }])),
-    matchStats: Object.fromEntries(players.map(p => [p.id, { kills: 0, deaths: 0, damage: 0, roundsPlayed: 0 }])),
+    matchStats: Object.fromEntries(players.map(p => [p.id, { kills: 0, deaths: 0, assists: 0, damage: 0, roundsPlayed: 0 }])),
   };
 }
 
