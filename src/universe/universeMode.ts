@@ -244,7 +244,8 @@ export class UniverseMode {
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
-        vs.innerHTML = `<div class="umc-score"><span class="ct">${m.ctScore}</span><span>:</span><span class="t">${m.tScore}</span></div><div class="umc-winner">${m.winnerSide === "CT" ? "CT wins" : "T wins"}</div>`;
+        const ctWon = m.winnerSide === "CT";
+        vs.innerHTML = `<div class="umc-score"><span class="ct${ctWon ? " winner" : ""}">${m.ctScore}</span><span>:</span><span class="t${ctWon ? "" : " winner"}">${m.tScore}</span></div>`;
       } else {
         vs.textContent = "vs";
       }

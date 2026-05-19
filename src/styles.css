@@ -830,10 +830,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   text-align: center; font-size: 11px; color: var(--muted);
   text-transform: uppercase; letter-spacing: 0.1em;
 }
-.umc-score { font-size: 18px; font-weight: 600; display: flex; gap: 4px; justify-content: center; align-items: baseline; color: var(--text); }
-.umc-score .ct { color: var(--ct); }
-.umc-score .t { color: var(--t); }
-.umc-winner { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.umc-score { font-size: 20px; font-weight: 700; display: flex; gap: 4px; justify-content: center; align-items: baseline; color: var(--text); }
+.umc-score .ct { color: var(--ct); opacity: 0.55; }
+.umc-score .t { color: var(--t); opacity: 0.55; }
+.umc-score .ct.winner, .umc-score .t.winner { opacity: 1; text-shadow: 0 0 6px currentColor; }
 .umc-actions { display: flex; gap: 6px; }
 .umc-actions .universe-btn { flex: 1; }
 

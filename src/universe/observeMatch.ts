@@ -89,7 +89,6 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   // After halftime these references swap (the same Team object plays the other side).
   let ctSide: Team = ct;
   let tSideRef: Team = tSide;
-  let homeIsCt = true;
 
   let sim: RoundSim | null = null;
   let simInterval: number | null = null;
@@ -104,10 +103,12 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
   function paintHud() {
     const half = roundNumber <= HALFTIME_ROUND ? 1 : 2;
+    // Score is tracked per original team identity, not by current side, so the
+    // labels stay stable across halftime.
     hud.innerHTML =
-      `<span class="ct">${ct.name} ${homeIsCt ? ct.roundsWon : tSide.roundsWon}</span>` +
+      `<span class="ct">${ct.name} ${ct.roundsWon}</span>` +
       `<span class="sep">R${roundNumber} · H${half}</span>` +
-      `<span class="t">${homeIsCt ? tSide.roundsWon : ct.roundsWon} ${tSide.name}</span>`;
+      `<span class="t">${tSide.roundsWon} ${tSide.name}</span>`;
   }
 
   function startRound() {
@@ -213,7 +214,6 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   }
 
   function halftimeSwap() {
-    homeIsCt = !homeIsCt;
     [ctSide, tSideRef] = [tSideRef, ctSide];
     ctSide.side = "CT";
     tSideRef.side = "T";
