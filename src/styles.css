@@ -818,6 +818,11 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .umc-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
 .umc-teams { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; }
 .umc-roster { display: flex; flex-direction: column; gap: 2px; }
+.umc-team-header { padding: 4px 6px 6px; margin-bottom: 2px; border-bottom: 1px solid var(--line); }
+.umc-roster.ct .umc-team-name { color: var(--ct); }
+.umc-roster.t  .umc-team-name { color: var(--t); }
+.umc-team-name { font-size: 12px; font-weight: 600; }
+.umc-team-elo { font-size: 10px; color: var(--muted); font-family: ui-monospace, monospace; }
 .umc-roster.ct .umc-roster-row { border-left: 2px solid var(--ct); }
 .umc-roster.t  .umc-roster-row { border-left: 2px solid var(--t); }
 .umc-roster-row {

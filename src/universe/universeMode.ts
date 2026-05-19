@@ -410,12 +410,31 @@ function rosterColumn(
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
-  for (const id of ids) {
-    const p = byId.get(id);
-    if (!p) continue;
+
+  // Faceit-style team naming: the highest-elo player names the team. Tie-break
+  // deterministically by player id so the display stays stable across renders.
+  const players = ids.map(id => byId.get(id)).filter((p): p is Player => !!p);
+  const captain = [...players].sort((a, b) => {
+    const da = elos[a.id] ?? STARTING_ELO;
+    const db = elos[b.id] ?? STARTING_ELO;
+    if (db !== da) return db - da;
+    return a.id.localeCompare(b.id);
+  })[0];
+  const avgElo = players.length
+    ? players.reduce((s, p) => s + (elos[p.id] ?? STARTING_ELO), 0) / players.length
+    : STARTING_ELO;
+
+  const header = document.createElement("div");
+  header.className = "umc-team-header";
+  header.innerHTML =
+    `<div class="umc-team-name">Team ${escapeHtml(shortName(captain))}</div>` +
+    `<div class="umc-team-elo">Avg ${Math.round(avgElo)}</div>`;
+  col.appendChild(header);
+
+  for (const p of players) {
     const row = document.createElement("div");
     row.className = "umc-roster-row";
-    row.innerHTML = `<span class="umc-name">${escapeHtml(shortName(p))}</span><span class="umc-elo">${Math.round(elos[id] ?? STARTING_ELO)}</span>`;
+    row.innerHTML = `<span class="umc-name">${escapeHtml(shortName(p))}</span><span class="umc-elo">${Math.round(elos[p.id] ?? STARTING_ELO)}</span>`;
     col.appendChild(row);
   }
   return col;
