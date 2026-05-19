@@ -1,5 +1,5 @@
 import type {
-  Agent, DroppedWeapon, Flash, GameMap, GrenadeInFlight, GrenadeKind, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, UtilityId, Vec2,
+  Agent, AgentPersonality, DroppedWeapon, Flash, GameMap, GrenadeInFlight, GrenadeKind, HE, Molotov, Player, PlayerStats, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, UtilityId, Vec2,
 } from "../domain/types.ts";
 import { HEADSHOT_BASE, HELMET_UPGRADE_COST, VEST_COST, WEAPONS, WEAPON_FALLOFF_UNIT } from "../domain/weapons.ts";
 import { findPath } from "./pathfind.ts";
@@ -243,7 +243,7 @@ export class RoundSim {
         autoCts.push(a);
       }
     }
-    // Order remaining autos by role priority.
+    // Order remaining autos by a stat-derived initiative score with jitter.
     autoCts.sort((x, y) => this.priority(x) - this.priority(y));
     autoCts.forEach((a, i) => { a.assignedSite = slots[i] ?? "A"; });
 
@@ -262,10 +262,20 @@ export class RoundSim {
         splitOne = true;
         break;
     }
-    // Lurker peels to opposite site if splitting.
+    // On a split execute, one T peels to the opposite site. Pick the peeler
+    // with a stat-weighted lottery — patient, positioning-minded, low-aggression
+    // players are likelier picks, but it's a dice roll, not a hard rule.
+    let peelerId: string | null = null;
+    if (splitOne) {
+      const peelWeight = (a: Agent) => {
+        const s = this.players(a.playerId)!.stats;
+        const w = (s.patience + s.positioning + s.mapAwareness) / 3 - s.aggression * 0.5;
+        return Math.max(1, w + 40); // keep all weights positive
+      };
+      peelerId = this.weightedPick(ts, peelWeight)?.playerId ?? null;
+    }
     ts.forEach(a => {
-      const player = this.players(a.playerId)!;
-      if (splitOne && player.role === "lurker") {
+      if (splitOne && a.playerId === peelerId) {
         a.assignedSite = primary === "A" ? "B" : "A";
       } else {
         a.assignedSite = primary;
@@ -277,27 +287,27 @@ export class RoundSim {
     }
   }
 
-  // Choose a hold point within the agent's assigned region. Role priority:
-  //   entry/awper → forward choke / mid-aggro
-  //   lurker     → flank when available
-  //   support/igl/default → anchor
+  // Choose a hold point within the agent's assigned region. Each hold point's
+  // archetype (choke / anchor / flank / mid-aggro / mid-info) scores against
+  // the player's stat sheet; we then run a weighted lottery so picks reflect
+  // the player's profile without locking them to a single archetype.
   private pickHoldPoint(a: Agent): string | null {
     const region = a.assignedSite;
     const pool = this.mapAnalysis.holdPoints[region];
     if (!pool || pool.length === 0) return null;
-    const role = this.players(a.playerId)!.role;
-    const byRole = (r: string) => pool.find(h => h.role === r) ?? null;
-    let pick = null as ReturnType<typeof byRole>;
-    if (region === "mid") {
-      pick = (role === "entry" || role === "awper") ? (byRole("mid-aggro") ?? byRole("mid-info")) : byRole("mid-info");
-    } else if (role === "entry" || role === "awper") {
-      pick = byRole("choke") ?? byRole("flank") ?? byRole("anchor");
-    } else if (role === "lurker") {
-      pick = byRole("flank") ?? byRole("anchor") ?? byRole("choke");
-    } else {
-      pick = byRole("anchor") ?? byRole("choke");
-    }
-    return pick?.id ?? pool[0].id;
+    const s = this.players(a.playerId)!.stats;
+    const fit = (r: string): number => {
+      switch (r) {
+        case "choke":     return (s.aggression + s.flickAim + s.reflexes) / 3;
+        case "anchor":    return (s.patience + s.positioning + s.discipline) / 3;
+        case "flank":     return (s.patience + s.positioning + s.mapAwareness) / 3 - s.aggression * 0.3;
+        case "mid-aggro": return (s.aggression + s.flickAim + s.tapping) / 3;
+        case "mid-info":  return (s.mapAwareness + s.gameSense + s.positioning) / 3;
+        default:          return 50;
+      }
+    };
+    const picked = this.weightedPick(pool, hp => Math.max(1, fit(hp.role) - 30));
+    return picked?.id ?? pool[0].id;
   }
 
   private holdPointWorldPos(a: Agent): Vec2 | null {
@@ -308,14 +318,55 @@ export class RoundSim {
     return this.tileCenter(hp.tile);
   }
 
+  // Order in which auto-assigned CTs claim leftover site slots. Players with
+  // stronger map sense and adaptability tend to take initiative first, with a
+  // random jitter so the order isn't deterministic.
   private priority(a: Agent): number {
-    const player = this.players(a.playerId)!;
-    return { awper: 0, igl: 1, support: 2, entry: 3, lurker: 4 }[player.role];
+    const s = this.players(a.playerId)!.stats;
+    return -(s.gameSense + s.adaptability + s.mapAwareness) + this.rng() * 60;
+  }
+
+  // Stat-weighted lottery: pick one item from `items` with probability
+  // proportional to `weight(item)`. Returns null if all weights are <= 0.
+  private weightedPick<T>(items: T[], weight: (item: T) => number): T | null {
+    if (items.length === 0) return null;
+    let total = 0;
+    const weights = items.map(it => {
+      const w = Math.max(0, weight(it));
+      total += w;
+      return w;
+    });
+    if (total <= 0) return items[Math.floor(this.rng() * items.length)];
+    let roll = this.rng() * total;
+    for (let i = 0; i < items.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) return items[i];
+    }
+    return items[items.length - 1];
   }
 
   private push(e: SimEvent) { this.events.push(e); }
 
   private spawnAgents() {
+    const rollPersonality = (s: PlayerStats): AgentPersonality => {
+      // Probability lottery: convert a stat-derived score into a fair 0..1
+      // probability and roll it. Keeps everything weighted by ratings without
+      // ever using a hard if-threshold.
+      const lottery = (x: number, lo: number, hi: number) =>
+        this.rng() < clamp((x - lo) / (hi - lo), 0, 1);
+      const aggVsPatience = s.aggression - s.patience + 60; // ~0..120
+      const teamMind = (s.discipline + s.communication + s.utility) / 3; // ~30..90
+      return {
+        pushesThroughSmoke: lottery(aggVsPatience, 40, 110),
+        clutchRefusesDisengage: lottery(s.composure, 45, 95),
+        tiltsUnderPressure: lottery(100 - s.composure, 30, 80),
+        stealthBias: clamp((s.patience + s.composure - s.aggression) / 100, 0, 1),
+        anchorStickiness: clamp((s.patience + s.positioning - s.aggression) / 100, 0, 1),
+        lastAliveAimBoost: clamp((s.composure - 50) / 50, 0, 1) * 0.30,
+        bombRetrieveBias: clamp((teamMind - s.aggression / 2) / 100, 0, 1) * 0.20,
+      };
+    };
+
     const make = (p: Player, side: Side, spawn: Vec2): Agent => {
       const loadout = (side === "CT" ? this.ct : this.tSide).loadouts[p.id];
       const focus = side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
@@ -359,6 +410,7 @@ export class RoundSim {
         peekCycles: 0,
         saving: false,
         reassessSaveAt: 0,
+        personality: rollPersonality(p.stats),
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
@@ -662,8 +714,9 @@ export class RoundSim {
     const ax = Math.floor(a.pos.x / ts);
     const ay = Math.floor(a.pos.y / ts);
     const sense = stats.gameSense;
-    // Low gameSense: chance to scramble randomly instead of choosing cover.
-    if (sense < 50 && this.rng() < (50 - sense) / 100) {
+    // Chance to scramble randomly instead of choosing cover, weighted by
+    // gameSense — low-sense players are much more likely to flail.
+    if (this.rng() < Math.max(0, (60 - sense) / 100)) {
       for (let tries = 0; tries < 6; tries++) {
         const ox = Math.floor(this.rng() * 5) - 2;
         const oy = Math.floor(this.rng() * 5) - 2;
@@ -996,16 +1049,16 @@ export class RoundSim {
     const stats = player.stats;
     // Saving: stealth no matter what.
     if (a.saving) { a.moveMode = "walk"; return; }
-    // Lurkers sneak by default.
-    if (player.role === "lurker") { a.moveMode = "walk"; return; }
     // Bomb retriever walks for the last stretch so they don't run blind into ambushes.
     if (a.side === "T" && this.bombDropped && this.bombRetrieverId() === a.playerId) {
       if (dist(a.pos, this.bombDropped) < this.map.tileSize * 5) { a.moveMode = "walk"; return; }
     }
     // Cautious temperament — low aggression + high composure extends the
-    // "walk near contact" radius. Reckless players run all the way in.
+    // "walk near contact" radius. The personality's stealthBias further widens
+    // it for players whose stats favor patience and composure, so they tend to
+    // creep silently the way a lurker would, without it being a hard rule.
     const caution = clamp(((100 - stats.aggression) + stats.composure) / 200, 0, 1);
-    const walkRadius = CONTACT_RADIUS * (0.6 + caution * 0.9);
+    const walkRadius = CONTACT_RADIUS * (0.6 + caution * 0.9 + a.personality.stealthBias * 0.7);
     const contact = this.contactZoneFor(a);
     const d = dist(a.pos, contact);
     a.moveMode = d < walkRadius ? "walk" : "run";
@@ -1114,17 +1167,15 @@ export class RoundSim {
       // Willingness to play support over fragging.
       const teamMind = (stats.discipline + stats.communication) / 200;
       const aggressionPenalty = clamp((stats.aggression - 50) / 100, 0, 1);
-      const roleBonus = player.role === "support" ? 0.10
-        : player.role === "igl" ? 0.08
-        : player.role === "entry" ? -0.08
-        : player.role === "lurker" ? -0.10
-        : 0;
+      // Personality-driven bonus replaces the old role lookup — high-utility,
+      // disciplined, communicative players are likelier to volunteer for the
+      // pickup chore, all derived from stats at round start.
       const desire =
           proximity * 0.40
         + awareness * 0.35
         + teamMind  * 0.20
         - aggressionPenalty * 0.20
-        + roleBonus;
+        + a.personality.bombRetrieveBias;
       if (desire > bestScore) { bestScore = desire; best = a; }
     }
     return bestScore > 0.30 ? (best?.playerId ?? null) : null;
@@ -1196,7 +1247,11 @@ export class RoundSim {
     const sA = intel.A.score, sB = intel.B.score;
     const dominanceNeeded = INTEL_DOMINANCE * (1 - (player.stats.gameSense - 60) / 200);
     let preferred: SiteId | "mid" = a.assignedSite;
-    const canRotate = (player.role !== "lurker" || a.playerId === this.bombCarrier) && this.t >= ROTATE_MIN_T;
+    // Sticky-anchor T players resist rotating off their split unless they
+    // happen to be the bomb carrier (which always overrides). Roll weighted
+    // by personality.anchorStickiness rather than a hard role check.
+    const stickRoll = a.playerId !== this.bombCarrier && this.rng() < a.personality.anchorStickiness;
+    const canRotate = !stickRoll && this.t >= ROTATE_MIN_T;
     if (canRotate) {
       // Lighter side wins: A heavy → go B; B heavy → go A.
       if (sA - sB >= dominanceNeeded) preferred = "B";
@@ -1263,9 +1318,15 @@ export class RoundSim {
       if (sA - sB >= dominanceNeeded) preferred = "A";
       else if (sB - sA >= dominanceNeeded) preferred = "B";
     }
-    // Lurker stays anchored unless either intel is decisive OR the bomb itself is seen.
-    if (player.role === "lurker" && !bombA && !bombB && Math.abs(sA - sB) < dominanceNeeded * 2) {
-      preferred = a.assignedSite;
+    // Anchor stickiness — patient, well-positioned players resist rotating
+    // away from their assigned site unless intel is decisive OR the bomb is
+    // actually seen. Scales with personality.anchorStickiness (0..1).
+    const stickiness = a.personality.anchorStickiness;
+    const intelDiff = Math.abs(sA - sB);
+    const stickyThreshold = dominanceNeeded * (1 + stickiness * 1.5);
+    if (stickiness > 0 && !bombA && !bombB && intelDiff < stickyThreshold) {
+      // Probability of refusing the rotation scales with stickiness.
+      if (this.rng() < stickiness) preferred = a.assignedSite;
     }
     // Log rotation (rate-limited per agent)
     if (preferred !== a.assignedSite && preferred !== "mid") {
@@ -1479,9 +1540,9 @@ export class RoundSim {
       const isCarrier = a.playerId === this.bombCarrier;
       const isRushing = a.stance === "rush";
       const fading = (smokeAhead.expiresAt - this.t) < 3000;
-      // Push if aggression decisively beats patience (rating-driven temperament).
-      const willPushPersonality = player.stats.aggression > player.stats.patience + 15;
-      if (!isCarrier && !isRushing && !fading && !willPushPersonality) {
+      // Whether this agent will push blind through a smoke is a per-round
+      // personality roll weighted by aggression vs patience.
+      if (!isCarrier && !isRushing && !fading && !a.personality.pushesThroughSmoke) {
         // Hold at smoke edge — face it, in case anyone comes through.
         a.holdAngle = Math.atan2(smokeAhead.pos.y - a.pos.y, smokeAhead.pos.x - a.pos.x);
         return;
@@ -1775,11 +1836,12 @@ export class RoundSim {
       if (dist(a.pos, al.pos) < allyRange) nearbyAllies++;
     }
 
-    // Low-composure player behind on score will retreat even from solo contact.
-    const tiltPressure = stats.composure < 45 && this.scoreDeficit(a.side) >= 3;
+    // Tilt-prone players (rolled at round start from low composure) retreat
+    // from even solo contact when their team is behind on the scoreboard.
+    const tiltPressure = a.personality.tiltsUnderPressure && this.scoreDeficit(a.side) >= 3;
     const enemyThreshold = tiltPressure ? 1 : 2;
-    // Composed clutch players refuse to disengage when last alive.
-    const refuseDisengage = isLastAlive && stats.composure > 70;
+    // Clutch refusal is also a round-start roll, weighted by composure.
+    const refuseDisengage = isLastAlive && a.personality.clutchRefusesDisengage;
 
     let stance: Agent["stance"];
     if (!refuseDisengage && visibleEnemies >= enemyThreshold && nearbyAllies === 0) {
@@ -1789,8 +1851,10 @@ export class RoundSim {
       const theirCost = WEAPONS[enemy.weapon].cost;
       const ratio = myCost / Math.max(1, theirCost);
       const d = dist(a.pos, enemy.pos);
-      // Aggression scales rush threshold; clutch-last-alive adds extra push.
-      const rushBias = (stats.aggression - 60) / 200 + (isLastAlive && stats.composure > 65 ? 0.25 : 0);
+      // Aggression smoothly scales the rush threshold; last-alive players get
+      // a composure-weighted bonus (no hard composure threshold).
+      const lastAliveBonus = isLastAlive ? a.personality.lastAliveAimBoost : 0;
+      const rushBias = (stats.aggression - 60) / 200 + lastAliveBonus;
       if (ratio < 0.5 + rushBias && d > 160 && a.hp > 45) stance = "rush";
       else stance = "hold";
     }

@@ -229,6 +229,19 @@ export interface Agent {
   // their gun for the next round. Avoids engagements, hides far from contact.
   saving: boolean;
   reassessSaveAt: number;
+  // Per-round personality outcomes — rolled once at round start from stats so
+  // the sim has stable, weighted behavior without hard stat thresholds.
+  personality: AgentPersonality;
+}
+
+export interface AgentPersonality {
+  pushesThroughSmoke: boolean;     // weighted by aggression vs patience
+  clutchRefusesDisengage: boolean; // weighted by composure
+  tiltsUnderPressure: boolean;     // weighted by 100 - composure
+  stealthBias: number;             // 0..1 — extra "walk near contact" radius
+  anchorStickiness: number;        // 0..1 — resistance to rotating off site
+  lastAliveAimBoost: number;       // 0..0.3 — composure-derived clutch bonus
+  bombRetrieveBias: number;        // 0..0.2 — team-mindedness for bomb pickup
 }
 
 export type TStrategy = "rush-A" | "rush-B" | "default" | "split-A" | "split-B";

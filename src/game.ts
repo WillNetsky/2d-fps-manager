@@ -164,6 +164,13 @@ export async function initGame(app: HTMLElement) {
   balanceLink.onclick = () => { window.location.reload(); };
   canvasHost.appendChild(balanceLink);
 
+  const menuLink = document.createElement("a");
+  menuLink.href = "#";
+  menuLink.className = "editor-link menu-link";
+  menuLink.textContent = "☰ Menu";
+  menuLink.onclick = (e) => { e.preventDefault(); window.location.hash = ""; window.location.reload(); };
+  canvasHost.appendChild(menuLink);
+
   // --- Replay ---
   const replayPlayer = new ReplayPlayer();
   const timeline = new Timeline(stage, {
@@ -224,12 +231,18 @@ export async function initGame(app: HTMLElement) {
       let armor = keptArmor;
       let helmet = keptHelmet;
       const util: UId[] = [...keptUtil];
-      const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
+      // Utility preference: weighted roll between smoke and flash by the
+      // player's lineup/timing ratings instead of a role-based pick.
+      const smokeW = Math.max(1, p.stats.smokeLineups);
+      const flashW = Math.max(1, p.stats.flashTiming);
+      const want: UId = Math.random() * (smokeW + flashW) < smokeW ? "smoke" : "flash";
 
       if (isPistolRound(roundNumber)) {
         weapon = defaultPistol(team.side);
         helmet = false;
-        const wantsVest = Math.random() < 0.4;
+        // Composed/disciplined players are more willing to spend on armor.
+        const vestChance = 0.25 + (p.stats.composure + p.stats.discipline) / 400;
+        const wantsVest = Math.random() < vestChance;
         if (wantsVest && share >= VEST) {
           armor = true;
           spent += VEST;
@@ -239,7 +252,11 @@ export async function initGame(app: HTMLElement) {
         }
       } else {
         const isRifle = (w: WId) => W(w).slot === "rifle";
-        if (p.role === "awper" && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
+        // Likelihood of going for the AWP scales with the player's awpPref
+        // rating — roll it instead of locking the buy to a role label.
+        const awpChance = Math.max(0, (p.stats.awpPref - 50) / 50);
+        const wantsAwp = Math.random() < awpChance;
+        if (wantsAwp && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
         else if (!isRifle(weapon) && weapon !== "awp" && share >= wCost(rifle)) weapon = rifle;
         else if (W(weapon).slot === "pistol" && share >= wCost(smg)) weapon = smg;
         // Pistol upgrade if we're stuck on pistol and have spare cash for a deagle.

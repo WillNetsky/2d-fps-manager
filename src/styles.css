@@ -152,6 +152,9 @@ html, body {
 .balance-link {
   top: 38px;
 }
+.menu-link {
+  top: 64px;
+}
 
 .panel {
   background: var(--panel);
@@ -703,3 +706,90 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .log div { padding: 1px 0; }
+
+/* ---- Main menu ---- */
+#app.menu-app {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background:
+    radial-gradient(ellipse at top, rgba(74, 144, 226, 0.08), transparent 60%),
+    radial-gradient(ellipse at bottom, rgba(201, 105, 46, 0.06), transparent 60%),
+    var(--bg);
+}
+
+.menu-wrap {
+  width: min(520px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.menu-title {
+  margin: 0;
+  font-size: 38px;
+  letter-spacing: 0.02em;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+}
+
+.menu-sub {
+  margin-bottom: 22px;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 14px 18px;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background-color 0.08s, border-color 0.08s, transform 0.08s;
+}
+
+.menu-item:hover:not(.disabled) {
+  background: var(--panel-2);
+  border-color: var(--accent);
+  transform: translateX(2px);
+}
+
+.menu-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-left-color: var(--line);
+}
+
+.menu-item-text { display: flex; flex-direction: column; gap: 2px; }
+.menu-item-label { font-size: 16px; font-weight: 600; }
+.menu-item-desc { font-size: 12px; color: var(--muted); }
+
+.menu-item-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+}

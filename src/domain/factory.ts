@@ -18,91 +18,87 @@ function rollStat(base: number, spread: number): number {
   return Math.max(20, Math.min(95, Math.round(base + (rand() - 0.5) * 2 * spread)));
 }
 
-// Per-role base/spread per stat. Missing keys fall through to a neutral baseline.
-const NEUTRAL: [number, number] = [60, 12];
+const ALL_STATS: Array<keyof PlayerStats> = [
+  "accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe",
+  "reflexes","handSpeed","movement","jiggle",
+  "mapAwareness","positioning","gameSense","timing","adaptability",
+  "composure","aggression","patience","discipline","recovery",
+  "utility","smokeLineups","flashTiming","molotovUse",
+  "pistolPref","riflePref","awpPref","smgPref",
+  "igl","communication",
+];
 
-const ROLE_PROFILES: Record<Role, Partial<Record<keyof PlayerStats, [number, number]>>> = {
-  entry: {
-    accuracy: [72, 10], crosshairPlacement: [70, 10], sprayControl: [70, 10],
-    tapping: [62, 12], flickAim: [78, 10], counterStrafe: [65, 10],
-    reflexes: [80, 8], handSpeed: [80, 8], movement: [76, 8], jiggle: [70, 10],
-    mapAwareness: [62, 10], positioning: [58, 10], gameSense: [60, 10],
-    timing: [60, 10], adaptability: [62, 10],
-    composure: [62, 12], aggression: [82, 8], patience: [38, 10],
-    discipline: [55, 12], recovery: [60, 12],
-    utility: [50, 10], smokeLineups: [45, 10], flashTiming: [55, 10], molotovUse: [50, 10],
-    pistolPref: [55, 8], riflePref: [70, 8], awpPref: [40, 10], smgPref: [60, 10],
-    igl: [35, 10], communication: [55, 10],
-  },
-  awper: {
-    accuracy: [82, 8], crosshairPlacement: [80, 8], sprayControl: [50, 10],
-    tapping: [78, 8], flickAim: [82, 8], counterStrafe: [75, 8],
-    reflexes: [78, 8], handSpeed: [76, 8], movement: [60, 10], jiggle: [72, 10],
-    mapAwareness: [70, 10], positioning: [74, 10], gameSense: [70, 10],
-    timing: [72, 10], adaptability: [60, 10],
-    composure: [76, 8], aggression: [55, 12], patience: [70, 10],
-    discipline: [60, 12], recovery: [60, 12],
-    utility: [48, 10], smokeLineups: [45, 10], flashTiming: [45, 10], molotovUse: [45, 10],
-    pistolPref: [55, 8], riflePref: [50, 8], awpPref: [82, 8], smgPref: [45, 10],
-    igl: [40, 10], communication: [55, 10],
-  },
-  support: {
-    accuracy: [66, 10], crosshairPlacement: [66, 10], sprayControl: [68, 10],
-    tapping: [60, 10], flickAim: [55, 10], counterStrafe: [62, 10],
-    reflexes: [64, 10], handSpeed: [62, 10], movement: [66, 8], jiggle: [60, 10],
-    mapAwareness: [76, 8], positioning: [74, 8], gameSense: [74, 8],
-    timing: [70, 10], adaptability: [68, 10],
-    composure: [72, 10], aggression: [50, 10], patience: [75, 10],
-    discipline: [78, 8], recovery: [65, 10],
-    utility: [82, 6], smokeLineups: [82, 8], flashTiming: [78, 8], molotovUse: [76, 10],
-    pistolPref: [55, 10], riflePref: [65, 10], awpPref: [40, 10], smgPref: [60, 10],
-    igl: [45, 10], communication: [70, 10],
-  },
-  igl: {
-    accuracy: [62, 10], crosshairPlacement: [66, 10], sprayControl: [58, 10],
-    tapping: [62, 10], flickAim: [55, 10], counterStrafe: [60, 10],
-    reflexes: [62, 10], handSpeed: [60, 10], movement: [62, 8], jiggle: [58, 10],
-    mapAwareness: [88, 6], positioning: [78, 8], gameSense: [88, 6],
-    timing: [78, 8], adaptability: [82, 8],
-    composure: [82, 8], aggression: [50, 12], patience: [68, 10],
-    discipline: [82, 8], recovery: [72, 10],
-    utility: [74, 8], smokeLineups: [72, 10], flashTiming: [70, 10], molotovUse: [68, 10],
-    pistolPref: [55, 10], riflePref: [60, 10], awpPref: [42, 10], smgPref: [55, 10],
-    igl: [85, 6], communication: [82, 8],
-  },
-  lurker: {
-    accuracy: [74, 10], crosshairPlacement: [76, 10], sprayControl: [62, 10],
-    tapping: [72, 10], flickAim: [74, 10], counterStrafe: [70, 10],
-    reflexes: [72, 8], handSpeed: [68, 10], movement: [70, 8], jiggle: [72, 10],
-    mapAwareness: [80, 8], positioning: [80, 8], gameSense: [76, 8],
-    timing: [78, 8], adaptability: [62, 10],
-    composure: [78, 8], aggression: [48, 12], patience: [82, 8],
-    discipline: [55, 12], recovery: [65, 10],
-    utility: [55, 10], smokeLineups: [50, 10], flashTiming: [50, 10], molotovUse: [50, 10],
-    pistolPref: [60, 10], riflePref: [70, 10], awpPref: [55, 10], smgPref: [55, 10],
-    igl: [40, 10], communication: [50, 10],
-  },
+// Stat clusters used to give players visible peaks without prescribing a role.
+// Each player gets one or two clusters bumped — their role is then inferred
+// from the resulting stat shape rather than picked up front.
+const STAT_CLUSTERS: Record<string, Array<keyof PlayerStats>> = {
+  aim:       ["accuracy", "crosshairPlacement", "tapping", "flickAim"],
+  mechanics: ["reflexes", "handSpeed", "movement", "counterStrafe", "jiggle"],
+  awp:       ["awpPref", "tapping", "flickAim", "composure"],
+  rifle:     ["riflePref", "sprayControl", "accuracy"],
+  smg:       ["smgPref", "movement", "sprayControl"],
+  pistol:    ["pistolPref", "tapping", "composure"],
+  tactical:  ["mapAwareness", "gameSense", "positioning", "timing", "adaptability"],
+  leader:    ["igl", "communication", "gameSense", "discipline"],
+  utility:   ["utility", "smokeLineups", "flashTiming", "molotovUse"],
+  aggressive:["aggression", "reflexes", "flickAim"],
+  patient:   ["patience", "positioning", "composure"],
+  steady:    ["composure", "discipline", "recovery"],
 };
 
-function statsForRole(role: Role): PlayerStats {
-  const profile = ROLE_PROFILES[role];
+function rollStats(): PlayerStats {
   const out: Partial<PlayerStats> = {};
-  const ALL_KEYS: Array<keyof PlayerStats> = [
-    "accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe",
-    "reflexes","handSpeed","movement","jiggle",
-    "mapAwareness","positioning","gameSense","timing","adaptability",
-    "composure","aggression","patience","discipline","recovery",
-    "utility","smokeLineups","flashTiming","molotovUse",
-    "pistolPref","riflePref","awpPref","smgPref",
-    "igl","communication",
-  ];
-  for (const key of ALL_KEYS) {
-    const [base, spread] = profile[key] ?? NEUTRAL;
-    out[key] = rollStat(base, spread);
+  for (const key of ALL_STATS) out[key] = rollStat(60, 14);
+
+  // Pick 1-2 clusters and bump them. Some clusters also dent an opposing one
+  // so players end up with believable trade-offs.
+  const clusterKeys = Object.keys(STAT_CLUSTERS);
+  const count = randInt(1, 2);
+  const picked = new Set<string>();
+  for (let i = 0; i < count; i++) {
+    const c = pick(clusterKeys);
+    if (picked.has(c)) continue;
+    picked.add(c);
+    const bump = randInt(10, 22);
+    for (const k of STAT_CLUSTERS[c]) {
+      out[k] = Math.min(95, (out[k] ?? 60) + bump);
+    }
+  }
+  // Soft trade-offs between opposed temperaments.
+  if (picked.has("aggressive") && !picked.has("patient")) {
+    out.patience = Math.max(20, (out.patience ?? 60) - 12);
+  }
+  if (picked.has("patient") && !picked.has("aggressive")) {
+    out.aggression = Math.max(20, (out.aggression ?? 60) - 10);
+  }
+  if (picked.has("awp")) {
+    out.sprayControl = Math.max(20, (out.sprayControl ?? 60) - 8);
   }
   return out as PlayerStats;
 }
 
+// Score each role against a stat sheet and pick the best fit. Roles are
+// descriptive labels for the player's shape, not inputs to generation.
+function inferRole(s: PlayerStats): Role {
+  const avg = (...keys: Array<keyof PlayerStats>) =>
+    keys.reduce((sum, k) => sum + s[k], 0) / keys.length;
+  const scores: Record<Role, number> = {
+    awper:   avg("awpPref", "tapping", "flickAim", "composure") - 0.3 * s.sprayControl + 30,
+    igl:     avg("igl", "communication", "gameSense", "mapAwareness", "discipline"),
+    support: avg("utility", "smokeLineups", "flashTiming", "molotovUse", "discipline"),
+    entry:   avg("aggression", "flickAim", "reflexes", "handSpeed") - 0.25 * s.patience + 20,
+    lurker:  avg("patience", "positioning", "mapAwareness", "timing") - 0.25 * s.aggression + 20,
+  };
+  let best: Role = "entry";
+  let bestScore = -Infinity;
+  for (const r of Object.keys(scores) as Role[]) {
+    if (scores[r] > bestScore) { bestScore = scores[r]; best = r; }
+  }
+  return best;
+}
+
+// Traits drawn from a pool keyed by the (inferred) role — same idea as before,
+// but role is now an output of stats rather than an input.
 const ROLE_TRAITS: Record<Role, Trait[]> = {
   entry: ["entry-fragger", "rifler", "tilts-easy"],
   awper: ["awp-prodigy", "clutch", "shaky-eco"],
@@ -123,12 +119,14 @@ function rollTraits(role: Role): Trait[] {
 }
 
 let playerCounter = 0;
-export function makePlayer(role: Role): Player {
+export function makePlayer(): Player {
   const id = `p${++playerCounter}`;
   const name = `${pick(FIRST_NAMES)} "${pick(["zen","fox","ace","ghost","king","ice","null","drift","pulse","raze"])}" ${pick(LAST_NAMES)}`;
+  const stats = rollStats();
+  const role = inferRole(stats);
   return {
     id, name, role,
-    stats: statsForRole(role),
+    stats,
     traits: rollTraits(role),
     money: STARTING_PER_PLAYER,
     mood: 65,
@@ -140,28 +138,16 @@ export function makePlayer(role: Role): Player {
 
 export const STARTING_PER_PLAYER = 800;
 
-const ALL_STAT_KEYS: Array<keyof PlayerStats> = [
-  "accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe",
-  "reflexes","handSpeed","movement","jiggle",
-  "mapAwareness","positioning","gameSense","timing","adaptability",
-  "composure","aggression","patience","discipline","recovery",
-  "utility","smokeLineups","flashTiming","molotovUse",
-  "pistolPref","riflePref","awpPref","smgPref",
-  "igl","communication",
-];
-
 // Force every stat on every player on this team to `value` (default 60).
 // Useful for balance tests where you want player skill out of the equation.
 export function neutralizeTeamStats(team: Team, value = 60) {
   for (const p of team.players) {
-    for (const k of ALL_STAT_KEYS) p.stats[k] = value;
+    for (const k of ALL_STATS) p.stats[k] = value;
   }
 }
 
-const STANDARD_ROSTER: Role[] = ["igl", "awper", "entry", "support", "lurker"];
-
 export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {
-  const players = STANDARD_ROSTER.map(makePlayer);
+  const players = [makePlayer(), makePlayer(), makePlayer(), makePlayer(), makePlayer()];
   // Initialize neutral relationships.
   for (const p of players) {
     for (const q of players) {

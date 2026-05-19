@@ -177,7 +177,7 @@ export class MapEditor {
     centerRow.appendChild(document.createTextNode("Show center lines"));
     actions.appendChild(centerRow);
 
-    mkBtn("Back to game", "", () => { window.location.hash = ""; window.location.reload(); });
+    mkBtn("Back to menu", "", () => { window.location.hash = ""; window.location.reload(); });
     sidebar.appendChild(actions);
 
     // Help text

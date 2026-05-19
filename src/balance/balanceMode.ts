@@ -153,7 +153,7 @@ export class BalanceMode {
     sidebar.appendChild(cancel);
 
     const back = document.createElement("button");
-    back.textContent = "Back to game";
+    back.textContent = "Back to menu";
     back.onclick = () => { window.location.hash = ""; window.location.reload(); };
     sidebar.appendChild(back);
 
