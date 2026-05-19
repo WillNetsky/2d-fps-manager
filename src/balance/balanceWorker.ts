@@ -1,8 +1,9 @@
 // Headless balance simulator. Runs in a Web Worker so the UI stays responsive.
-import type { GameMap, RoundOutcome, Side, WeaponId, UtilityId } from "../domain/types.ts";
+import type { GameMap, RoundOutcome, Side, TStrategy, WeaponId, UtilityId } from "../domain/types.ts";
 import { makeTeam, neutralizeTeamStats, setSeed } from "../domain/factory.ts";
 import { RoundSim } from "../sim/round.ts";
 import { applyRoundReward } from "../sim/economy.ts";
+import { defaultPistol } from "../domain/weapons.ts";
 
 // In "independent rounds" mode we give every player a full-buy stipend each
 // round, so the sim measures rifle-vs-rifle balance instead of a permanent
@@ -50,6 +51,21 @@ export interface BalanceMatrixResult {
   cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[];
 }
 
+export interface StrategyStats {
+  rounds: number;
+  ctWins: number;
+  tWins: number;
+  plants: number;
+  defuses: number;
+  detonations: number;
+  timeouts: number;
+  ctKills: number;
+  tKills: number;
+  totalDurationMs: number;
+}
+
+export const ALL_T_STRATEGIES: TStrategy[] = ["rush-A", "rush-B", "default", "split-A", "split-B"];
+
 export interface RunStats {
   rounds: number;
   ctWins: number;
@@ -64,6 +80,18 @@ export interface RunStats {
   ctElims: number;
   tElims: number;
   timeouts: number;
+  byTStrategy: Record<TStrategy, StrategyStats>;
+  byCtSetup: Record<string, StrategyStats>; // key e.g. "2A/2B/1M"
+}
+
+function emptyBucket(): StrategyStats {
+  return { rounds: 0, ctWins: 0, tWins: 0, plants: 0, defuses: 0, detonations: 0, timeouts: 0, ctKills: 0, tKills: 0, totalDurationMs: 0 };
+}
+
+function emptyStrategyStats(): Record<TStrategy, StrategyStats> {
+  const out = {} as Record<TStrategy, StrategyStats>;
+  for (const s of ALL_T_STRATEGIES) out[s] = emptyBucket();
+  return out;
 }
 
 function emptyStats(): RunStats {
@@ -77,12 +105,18 @@ function emptyStats(): RunStats {
     ctKills: 0, tKills: 0,
     plants: 0, defuses: 0, detonations: 0,
     ctElims: 0, tElims: 0, timeouts: 0,
+    byTStrategy: emptyStrategyStats(),
+    byCtSetup: {},
   };
+}
+
+export function ctSetupKey(setup: { A: number; B: number; mid: number }): string {
+  return `${setup.A}A/${setup.B}B/${setup.mid}M`;
 }
 
 interface MiniTeam {
   side: Side;
-  players: { id: string; role: string; money: number }[];
+  players: { id: string; role: string; money: number; mood: number; morale: number }[];
   loadouts: Record<string, {
     weapon: WeaponId; utility: UtilityId[]; armor: boolean; helmet: boolean;
     keptWeapon: WeaponId | null; keptArmor: boolean; keptHelmet: boolean; keptUtility: UtilityId[];
@@ -110,12 +144,13 @@ function applyPreset(team: MiniTeam, preset: LoadoutPreset) {
   if (preset === "auto") { simpleBuy(team); return; }
   const rifle: WeaponId = team.side === "CT" ? "m4" : "ak";
   const smg: WeaponId = team.side === "CT" ? "mp9" : "mac10";
+  const pistol = defaultPistol(team.side);
   team.players.forEach((p, i) => {
-    let weapon: WeaponId = "pistol";
+    let weapon: WeaponId = pistol;
     let armor = false, helmet = false;
     switch (preset) {
-      case "pistol": weapon = "pistol"; break;
-      case "pistol+armor": weapon = "pistol"; armor = true; break;
+      case "pistol": weapon = pistol; break;
+      case "pistol+armor": weapon = pistol; armor = true; break;
       case "smg": weapon = smg; armor = true; break;
       case "rifle": weapon = rifle; armor = true; helmet = true; break;
       case "awp": weapon = i === 0 ? "awp" : rifle; armor = true; helmet = true; break;
@@ -137,7 +172,7 @@ interface CellParams {
   onProgress: (done: number) => void;
 }
 
-function simulateCell(p: CellParams): RunStats {
+export function simulateCell(p: CellParams): RunStats {
   setSeed(Date.now());
   const home = makeTeam("home", "Home", "CT") as unknown as MiniTeam;
   const away = makeTeam("away", "Away", "T") as unknown as MiniTeam;
@@ -149,7 +184,7 @@ function simulateCell(p: CellParams): RunStats {
 
   for (const team of [home, away]) for (const pl of team.players) {
     team.loadouts[pl.id] = {
-      weapon: "pistol", utility: [], armor: false, helmet: false,
+      weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     };
   }
@@ -171,13 +206,22 @@ function simulateCell(p: CellParams): RunStats {
         for (const pl of team.players) {
           pl.money = INDEPENDENT_ROUND_STIPEND;
           team.loadouts[pl.id] = {
-            weapon: "pistol", utility: [], armor: false, helmet: false,
+            weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
             keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
           };
         }
       }
       ctLossStreak = 0;
       tLossStreak = 0;
+    }
+    // Mood feeds back into aim — without resetting between rounds the winning
+    // side's mood saturates and creates a runaway lead. Keep balance runs
+    // honest by re-anchoring mood each round when stats are neutralized or the
+    // economy is being reset anyway.
+    if (p.neutralize || p.resetEachRound || forced) {
+      for (const team of [home, away]) for (const pl of team.players) {
+        pl.mood = 65; pl.morale = 65;
+      }
     }
     applyPreset(home, p.ctLoadout);
     applyPreset(away, p.tLoadout);
@@ -198,12 +242,27 @@ function simulateCell(p: CellParams): RunStats {
     else if (r.outcome === "bomb-defused") stats.defuses++;
     else if (r.outcome === "time-expired") stats.timeouts++;
 
+    const strat = stats.byTStrategy[sim.tStrategy];
+    const setupKey = ctSetupKey(sim.ctSetup);
+    const setupBucket = stats.byCtSetup[setupKey] ?? (stats.byCtSetup[setupKey] = emptyBucket());
+    for (const b of [strat, setupBucket]) {
+      b.rounds++;
+      b.totalDurationMs += r.durationMs;
+      if (r.winningSide === "CT") b.ctWins++; else b.tWins++;
+      if (r.outcome === "bomb-defused") b.defuses++;
+      else if (r.outcome === "bomb-detonated") b.detonations++;
+      else if (r.outcome === "time-expired") b.timeouts++;
+    }
+
     for (const e of r.events) {
       if (e.kind === "kill") {
-        if (home.players.some(pl => pl.id === e.killer)) stats.ctKills++;
-        else stats.tKills++;
+        const ctKill = home.players.some(pl => pl.id === e.killer);
+        if (ctKill) { stats.ctKills++; strat.ctKills++; setupBucket.ctKills++; }
+        else { stats.tKills++; strat.tKills++; setupBucket.tKills++; }
       } else if (e.kind === "bomb-plant") {
         stats.plants++;
+        strat.plants++;
+        setupBucket.plants++;
       }
     }
 
@@ -220,7 +279,7 @@ function simulateCell(p: CellParams): RunStats {
         };
       } else {
         team.loadouts[ag.playerId] = {
-          weapon: "pistol", utility: [], armor: false, helmet: false,
+          weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
           keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
         };
       }
@@ -235,6 +294,8 @@ function simulateCell(p: CellParams): RunStats {
   return stats;
 }
 
+// Worker entry — guarded so Node-side scripts can import this module.
+if (typeof self !== "undefined" && typeof (self as any).addEventListener === "function") {
 self.addEventListener("message", (e: MessageEvent<BalanceRequest>) => {
   const req = e.data;
   if (req.kind !== "run") return;
@@ -277,3 +338,4 @@ self.addEventListener("message", (e: MessageEvent<BalanceRequest>) => {
     self.postMessage(result);
   }
 });
+}

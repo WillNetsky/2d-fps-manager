@@ -406,8 +406,14 @@ export class Renderer {
         const ringR = 16;
         this.bombGfx.circle(sim.bombPlantedAt.x, sim.bombPlantedAt.y, ringR)
           .stroke({ color: 0x4a90e2, width: 2, alpha: 0.4 });
-        // Filled arc as a wedge of small dots — Pixi Graphics has arc() in v8.
-        this.bombGfx.arc(sim.bombPlantedAt.x, sim.bombPlantedAt.y, ringR, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2)
+        // Arc continues the current path, so explicitly moveTo the arc's
+        // start — otherwise Pixi strokes a line from (0,0) to the start.
+        const a0 = -Math.PI / 2;
+        const a1 = a0 + frac * Math.PI * 2;
+        const sx = sim.bombPlantedAt.x + ringR * Math.cos(a0);
+        const sy = sim.bombPlantedAt.y + ringR * Math.sin(a0);
+        this.bombGfx.moveTo(sx, sy)
+          .arc(sim.bombPlantedAt.x, sim.bombPlantedAt.y, ringR, a0, a1)
           .stroke({ color: 0x4a90e2, width: 3 });
         const remaining = Math.max(0, (sim.defuseTimeMs - sim.bombDefuseProgress) / 1000);
         const label = new Text({
@@ -473,7 +479,8 @@ export class Renderer {
 
 function weaponAbbrev(w: string): string {
   switch (w) {
-    case "pistol": return "P";
+    case "glock":  return "GL";
+    case "usp":    return "USP";
     case "deagle": return "DE";
     case "mp9":    return "MP9";
     case "mac10":  return "MAC";

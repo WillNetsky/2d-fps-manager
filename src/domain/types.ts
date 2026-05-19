@@ -82,7 +82,8 @@ export interface Player {
 
 export type WeaponId =
   | "knife"
-  | "pistol"
+  | "glock"    // T default pistol
+  | "usp"      // CT default pistol
   | "deagle"
   | "mp9"      // CT SMG
   | "mac10"    // T SMG
@@ -105,6 +106,13 @@ export interface Weapon {
   magSize: number;     // bullets per magazine (0 = N/A)
   reserveAmmo: number; // spare bullets at spawn
   reloadMs: number;    // time to reload one full magazine
+  // CS2-style damage falloff: damage *= rangeModifier ^ (distance / FALLOFF_UNIT).
+  // 1.0 = no falloff (AWP-like); ~0.75 = drops off fast (pistols).
+  rangeModifier: number;
+  // Fraction of damage that bypasses armor on body shots (0-1). High = ignores vest.
+  armorPen: number;
+  // Headshot multiplier — almost always 4 in CS; AWP irrelevant since one-shot.
+  headshotMultiplier: number;
 }
 
 export type UtilityId = "smoke" | "flash" | "he" | "molotov";
@@ -193,6 +201,9 @@ export interface Agent {
   holdAngle: number | null;
   // Tactical assignment for the round.
   assignedSite: SiteAssignment;
+  // Specific hold-point id within the assigned region (e.g., "A-choke",
+  // "mid-info"). Null when no hold points are derivable for this map.
+  holdPoint: string | null;
   nextThinkAt: number;
   dirty: boolean;
   moveMode: "walk" | "run";
@@ -211,6 +222,9 @@ export interface Agent {
   peekPos: Vec2 | null;
   peekState: "cover" | "peek" | "none";
   peekUntil: number;
+  // Number of full cover→peek oscillations since the current peek loop began.
+  // Caps a stalemate where neither side can land a shot through their jiggle.
+  peekCycles: number;
   // Saving: agent has decided this round is unwinnable and wants to keep
   // their gun for the next round. Avoids engagements, hides far from contact.
   saving: boolean;
@@ -281,6 +295,10 @@ export type SimEvent =
   | { t: number; kind: "bomb-plant"; planter: string }
   | { t: number; kind: "bomb-defuse"; defuser: string }
   | { t: number; kind: "bomb-detonate" }
+  | { t: number; kind: "bomb-pickup"; player: string }
+  | { t: number; kind: "pickup"; player: string; weapon: WeaponId; dropped: WeaponId | null }
+  | { t: number; kind: "util-throw"; thrower: string; util: UtilityId }
+  | { t: number; kind: "save"; player: string; on: boolean }
   | { t: number; kind: "round-start" }
   | { t: number; kind: "round-end"; winner: Side };
 

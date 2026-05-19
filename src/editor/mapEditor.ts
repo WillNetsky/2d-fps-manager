@@ -139,6 +139,7 @@ export class MapEditor {
     mkBtn("Save", "", () => this.saveMap(false));
     mkBtn("Save As…", "", () => this.saveMap(true));
     mkBtn("Load…", "", () => this.loadMapDialog());
+    mkBtn("Copy JSON", "", () => this.copyMapJson());
     mkBtn("Reset to default", "", () => {
       this.map = makeMap();
       this.currentName = this.map.name || "Default";
@@ -337,6 +338,17 @@ export class MapEditor {
     this.currentName = name;
     this.updateNameLabel();
     alert(`Saved "${name}".`);
+  }
+
+  private async copyMapJson() {
+    const json = JSON.stringify(this.map, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      alert(`Copied "${this.currentName}" JSON (${json.length} chars) to clipboard.`);
+    } catch {
+      // Clipboard API can fail (e.g. non-secure context). Fall back to a prompt.
+      prompt("Copy map JSON:", json);
+    }
   }
 
   private loadMapDialog() {

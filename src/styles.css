@@ -459,6 +459,45 @@ html, body {
   pointer-events: none;
   z-index: 5;
 }
+
+.round-end-card {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 320px;
+  max-width: 80%;
+  background: rgba(15, 17, 21, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 22px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  z-index: 6;
+  pointer-events: none;
+}
+.round-end-card .rec-winner {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.round-end-card .rec-winner.ct { color: var(--ct); }
+.round-end-card .rec-winner.t { color: var(--t); }
+.round-end-card .rec-outcome {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.round-end-card .rec-mvp {
+  font-size: 13px;
+  margin-top: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.round-end-card .rec-mvp .crown { font-size: 14px; }
+.round-end-card .rec-mvp .mvp-name { font-weight: 700; }
+.round-end-card .rec-mvp .mvp-line { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .kf-row {
   background: rgba(15, 17, 21, 0.85);
   border: 1px solid var(--line);

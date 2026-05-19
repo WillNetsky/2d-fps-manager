@@ -71,7 +71,8 @@ export class KillFeed {
 function weaponIcon(w: KillCause): string {
   switch (w) {
     case "knife":    return "🔪";
-    case "pistol":   return "[P]";
+    case "glock":    return "[Glock]";
+    case "usp":      return "[USP]";
     case "deagle":   return "[Deagle]";
     case "mp9":      return "[MP9]";
     case "mac10":    return "[Mac10]";

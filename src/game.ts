@@ -1,7 +1,7 @@
 import { makeMap, makeTeam, setSeed } from "./domain/factory.ts";
 import { RoundSim } from "./sim/round.ts";
 import { applyRoundReward } from "./sim/economy.ts";
-import { WEAPONS as WEAPONS_DICT } from "./domain/weapons.ts";
+import { WEAPONS as WEAPONS_DICT, defaultPistol } from "./domain/weapons.ts";
 import { ReplayPlayer } from "./sim/replay.ts";
 import { Renderer } from "./render/renderer.ts";
 import { BuyPanel } from "./ui/buyPanel.ts";
@@ -42,7 +42,7 @@ export async function initGame(app: HTMLElement) {
 
   for (const team of [home, away]) for (const p of team.players) {
     team.loadouts[p.id] = {
-      weapon: "pistol", utility: [], armor: false, helmet: false,
+      weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     };
   }
@@ -70,14 +70,14 @@ export async function initGame(app: HTMLElement) {
   // --- Panels ---
   const buyPanel = new BuyPanel(leftCol, home, {
     onStart: startRound,
-    onSimNow: () => { startRound(); skipToEnd(); },
+    onSimNow: () => { aiBuyFor(home); buyPanel.refresh(); startRound(); skipToEnd(); },
   });
   const homeLivePanel = new TeamPanel(leftCol, home);
   homeLivePanel.el.style.display = "none";
   const oppPanel = new TeamPanel(rightCol, away);
   oppPanel.log(`Match start — ${home.name} (CT) vs ${away.name} (T)`);
 
-  aiBuyForAway();
+  aiBuyFor(away);
   buyPanel.setRound(roundNumber);
   oppPanel.refresh();
 
@@ -85,6 +85,12 @@ export async function initGame(app: HTMLElement) {
   const hud = document.createElement("div");
   hud.className = "hud";
   canvasHost.appendChild(hud);
+
+  // Round-end summary card (winner + outcome + MVP). Hidden until round ends.
+  const roundEndCard = document.createElement("div");
+  roundEndCard.className = "round-end-card";
+  roundEndCard.style.display = "none";
+  canvasHost.appendChild(roundEndCard);
 
   // Live / Replay status badge.
   const liveBadge = document.createElement("div");
@@ -190,21 +196,21 @@ export async function initGame(app: HTMLElement) {
   let lastEventIdx = 0;
   let lastRotationIdx = 0;
 
-  function aiBuyForAway() {
+  function aiBuyFor(team: Team) {
     type WId = import("./domain/types.ts").WeaponId;
     type UId = import("./domain/types.ts").UtilityId;
     const VEST = 650;
     const HELMET = 350;
     const UPRICE: Record<UId, number> = { smoke: 300, flash: 200, he: 300, molotov: 400 };
-    const rifle: WId = away.side === "T" ? "ak" : "m4";
-    const smg: WId   = away.side === "T" ? "mac10" : "mp9";
+    const rifle: WId = team.side === "T" ? "ak" : "m4";
+    const smg: WId   = team.side === "T" ? "mac10" : "mp9";
 
-    const players = away.players;
+    const players = team.players;
     const W = (id: WId) => WEAPONS_DICT[id];
 
     for (let i = 0; i < players.length; i++) {
       const p = players[i];
-      const existing = away.loadouts[p.id];
+      const existing = team.loadouts[p.id];
       const kept = existing.keptWeapon;
       const keptArmor = existing.keptArmor;
       const keptHelmet = existing.keptHelmet;
@@ -213,7 +219,7 @@ export async function initGame(app: HTMLElement) {
       const wCost = (id: WId) => id === kept ? 0 : W(id).cost;
       const uCost = (u: UId) => keptUtil.includes(u) ? 0 : UPRICE[u];
 
-      let weapon: WId = kept ?? "pistol";
+      let weapon: WId = kept ?? defaultPistol(team.side);
       let spent = 0;
       let armor = keptArmor;
       let helmet = keptHelmet;
@@ -221,7 +227,7 @@ export async function initGame(app: HTMLElement) {
       const want: UId = (p.role === "igl" || p.role === "support") ? "smoke" : "flash";
 
       if (isPistolRound(roundNumber)) {
-        weapon = "pistol";
+        weapon = defaultPistol(team.side);
         helmet = false;
         const wantsVest = Math.random() < 0.4;
         if (wantsVest && share >= VEST) {
@@ -248,7 +254,7 @@ export async function initGame(app: HTMLElement) {
         }
       }
 
-      away.loadouts[p.id] = {
+      team.loadouts[p.id] = {
         weapon, utility: util, armor, helmet,
         keptWeapon: kept, keptArmor, keptHelmet, keptUtility: keptUtil,
       };
@@ -264,7 +270,7 @@ export async function initGame(app: HTMLElement) {
       for (const p of team.players) {
         p.money = STARTING_BANK;
         team.loadouts[p.id] = {
-          weapon: "pistol", utility: [], armor: false, helmet: false,
+          weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
           keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
         };
       }
@@ -292,6 +298,7 @@ export async function initGame(app: HTMLElement) {
     buyPanel.el.style.display = "none";
     homeLivePanel.el.style.display = "";
     homeLivePanel.refresh();
+    roundEndCard.style.display = "none";
 
     simInterval = window.setInterval(tickRound, 50);
   }
@@ -328,6 +335,20 @@ export async function initGame(app: HTMLElement) {
         oppPanel.log(`🛡 ${shortName(playerLookup(e.defuser))} defused`);
       } else if (e.kind === "bomb-detonate") {
         oppPanel.log(`💥 bomb detonated`);
+      } else if (e.kind === "pickup") {
+        const p = playerLookup(e.player);
+        const got = WEAPONS_DICT[e.weapon].name;
+        const drop = e.dropped ? ` (dropped ${WEAPONS_DICT[e.dropped].name})` : "";
+        oppPanel.log(`🎒 ${shortName(p)} picked up ${got}${drop}`);
+      } else if (e.kind === "util-throw") {
+        const p = playerLookup(e.thrower);
+        const icon = e.util === "smoke" ? "💨" : e.util === "flash" ? "✨" : e.util === "molotov" ? "🔥" : "💣";
+        oppPanel.log(`${icon} ${shortName(p)} threw a ${e.util}`);
+      } else if (e.kind === "save") {
+        const p = playerLookup(e.player);
+        oppPanel.log(e.on ? `🛟 ${shortName(p)} is saving` : `↩ ${shortName(p)} re-engages`);
+      } else if (e.kind === "bomb-pickup") {
+        oppPanel.log(`💣 ${shortName(playerLookup(e.player))} picked up the bomb`);
       }
     }
     lastEventIdx = sim.events.length;
@@ -352,29 +373,62 @@ export async function initGame(app: HTMLElement) {
       lossStreaks = applyRoundReward(ctSideTeam(), tSideTeam(), r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
       oppPanel.log(`Round ${roundNumber} → ${winningTeam.name} wins (${r.outcome})`);
 
-      // MVP: most kills this round on the winning team.
+      // MVP: most kills this round on the winning team; fall back to the
+      // player who completed the objective (plant / defuse).
       const roundKillsByPlayer = new Map<string, number>();
+      const headshotsByPlayer = new Map<string, number>();
       for (const ev of r.events) {
         if (ev.kind !== "kill") continue;
         if (!winningTeam.players.some(pp => pp.id === ev.killer)) continue;
         roundKillsByPlayer.set(ev.killer, (roundKillsByPlayer.get(ev.killer) ?? 0) + 1);
+        if (ev.headshot) headshotsByPlayer.set(ev.killer, (headshotsByPlayer.get(ev.killer) ?? 0) + 1);
       }
       let mvpId: string | null = null;
       let mvpKills = 0;
       for (const [id, k] of roundKillsByPlayer) {
         if (k > mvpKills) { mvpKills = k; mvpId = id; }
       }
+      const plantEvt = r.events.find(e => e.kind === "bomb-plant");
+      const defuseEvt = r.events.find(e => e.kind === "bomb-defuse");
+      let mvpLine = "";
       if (mvpId) {
+        const hs = headshotsByPlayer.get(mvpId) ?? 0;
+        mvpLine = `${mvpKills} kill${mvpKills === 1 ? "" : "s"}${hs ? ` (${hs} HS)` : ""}`;
         const mvp = playerLookup(mvpId);
-        oppPanel.log(`🏆 MVP: ${shortName(mvp)} — ${mvpKills} kill${mvpKills === 1 ? "" : "s"}`);
-      } else {
-        // Bomb plant/defuse wins with no kills — credit the bomb actor.
-        const bombEvt = r.events.find(e => e.kind === "bomb-plant" || e.kind === "bomb-defuse");
-        if (bombEvt && (bombEvt.kind === "bomb-plant" || bombEvt.kind === "bomb-defuse")) {
-          const id = bombEvt.kind === "bomb-plant" ? bombEvt.planter : bombEvt.defuser;
-          oppPanel.log(`🏆 MVP: ${shortName(playerLookup(id))} — ${bombEvt.kind === "bomb-plant" ? "plant" : "defuse"}`);
-        }
+        const planted = plantEvt && plantEvt.kind === "bomb-plant" && plantEvt.planter === mvpId;
+        const defused = defuseEvt && defuseEvt.kind === "bomb-defuse" && defuseEvt.defuser === mvpId;
+        if (planted) mvpLine += ` + plant`;
+        if (defused) mvpLine += ` + defuse`;
+        oppPanel.log(`🏆 MVP: ${shortName(mvp)} — ${mvpLine}`);
+      } else if (r.winningSide === "T" && plantEvt && plantEvt.kind === "bomb-plant") {
+        mvpId = plantEvt.planter;
+        mvpLine = "planted the bomb";
+        oppPanel.log(`🏆 MVP: ${shortName(playerLookup(mvpId))} — ${mvpLine}`);
+      } else if (r.winningSide === "CT" && defuseEvt && defuseEvt.kind === "bomb-defuse") {
+        mvpId = defuseEvt.defuser;
+        mvpLine = "defused the bomb";
+        oppPanel.log(`🏆 MVP: ${shortName(playerLookup(mvpId))} — ${mvpLine}`);
       }
+
+      // Round-end overlay card.
+      const outcomeText: Record<typeof r.outcome, string> = {
+        "ct-elim": "Ts eliminated",
+        "t-elim": "CTs eliminated",
+        "bomb-detonated": "Bomb detonated",
+        "bomb-defused": "Bomb defused",
+        "time-expired": "Time expired",
+      };
+      const winnerLabel = r.winningSide === "CT" ? "Counter-Terrorists win" : "Terrorists win";
+      const winnerCls = r.winningSide === "CT" ? "ct" : "t";
+      const durSec = (r.durationMs / 1000).toFixed(1);
+      const mvpHtml = mvpId
+        ? `<div class="rec-mvp"><span class="crown">🏆</span> MVP: <span class="mvp-name">${shortName(playerLookup(mvpId))}</span><div class="mvp-line">${mvpLine}</div></div>`
+        : "";
+      roundEndCard.innerHTML =
+        `<div class="rec-winner ${winnerCls}">${winnerLabel}</div>` +
+        `<div class="rec-outcome">${outcomeText[r.outcome]} · ${durSec}s</div>` +
+        mvpHtml;
+      roundEndCard.style.display = "";
 
       for (const ag of sim.agents) {
         const team = home.players.some(p => p.id === ag.playerId) ? home : away;
@@ -393,7 +447,7 @@ export async function initGame(app: HTMLElement) {
           };
         } else {
           team.loadouts[ag.playerId] = {
-            weapon: "pistol", utility: [], armor: false, helmet: false,
+            weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
             keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
           };
         }
@@ -426,7 +480,7 @@ export async function initGame(app: HTMLElement) {
       setTimeout(() => {
         homeLivePanel.el.style.display = "none";
         buyPanel.el.style.display = "";
-        aiBuyForAway();
+        aiBuyFor(away);
         buyPanel.setRound(roundNumber);
         oppPanel.refresh();
 

@@ -136,6 +136,10 @@ export class Timeline {
       case "bomb-plant": return "bomb plant";
       case "bomb-defuse": return "bomb defuse";
       case "bomb-detonate": return "bomb detonate";
+      case "bomb-pickup": return "bomb pickup";
+      case "pickup": return `pickup (${e.weapon})`;
+      case "util-throw": return `${e.util} throw`;
+      case "save": return e.on ? "save" : "re-engage";
       case "round-start": return "round start";
       case "round-end": return `round end (${e.winner})`;
     }

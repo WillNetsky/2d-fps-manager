@@ -1,4 +1,5 @@
 import type { GameMap, Player, PlayerStats, Role, Team, Trait, Vec2 } from "./types.ts";
+import { defaultPistol } from "./weapons.ts";
 
 const FIRST_NAMES = ["Aleks","Niko","Kai","Jin","Theo","Luc","Mateo","Ezra","Otto","Ravi","Sasha","Yuri","Bram","Cy","Dax","Finn"];
 const LAST_NAMES = ["Vale","Reyes","Park","Okafor","Lindholm","Costa","Becker","Marek","Singh","Hass","Doyle","Brandt","Voss","Ahn","Renn","Kazan"];
@@ -172,7 +173,7 @@ export function makeTeam(id: string, name: string, side: "CT" | "T"): Team {
     players,
     roundsWon: 0,
     loadouts: Object.fromEntries(players.map(p => [p.id, {
-      weapon: "pistol" as const, utility: [], armor: false, helmet: false,
+      weapon: defaultPistol(side), utility: [], armor: false, helmet: false,
       keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
     }])),
     matchStats: Object.fromEntries(players.map(p => [p.id, { kills: 0, deaths: 0, damage: 0, roundsPlayed: 0 }])),

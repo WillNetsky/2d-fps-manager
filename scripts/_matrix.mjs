@@ -1,194 +1,714 @@
-import type {
-  Agent, DroppedWeapon, Flash, GameMap, GrenadeInFlight, GrenadeKind, HE, Molotov, Player, RoundResult, Side, SimEvent, SiteAssignment, Smoke, SmokeHole, TStrategy, Team, UtilityId, Vec2,
-} from "../domain/types.ts";
-import { HEADSHOT_BASE, HELMET_UPGRADE_COST, VEST_COST, WEAPONS, WEAPON_FALLOFF_UNIT } from "../domain/weapons.ts";
-import { findPath } from "./pathfind.ts";
-import { analyzeMap, type Choke, type MapAnalysis } from "./mapAnalysis.ts";
-
-const TICK_MS = 50;
-const ROUND_TIME_MS = 90_000;
-const BOMB_TIMER_MS = 30_000;
-const PLANT_TIME_MS = 3000;
-const DEFUSE_TIME_MS = 5000;
-
-const SMOKE_DURATION_MS = 14_000;
-const SMOKE_RADIUS_WORLD = 80; // ~2.8 tiles — wide enough to fully plug a 4-tile choke
-
-const FLASH_FUSE_MS = 0; // pop on landing
-const FLASH_RANGE = 320;
-const FLASH_MAX_DURATION_MS = 3500;
-const FLASH_MIN_DURATION_MS = 600;
-const FLASH_CONE_HALF = Math.PI / 2; // ±90°
-
-const MOLOTOV_FUSE_MS = 1500;
-const MOLOTOV_DURATION_MS = 7000;
-const MOLOTOV_RADIUS_WORLD = 70;
-const MOLOTOV_DOT_PER_SEC = 14;
-
-const HE_FUSE_MS = 1500;
-const HE_RADIUS = 120;
-const HE_MAX_DAMAGE = 80;
-const HE_HOLE_RADIUS = 70;
-const HE_HOLE_DURATION_MS = 1500;
-
-const GRENADE_FLIGHT_MS = 600;
-const GRENADE_NOISE_PER_SKILL_GAP = 1.5; // px per (100 - skill)
-
-const TRADE_WINDOW_MS = 2000;
-const TRADE_AIM_BONUS = 0.15;
-
-const INTEL_DECAY = 0.985;       // per tick (~26% / second)
-const INTEL_BUMP = 1;            // per visible enemy per tick
-const INTEL_CAP = 5;
-const INTEL_DOMINANCE = 1.0;     // diff to trigger rotation
-const ROTATE_MIN_T = 6000;       // don't rotate in first N ms of round
-const ROTATE_LOG_COOLDOWN = 4000;
-
-const HEARING_RANGE = 240;       // pixels — enemy footsteps audible within this
-const SOUND_INTEL_BUMP = 0.5;    // less precise than LOS sighting
-const WALK_SPEED_FACTOR = 0.55;
-const CONTACT_RADIUS = 220;      // walk when within this of assigned contact zone
-
-type SiteId = "A" | "B";
-interface SiteIntel { score: number; updatedAt: number; bombSeenAt: number; }
-interface SideIntel { A: SiteIntel; B: SiteIntel; }
-
-const BOMB_SIGHTING_RECENT_MS = 5000;
-
-// Hold-angle "threat focus" — face toward enemy spawn centroid by default.
-function spawnCentroid(spawns: Vec2[], tile: number): Vec2 {
-  let x = 0, y = 0;
-  for (const s of spawns) { x += s.x; y += s.y; }
-  return { x: ((x / spawns.length) + 0.5) * tile, y: ((y / spawns.length) + 0.5) * tile };
+// src/domain/weapons.ts
+var WEAPON_FALLOFF_UNIT = 500;
+var WEAPONS = {
+  knife: {
+    id: "knife",
+    name: "Knife",
+    slot: "knife",
+    cost: 0,
+    damage: 55,
+    fireRate: 2,
+    accuracy: 0.9,
+    range: 32,
+    magSize: 0,
+    reserveAmmo: 0,
+    reloadMs: 0,
+    rangeModifier: 1,
+    armorPen: 0.85,
+    headshotMultiplier: 3
+  },
+  // Glock-18 — T default. Big mag, low damage, weak armor pen, loose at range.
+  glock: {
+    id: "glock",
+    name: "Glock",
+    slot: "pistol",
+    faction: "T",
+    cost: 0,
+    damage: 30,
+    fireRate: 6.67,
+    accuracy: 0.7,
+    range: 320,
+    magSize: 20,
+    reserveAmmo: 120,
+    reloadMs: 2200,
+    rangeModifier: 0.75,
+    armorPen: 0.475,
+    headshotMultiplier: 4
+  },
+  // USP-S — CT default. Smaller mag but tighter, harder-hitting first shot.
+  usp: {
+    id: "usp",
+    name: "USP-S",
+    slot: "pistol",
+    faction: "CT",
+    cost: 0,
+    damage: 35,
+    fireRate: 5.88,
+    accuracy: 0.78,
+    range: 360,
+    magSize: 12,
+    reserveAmmo: 24,
+    reloadMs: 2200,
+    rangeModifier: 0.91,
+    armorPen: 0.507,
+    headshotMultiplier: 4
+  },
+  // Desert Eagle — one-tap potential, slow ROF, expensive.
+  deagle: {
+    id: "deagle",
+    name: "Deagle",
+    slot: "pistol",
+    cost: 700,
+    damage: 63,
+    fireRate: 2.5,
+    accuracy: 0.78,
+    range: 420,
+    magSize: 7,
+    reserveAmmo: 35,
+    reloadMs: 1900,
+    rangeModifier: 0.81,
+    armorPen: 0.93,
+    headshotMultiplier: 4
+  },
+  // MP9 (CT SMG) — high fire rate, tight spray.
+  mp9: {
+    id: "mp9",
+    name: "MP9",
+    slot: "smg",
+    faction: "CT",
+    cost: 1250,
+    damage: 26,
+    fireRate: 14.7,
+    accuracy: 0.72,
+    range: 360,
+    magSize: 30,
+    reserveAmmo: 120,
+    reloadMs: 2100,
+    rangeModifier: 0.75,
+    armorPen: 0.6,
+    headshotMultiplier: 4
+  },
+  // MAC-10 (T SMG) — punchier rounds, looser spray, cheaper.
+  mac10: {
+    id: "mac10",
+    name: "Mac10",
+    slot: "smg",
+    faction: "T",
+    cost: 1050,
+    damage: 29,
+    fireRate: 13.3,
+    accuracy: 0.66,
+    range: 340,
+    magSize: 30,
+    reserveAmmo: 100,
+    reloadMs: 2350,
+    rangeModifier: 0.65,
+    armorPen: 0.65,
+    headshotMultiplier: 4
+  },
+  // M4A4 (CT rifle) — slightly less damage than AK but more accurate.
+  m4: {
+    id: "m4",
+    name: "M4",
+    slot: "rifle",
+    faction: "CT",
+    cost: 3100,
+    damage: 33,
+    fireRate: 10,
+    accuracy: 0.86,
+    range: 540,
+    magSize: 30,
+    reserveAmmo: 90,
+    reloadMs: 3100,
+    rangeModifier: 0.97,
+    armorPen: 0.7,
+    headshotMultiplier: 4
+  },
+  // AK-47 (T rifle) — one-shot HS vs helmet, harder spray.
+  ak: {
+    id: "ak",
+    name: "AK",
+    slot: "rifle",
+    faction: "T",
+    cost: 2700,
+    damage: 36,
+    fireRate: 10,
+    accuracy: 0.8,
+    range: 540,
+    magSize: 30,
+    reserveAmmo: 90,
+    reloadMs: 2900,
+    rangeModifier: 0.98,
+    armorPen: 0.775,
+    headshotMultiplier: 4
+  },
+  // AWP — one-shot body or HS to any target.
+  awp: {
+    id: "awp",
+    name: "AWP",
+    slot: "awp",
+    cost: 4750,
+    damage: 115,
+    fireRate: 1.46,
+    accuracy: 0.95,
+    range: 640,
+    magSize: 10,
+    reserveAmmo: 30,
+    reloadMs: 3700,
+    rangeModifier: 0.99,
+    armorPen: 0.975,
+    headshotMultiplier: 4
+  }
+};
+function defaultPistol(side) {
+  return side === "CT" ? "usp" : "glock";
 }
+var VEST_COST = 650;
+var HELMET_UPGRADE_COST = 350;
+var HEADSHOT_BASE = {
+  knife: 0,
+  glock: 0.1,
+  usp: 0.12,
+  deagle: 0.22,
+  mp9: 0.12,
+  mac10: 0.11,
+  m4: 0.18,
+  ak: 0.2,
+  awp: 0.3
+};
 
-interface TradeMark {
-  killerId: string;
-  victimSide: Side;
-  expiresAt: number;
+// src/domain/factory.ts
+var FIRST_NAMES = ["Aleks", "Niko", "Kai", "Jin", "Theo", "Luc", "Mateo", "Ezra", "Otto", "Ravi", "Sasha", "Yuri", "Bram", "Cy", "Dax", "Finn"];
+var LAST_NAMES = ["Vale", "Reyes", "Park", "Okafor", "Lindholm", "Costa", "Becker", "Marek", "Singh", "Hass", "Doyle", "Brandt", "Voss", "Ahn", "Renn", "Kazan"];
+var rngState = 12648430;
+function setSeed(seed) {
+  rngState = seed >>> 0;
 }
-
-interface PlayerLookup { (id: string): Player | undefined; }
-
-export interface TickShot {
-  from: Vec2;
-  to: Vec2;
-  side: Side;
-  hit: boolean;
-  killerId: string;
+function rand() {
+  rngState = rngState * 1664525 + 1013904223 >>> 0;
+  return rngState / 4294967296;
 }
-
-export interface AgentSnapshot {
-  playerId: string;
-  side: Side;
-  pos: Vec2;
-  facing: number;
-  hp: number;
-  armor: number;
-  helmet: boolean;
-  alive: boolean;
-  weapon: import("../domain/types.ts").WeaponId;
-  ammo: number;
-  reloadingUntil: number;
-  blindedUntil: number;
-  moveMode: "walk" | "run";
+function randInt(lo, hi) {
+  return Math.floor(rand() * (hi - lo + 1)) + lo;
 }
-
-export interface RoundSnapshot {
-  t: number;
-  agents: AgentSnapshot[];
-  smokes: Smoke[];
-  flashes: Flash[];
-  tickFlashes: { pos: Vec2; side: Side }[];
-  molotovs: Molotov[];
-  hes: HE[];
-  tickHEs: { pos: Vec2; side: Side }[];
-  smokeHoles: SmokeHole[];
-  grenadeFlights: GrenadeInFlight[];
-  drops: import("../domain/types.ts").DroppedWeapon[];
-  bombPlanted: boolean;
-  bombPlantedAt: Vec2 | null;
-  bombCarrier: string | null;
-  bombDropped: Vec2 | null;
-  bombPlantedTime: number;
-  bombDefuseProgress: number;
-  defuseTimeMs: number;
-  tickShots: TickShot[];
+function pick(arr) {
+  return arr[Math.floor(rand() * arr.length)];
 }
-
-export class RoundSim {
-  agents: Agent[] = [];
-  smokes: Smoke[] = [];
-  flashes: Flash[] = [];      // in-flight grenades waiting on fuse
-  tickFlashes: { pos: Vec2; side: Side }[] = []; // detonation events this tick
-  molotovs: Molotov[] = [];   // burning patches
-  hes: HE[] = [];             // in-flight HE grenades
-  tickHEs: { pos: Vec2; side: Side }[] = []; // detonation events this tick
-  smokeHoles: SmokeHole[] = []; // brief LOS gaps punched through smoke by HEs
-  grenadeFlights: GrenadeInFlight[] = []; // flying grenades between throw and land
-  drops: DroppedWeapon[] = [];
-  t = 0;
-  events: SimEvent[] = [];
-  finished = false;
-  result: RoundResult | null = null;
-  // Per-tick shots, drained by renderer each frame.
-  tickShots: TickShot[] = [];
-  // Per-tick snapshots — used for replay after the round ends.
-  snapshots: RoundSnapshot[] = [];
-
-  bombCarrier: string | null = null;
-  bombDropped: Vec2 | null = null;
-  defuseTimeMs = DEFUSE_TIME_MS;
-  bombPlanted = false;
-  bombPlantedAt: Vec2 | null = null;
-  bombPlantedTime = 0;
-  bombDefusing: string | null = null;
-  bombDefuseProgress = 0;
-  planter: string | null = null;
-  planting: string | null = null;
-  plantProgress = 0;
-
-  private rng: () => number;
-  private players: PlayerLookup;
-  private ctThreatFocus: Vec2;
-  private tThreatFocus: Vec2;
-  private mapAnalysis: MapAnalysis;
-  private tradeMarks: TradeMark[] = [];
-  private smokeQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
-  private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
-  private molotovQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
-  private heQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
-  tStrategy: TStrategy;
-  ctSetup: { A: number; B: number; mid: number };
-  intel: Record<Side, SideIntel> = {
-    CT: {
-      A: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
-      B: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
-    },
-    T: {
-      A: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
-      B: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
-    },
+function rollStat(base, spread) {
+  return Math.max(20, Math.min(95, Math.round(base + (rand() - 0.5) * 2 * spread)));
+}
+var NEUTRAL = [60, 12];
+var ROLE_PROFILES = {
+  entry: {
+    accuracy: [72, 10],
+    crosshairPlacement: [70, 10],
+    sprayControl: [70, 10],
+    tapping: [62, 12],
+    flickAim: [78, 10],
+    counterStrafe: [65, 10],
+    reflexes: [80, 8],
+    handSpeed: [80, 8],
+    movement: [76, 8],
+    jiggle: [70, 10],
+    mapAwareness: [62, 10],
+    positioning: [58, 10],
+    gameSense: [60, 10],
+    timing: [60, 10],
+    adaptability: [62, 10],
+    composure: [62, 12],
+    aggression: [82, 8],
+    patience: [38, 10],
+    discipline: [55, 12],
+    recovery: [60, 12],
+    utility: [50, 10],
+    smokeLineups: [45, 10],
+    flashTiming: [55, 10],
+    molotovUse: [50, 10],
+    pistolPref: [55, 8],
+    riflePref: [70, 8],
+    awpPref: [40, 10],
+    smgPref: [60, 10],
+    igl: [35, 10],
+    communication: [55, 10]
+  },
+  awper: {
+    accuracy: [82, 8],
+    crosshairPlacement: [80, 8],
+    sprayControl: [50, 10],
+    tapping: [78, 8],
+    flickAim: [82, 8],
+    counterStrafe: [75, 8],
+    reflexes: [78, 8],
+    handSpeed: [76, 8],
+    movement: [60, 10],
+    jiggle: [72, 10],
+    mapAwareness: [70, 10],
+    positioning: [74, 10],
+    gameSense: [70, 10],
+    timing: [72, 10],
+    adaptability: [60, 10],
+    composure: [76, 8],
+    aggression: [55, 12],
+    patience: [70, 10],
+    discipline: [60, 12],
+    recovery: [60, 12],
+    utility: [48, 10],
+    smokeLineups: [45, 10],
+    flashTiming: [45, 10],
+    molotovUse: [45, 10],
+    pistolPref: [55, 8],
+    riflePref: [50, 8],
+    awpPref: [82, 8],
+    smgPref: [45, 10],
+    igl: [40, 10],
+    communication: [55, 10]
+  },
+  support: {
+    accuracy: [66, 10],
+    crosshairPlacement: [66, 10],
+    sprayControl: [68, 10],
+    tapping: [60, 10],
+    flickAim: [55, 10],
+    counterStrafe: [62, 10],
+    reflexes: [64, 10],
+    handSpeed: [62, 10],
+    movement: [66, 8],
+    jiggle: [60, 10],
+    mapAwareness: [76, 8],
+    positioning: [74, 8],
+    gameSense: [74, 8],
+    timing: [70, 10],
+    adaptability: [68, 10],
+    composure: [72, 10],
+    aggression: [50, 10],
+    patience: [75, 10],
+    discipline: [78, 8],
+    recovery: [65, 10],
+    utility: [82, 6],
+    smokeLineups: [82, 8],
+    flashTiming: [78, 8],
+    molotovUse: [76, 10],
+    pistolPref: [55, 10],
+    riflePref: [65, 10],
+    awpPref: [40, 10],
+    smgPref: [60, 10],
+    igl: [45, 10],
+    communication: [70, 10]
+  },
+  igl: {
+    accuracy: [62, 10],
+    crosshairPlacement: [66, 10],
+    sprayControl: [58, 10],
+    tapping: [62, 10],
+    flickAim: [55, 10],
+    counterStrafe: [60, 10],
+    reflexes: [62, 10],
+    handSpeed: [60, 10],
+    movement: [62, 8],
+    jiggle: [58, 10],
+    mapAwareness: [88, 6],
+    positioning: [78, 8],
+    gameSense: [88, 6],
+    timing: [78, 8],
+    adaptability: [82, 8],
+    composure: [82, 8],
+    aggression: [50, 12],
+    patience: [68, 10],
+    discipline: [82, 8],
+    recovery: [72, 10],
+    utility: [74, 8],
+    smokeLineups: [72, 10],
+    flashTiming: [70, 10],
+    molotovUse: [68, 10],
+    pistolPref: [55, 10],
+    riflePref: [60, 10],
+    awpPref: [42, 10],
+    smgPref: [55, 10],
+    igl: [85, 6],
+    communication: [82, 8]
+  },
+  lurker: {
+    accuracy: [74, 10],
+    crosshairPlacement: [76, 10],
+    sprayControl: [62, 10],
+    tapping: [72, 10],
+    flickAim: [74, 10],
+    counterStrafe: [70, 10],
+    reflexes: [72, 8],
+    handSpeed: [68, 10],
+    movement: [70, 8],
+    jiggle: [72, 10],
+    mapAwareness: [80, 8],
+    positioning: [80, 8],
+    gameSense: [76, 8],
+    timing: [78, 8],
+    adaptability: [62, 10],
+    composure: [78, 8],
+    aggression: [48, 12],
+    patience: [82, 8],
+    discipline: [55, 12],
+    recovery: [65, 10],
+    utility: [55, 10],
+    smokeLineups: [50, 10],
+    flashTiming: [50, 10],
+    molotovUse: [50, 10],
+    pistolPref: [60, 10],
+    riflePref: [70, 10],
+    awpPref: [55, 10],
+    smgPref: [55, 10],
+    igl: [40, 10],
+    communication: [50, 10]
+  }
+};
+function statsForRole(role) {
+  const profile = ROLE_PROFILES[role];
+  const out = {};
+  const ALL_KEYS = [
+    "accuracy",
+    "crosshairPlacement",
+    "sprayControl",
+    "tapping",
+    "flickAim",
+    "counterStrafe",
+    "reflexes",
+    "handSpeed",
+    "movement",
+    "jiggle",
+    "mapAwareness",
+    "positioning",
+    "gameSense",
+    "timing",
+    "adaptability",
+    "composure",
+    "aggression",
+    "patience",
+    "discipline",
+    "recovery",
+    "utility",
+    "smokeLineups",
+    "flashTiming",
+    "molotovUse",
+    "pistolPref",
+    "riflePref",
+    "awpPref",
+    "smgPref",
+    "igl",
+    "communication"
+  ];
+  for (const key of ALL_KEYS) {
+    const [base, spread] = profile[key] ?? NEUTRAL;
+    out[key] = rollStat(base, spread);
+  }
+  return out;
+}
+var ROLE_TRAITS = {
+  entry: ["entry-fragger", "rifler", "tilts-easy"],
+  awper: ["awp-prodigy", "clutch", "shaky-eco"],
+  support: ["smoke-savant", "loyal"],
+  igl: ["clutch", "loyal", "smoke-savant"],
+  lurker: ["clutch", "rifler", "tilts-easy"]
+};
+function rollTraits(role) {
+  const pool = ROLE_TRAITS[role];
+  const count = randInt(1, 2);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const t = pick(pool);
+    if (!out.includes(t)) out.push(t);
+  }
+  return out;
+}
+var playerCounter = 0;
+function makePlayer(role) {
+  const id = `p${++playerCounter}`;
+  const name = `${pick(FIRST_NAMES)} "${pick(["zen", "fox", "ace", "ghost", "king", "ice", "null", "drift", "pulse", "raze"])}" ${pick(LAST_NAMES)}`;
+  return {
+    id,
+    name,
+    role,
+    stats: statsForRole(role),
+    traits: rollTraits(role),
+    money: STARTING_PER_PLAYER,
+    mood: 65,
+    morale: 65,
+    relationships: {},
+    ctAssignment: "auto"
   };
-  // Agent → ms timestamp of their last "rotation" log, to avoid spam.
-  private lastRotationLog: Record<string, number> = {};
-  // Per-agent rotation log surfaced for UI.
-  rotationLog: { t: number; agentId: string; from: SiteAssignment; to: SiteId }[] = [];
+}
+var STARTING_PER_PLAYER = 800;
+var ALL_STAT_KEYS = [
+  "accuracy",
+  "crosshairPlacement",
+  "sprayControl",
+  "tapping",
+  "flickAim",
+  "counterStrafe",
+  "reflexes",
+  "handSpeed",
+  "movement",
+  "jiggle",
+  "mapAwareness",
+  "positioning",
+  "gameSense",
+  "timing",
+  "adaptability",
+  "composure",
+  "aggression",
+  "patience",
+  "discipline",
+  "recovery",
+  "utility",
+  "smokeLineups",
+  "flashTiming",
+  "molotovUse",
+  "pistolPref",
+  "riflePref",
+  "awpPref",
+  "smgPref",
+  "igl",
+  "communication"
+];
+function neutralizeTeamStats(team, value = 60) {
+  for (const p of team.players) {
+    for (const k of ALL_STAT_KEYS) p.stats[k] = value;
+  }
+}
+var STANDARD_ROSTER = ["igl", "awper", "entry", "support", "lurker"];
+function makeTeam(id, name, side) {
+  const players = STANDARD_ROSTER.map(makePlayer);
+  for (const p of players) {
+    for (const q of players) {
+      if (p.id !== q.id) p.relationships[q.id] = randInt(-15, 30);
+    }
+  }
+  return {
+    id,
+    name,
+    side,
+    players,
+    roundsWon: 0,
+    loadouts: Object.fromEntries(players.map((p) => [p.id, {
+      weapon: defaultPistol(side),
+      utility: [],
+      armor: false,
+      helmet: false,
+      keptWeapon: null,
+      keptArmor: false,
+      keptHelmet: false,
+      keptUtility: []
+    }])),
+    matchStats: Object.fromEntries(players.map((p) => [p.id, { kills: 0, deaths: 0, damage: 0, roundsPlayed: 0 }]))
+  };
+}
 
-  constructor(
-    public ct: Team,
-    public tSide: Team,
-    public map: GameMap,
-    seed = 12345,
-  ) {
+// src/sim/pathfind.ts
+var NEIGHBORS = [
+  [1, 0, 1],
+  [-1, 0, 1],
+  [0, 1, 1],
+  [0, -1, 1],
+  [1, 1, Math.SQRT2],
+  [1, -1, Math.SQRT2],
+  [-1, 1, Math.SQRT2],
+  [-1, -1, Math.SQRT2]
+];
+function findPath(map, start, goal) {
+  const sx = Math.floor(start.x / map.tileSize);
+  const sy = Math.floor(start.y / map.tileSize);
+  const gx = Math.floor(goal.x / map.tileSize);
+  const gy = Math.floor(goal.y / map.tileSize);
+  if (sx === gx && sy === gy) return [];
+  if (!inBounds(map, gx, gy) || map.walls[gy * map.width + gx]) {
+    let best = null;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const nx = gx + dx, ny = gy + dy;
+      if (!inBounds(map, nx, ny) || map.walls[ny * map.width + nx]) continue;
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (!best || d < best.d) best = { x: nx, y: ny, d };
+    }
+    if (!best) return null;
+    return findPath(map, start, { x: (best.x + 0.5) * map.tileSize, y: (best.y + 0.5) * map.tileSize });
+  }
+  const open = [];
+  const startNode = { x: sx, y: sy, g: 0, f: heuristic(sx, sy, gx, gy), parent: null };
+  open.push(startNode);
+  const closed = /* @__PURE__ */ new Set();
+  const bestG = /* @__PURE__ */ new Map();
+  bestG.set(sy * map.width + sx, 0);
+  while (open.length) {
+    let bestIdx = 0;
+    for (let i = 1; i < open.length; i++) if (open[i].f < open[bestIdx].f) bestIdx = i;
+    const cur = open.splice(bestIdx, 1)[0];
+    const key = cur.y * map.width + cur.x;
+    if (closed.has(key)) continue;
+    closed.add(key);
+    if (cur.x === gx && cur.y === gy) {
+      const path = [];
+      let n = cur;
+      while (n && n.parent) {
+        path.push({ x: (n.x + 0.5) * map.tileSize, y: (n.y + 0.5) * map.tileSize });
+        n = n.parent;
+      }
+      path.reverse();
+      return path;
+    }
+    for (const [dx, dy, cost] of NEIGHBORS) {
+      const nx = cur.x + dx, ny = cur.y + dy;
+      if (!inBounds(map, nx, ny)) continue;
+      if (map.walls[ny * map.width + nx]) continue;
+      if (dx !== 0 && dy !== 0) {
+        if (map.walls[cur.y * map.width + nx]) continue;
+        if (map.walls[ny * map.width + cur.x]) continue;
+      }
+      const nKey = ny * map.width + nx;
+      if (closed.has(nKey)) continue;
+      const g = cur.g + cost;
+      const prev = bestG.get(nKey);
+      if (prev !== void 0 && prev <= g) continue;
+      bestG.set(nKey, g);
+      open.push({ x: nx, y: ny, g, f: g + heuristic(nx, ny, gx, gy), parent: cur });
+    }
+  }
+  return null;
+}
+function inBounds(map, x, y) {
+  return x >= 0 && y >= 0 && x < map.width && y < map.height;
+}
+function heuristic(x, y, gx, gy) {
+  const dx = Math.abs(x - gx), dy = Math.abs(y - gy);
+  return dx + dy + (Math.SQRT2 - 2) * Math.min(dx, dy);
+}
+
+// src/sim/mapAnalysis.ts
+var N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+var N8 = [...N4, [1, 1], [-1, 1], [1, -1], [-1, -1]];
+function analyzeMap(map) {
+  const W = map.width, H = map.height;
+  const ctDist = bfs(map, map.ctSpawns);
+  const tDist = bfs(map, map.tSpawns);
+  const chokes = [];
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const idx = y * W + x;
+      if (map.walls[idx]) continue;
+      if (!isFinite(ctDist[idx]) || !isFinite(tDist[idx])) continue;
+      let wallCount = 0;
+      for (const [dx, dy] of N8) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) wallCount++;
+        else if (map.walls[ny * W + nx]) wallCount++;
+      }
+      if (wallCount < 5) continue;
+      let ctSide = null, tSide = null;
+      let ctSideD = Infinity, tSideD = Infinity;
+      for (const [dx, dy] of N4) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        if (map.walls[ny * W + nx]) continue;
+        const nIdx = ny * W + nx;
+        if (ctDist[nIdx] < ctSideD) {
+          ctSideD = ctDist[nIdx];
+          ctSide = { x: nx, y: ny };
+        }
+        if (tDist[nIdx] < tSideD) {
+          tSideD = tDist[nIdx];
+          tSide = { x: nx, y: ny };
+        }
+      }
+      if (!ctSide && !tSide) continue;
+      chokes.push({ tile: { x, y }, ctSide, tSide });
+    }
+  }
+  return { chokes, ctDist, tDist };
+}
+function bfs(map, sources) {
+  const W = map.width, H = map.height;
+  const dist2 = new Array(W * H).fill(Infinity);
+  const queue = [];
+  for (const s of sources) {
+    if (s.x < 0 || s.y < 0 || s.x >= W || s.y >= H) continue;
+    if (map.walls[s.y * W + s.x]) continue;
+    if (dist2[s.y * W + s.x] === Infinity) {
+      dist2[s.y * W + s.x] = 0;
+      queue.push({ x: s.x, y: s.y });
+    }
+  }
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const d = dist2[cur.y * W + cur.x];
+    for (const [dx, dy] of N4) {
+      const nx = cur.x + dx, ny = cur.y + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      if (map.walls[ny * W + nx]) continue;
+      const nIdx = ny * W + nx;
+      if (dist2[nIdx] > d + 1) {
+        dist2[nIdx] = d + 1;
+        queue.push({ x: nx, y: ny });
+      }
+    }
+  }
+  return dist2;
+}
+
+// src/sim/round.ts
+var TICK_MS = 50;
+var ROUND_TIME_MS = 9e4;
+var BOMB_TIMER_MS = 3e4;
+var PLANT_TIME_MS = 3e3;
+var DEFUSE_TIME_MS = 5e3;
+var SMOKE_DURATION_MS = 14e3;
+var SMOKE_RADIUS_WORLD = 80;
+var FLASH_FUSE_MS = 1500;
+var FLASH_RANGE = 320;
+var FLASH_MAX_DURATION_MS = 3500;
+var FLASH_MIN_DURATION_MS = 600;
+var FLASH_CONE_HALF = Math.PI / 2;
+var MOLOTOV_FUSE_MS = 1500;
+var MOLOTOV_DURATION_MS = 7e3;
+var MOLOTOV_RADIUS_WORLD = 70;
+var MOLOTOV_DOT_PER_SEC = 14;
+var HE_FUSE_MS = 1500;
+var HE_RADIUS = 120;
+var HE_MAX_DAMAGE = 80;
+var HE_HOLE_RADIUS = 70;
+var HE_HOLE_DURATION_MS = 1500;
+var GRENADE_FLIGHT_MS = 600;
+var GRENADE_NOISE_PER_SKILL_GAP = 1.5;
+var TRADE_WINDOW_MS = 2e3;
+var TRADE_AIM_BONUS = 0.15;
+var INTEL_DECAY = 0.985;
+var INTEL_BUMP = 1;
+var INTEL_CAP = 5;
+var INTEL_DOMINANCE = 1;
+var ROTATE_MIN_T = 6e3;
+var ROTATE_LOG_COOLDOWN = 4e3;
+var VISION_RANGE = 540;
+var HEARING_RANGE = 240;
+var SOUND_INTEL_BUMP = 0.5;
+var WALK_SPEED_FACTOR = 0.55;
+var CONTACT_RADIUS = 220;
+var BOMB_SIGHTING_RECENT_MS = 5e3;
+function spawnCentroid(spawns, tile) {
+  let x = 0, y = 0;
+  for (const s of spawns) {
+    x += s.x;
+    y += s.y;
+  }
+  return { x: (x / spawns.length + 0.5) * tile, y: (y / spawns.length + 0.5) * tile };
+}
+var RoundSim = class {
+  constructor(ct, tSide, map, seed = 12345) {
+    this.ct = ct;
+    this.tSide = tSide;
+    this.map = map;
     let s = seed >>> 0;
     this.rng = () => {
-      s = (s * 1664525 + 1013904223) >>> 0;
-      return s / 0x1_0000_0000;
+      s = s * 1664525 + 1013904223 >>> 0;
+      return s / 4294967296;
     };
     const all = [...ct.players, ...tSide.players];
-    this.players = (id) => all.find(p => p.id === id);
-    // Each side's "hold" direction is toward the opposite spawn centroid.
+    this.players = (id) => all.find((p) => p.id === id);
     this.ctThreatFocus = spawnCentroid(map.tSpawns, map.tileSize);
     this.tThreatFocus = spawnCentroid(map.ctSpawns, map.tileSize);
     this.mapAnalysis = analyzeMap(map);
@@ -203,8 +723,69 @@ export class RoundSim {
     this.scheduleHEs();
     this.push({ t: 0, kind: "round-start" });
   }
-
-  private pickTStrategy(): TStrategy {
+  agents = [];
+  smokes = [];
+  flashes = [];
+  // in-flight grenades waiting on fuse
+  tickFlashes = [];
+  // detonation events this tick
+  molotovs = [];
+  // burning patches
+  hes = [];
+  // in-flight HE grenades
+  tickHEs = [];
+  // detonation events this tick
+  smokeHoles = [];
+  // brief LOS gaps punched through smoke by HEs
+  grenadeFlights = [];
+  // flying grenades between throw and land
+  drops = [];
+  t = 0;
+  events = [];
+  finished = false;
+  result = null;
+  // Per-tick shots, drained by renderer each frame.
+  tickShots = [];
+  // Per-tick snapshots — used for replay after the round ends.
+  snapshots = [];
+  bombCarrier = null;
+  bombDropped = null;
+  defuseTimeMs = DEFUSE_TIME_MS;
+  bombPlanted = false;
+  bombPlantedAt = null;
+  bombPlantedTime = 0;
+  bombDefusing = null;
+  bombDefuseProgress = 0;
+  planter = null;
+  planting = null;
+  plantProgress = 0;
+  rng;
+  players;
+  ctThreatFocus;
+  tThreatFocus;
+  mapAnalysis;
+  tradeMarks = [];
+  smokeQueue = [];
+  flashQueue = [];
+  molotovQueue = [];
+  heQueue = [];
+  tStrategy;
+  ctSetup;
+  intel = {
+    CT: {
+      A: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
+      B: { score: 0, updatedAt: 0, bombSeenAt: -Infinity }
+    },
+    T: {
+      A: { score: 0, updatedAt: 0, bombSeenAt: -Infinity },
+      B: { score: 0, updatedAt: 0, bombSeenAt: -Infinity }
+    }
+  };
+  // Agent → ms timestamp of their last "rotation" log, to avoid spam.
+  lastRotationLog = {};
+  // Per-agent rotation log surfaced for UI.
+  rotationLog = [];
+  pickTStrategy() {
     const r = this.rng();
     if (r < 0.25) return "rush-A";
     if (r < 0.5) return "rush-B";
@@ -212,28 +793,24 @@ export class RoundSim {
     if (r < 0.85) return "split-B";
     return "default";
   }
-
-  private pickCtSetup(): { A: number; B: number; mid: number } {
+  pickCtSetup() {
     const r = this.rng();
     if (r < 0.55) return { A: 2, B: 2, mid: 1 };
     if (r < 0.8) return { A: 3, B: 2, mid: 0 };
     return { A: 2, B: 3, mid: 0 };
   }
-
   // Assign each agent a SiteAssignment based on strategy/setup.
-  private assignSites() {
-    // CTs: coach-set placements first, then ctSetup fills remaining.
-    const cts = this.agents.filter(a => a.side === "CT");
+  assignSites() {
+    const cts = this.agents.filter((a) => a.side === "CT");
     const tA = this.ctSetup.A, tB = this.ctSetup.B, tMid = this.ctSetup.mid;
-    const slots: SiteAssignment[] = [
-      ...Array(tA).fill("A" as SiteAssignment),
-      ...Array(tB).fill("B" as SiteAssignment),
-      ...Array(tMid).fill("mid" as SiteAssignment),
+    const slots = [
+      ...Array(tA).fill("A"),
+      ...Array(tB).fill("B"),
+      ...Array(tMid).fill("mid")
     ];
-    // Apply coach overrides; subtract those from the slot pool.
-    const autoCts: Agent[] = [];
+    const autoCts = [];
     for (const a of cts) {
-      const player = this.players(a.playerId)!;
+      const player = this.players(a.playerId);
       const fixed = player.ctAssignment;
       if (fixed === "A" || fixed === "B" || fixed === "mid") {
         a.assignedSite = fixed;
@@ -243,80 +820,52 @@ export class RoundSim {
         autoCts.push(a);
       }
     }
-    // Order remaining autos by role priority.
     autoCts.sort((x, y) => this.priority(x) - this.priority(y));
-    autoCts.forEach((a, i) => { a.assignedSite = slots[i] ?? "A"; });
-
-    // Ts: based on strategy.
-    const ts = this.agents.filter(a => a.side === "T");
-    let primary: "A" | "B";
+    autoCts.forEach((a, i) => {
+      a.assignedSite = slots[i] ?? "A";
+    });
+    const ts = this.agents.filter((a) => a.side === "T");
+    let primary;
     let splitOne = false;
     switch (this.tStrategy) {
-      case "rush-A": primary = "A"; break;
-      case "rush-B": primary = "B"; break;
-      case "split-A": primary = "A"; splitOne = true; break;
-      case "split-B": primary = "B"; splitOne = true; break;
+      case "rush-A":
+        primary = "A";
+        break;
+      case "rush-B":
+        primary = "B";
+        break;
+      case "split-A":
+        primary = "A";
+        splitOne = true;
+        break;
+      case "split-B":
+        primary = "B";
+        splitOne = true;
+        break;
       case "default":
       default:
         primary = this.rng() < 0.5 ? "A" : "B";
         splitOne = true;
         break;
     }
-    // Lurker peels to opposite site if splitting.
-    ts.forEach(a => {
-      const player = this.players(a.playerId)!;
+    ts.forEach((a) => {
+      const player = this.players(a.playerId);
       if (splitOne && player.role === "lurker") {
         a.assignedSite = primary === "A" ? "B" : "A";
       } else {
         a.assignedSite = primary;
       }
     });
-    // After assignments are final, pick a specific hold point for each CT.
-    for (const a of this.agents) {
-      if (a.side === "CT") a.holdPoint = this.pickHoldPoint(a);
-    }
   }
-
-  // Choose a hold point within the agent's assigned region. Role priority:
-  //   entry/awper → forward choke / mid-aggro
-  //   lurker     → flank when available
-  //   support/igl/default → anchor
-  private pickHoldPoint(a: Agent): string | null {
-    const region = a.assignedSite;
-    const pool = this.mapAnalysis.holdPoints[region];
-    if (!pool || pool.length === 0) return null;
-    const role = this.players(a.playerId)!.role;
-    const byRole = (r: string) => pool.find(h => h.role === r) ?? null;
-    let pick = null as ReturnType<typeof byRole>;
-    if (region === "mid") {
-      pick = (role === "entry" || role === "awper") ? (byRole("mid-aggro") ?? byRole("mid-info")) : byRole("mid-info");
-    } else if (role === "entry" || role === "awper") {
-      pick = byRole("choke") ?? byRole("flank") ?? byRole("anchor");
-    } else if (role === "lurker") {
-      pick = byRole("flank") ?? byRole("anchor") ?? byRole("choke");
-    } else {
-      pick = byRole("anchor") ?? byRole("choke");
-    }
-    return pick?.id ?? pool[0].id;
-  }
-
-  private holdPointWorldPos(a: Agent): Vec2 | null {
-    if (!a.holdPoint) return null;
-    const pool = this.mapAnalysis.holdPoints[a.assignedSite];
-    const hp = pool?.find(h => h.id === a.holdPoint);
-    if (!hp) return null;
-    return this.tileCenter(hp.tile);
-  }
-
-  private priority(a: Agent): number {
-    const player = this.players(a.playerId)!;
+  priority(a) {
+    const player = this.players(a.playerId);
     return { awper: 0, igl: 1, support: 2, entry: 3, lurker: 4 }[player.role];
   }
-
-  private push(e: SimEvent) { this.events.push(e); }
-
-  private spawnAgents() {
-    const make = (p: Player, side: Side, spawn: Vec2): Agent => {
+  push(e) {
+    this.events.push(e);
+  }
+  spawnAgents() {
+    const make = (p, side, spawn) => {
       const loadout = (side === "CT" ? this.ct : this.tSide).loadouts[p.id];
       const focus = side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
       const sx = (spawn.x + 0.5) * this.map.tileSize;
@@ -342,7 +891,6 @@ export class RoundSim {
         spotted: {},
         holdAngle: null,
         assignedSite: "A",
-        holdPoint: null,
         nextThinkAt: 0,
         dirty: true,
         moveMode: "run",
@@ -356,75 +904,48 @@ export class RoundSim {
         peekPos: null,
         peekState: "none",
         peekUntil: 0,
-        peekCycles: 0,
         saving: false,
-        reassessSaveAt: 0,
+        reassessSaveAt: 0
       };
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
     this.tSide.players.forEach((p, i) => this.agents.push(make(p, "T", this.map.tSpawns[i % this.map.tSpawns.length])));
   }
-
-  // Chokes worth smoking for this agent.
-  //
-  // T (attacker): chokes on the agent's own path to the site — they'll push
-  //   through behind the smoke.
-  // CT (defender): chokes on the *T-side* path to the agent's site — the
-  //   spots Ts come through. Picking from the CT path instead causes CTs to
-  //   smoke their own spawn doorways and walk into their own smoke.
-  private chokesOnAgentPath(a: Agent): Choke[] {
+  // Compute path from agent to assigned site center, then find chokes along it.
+  // Returns chokes with skill-modulated quality preference.
+  chokesOnAgentPath(a) {
     const sitePos = this.agentSiteWorldPos(a);
     if (!sitePos) return [];
-    const ts = this.map.tileSize;
-    let start: Vec2;
-    if (a.side === "T") {
-      start = a.pos;
-    } else {
-      // Use the T-spawn centroid as the attacker's origin.
-      const ts2 = this.map.tSpawns;
-      let sx = 0, sy = 0;
-      for (const s of ts2) { sx += (s.x + 0.5) * ts; sy += (s.y + 0.5) * ts; }
-      start = { x: sx / ts2.length, y: sy / ts2.length };
-    }
-    const path = findPath(this.map, start, sitePos);
+    const path = findPath(this.map, a.pos, sitePos);
     if (!path) return [];
-    const pathTiles = new Set<string>();
-    pathTiles.add(`${Math.floor(start.x / ts)},${Math.floor(start.y / ts)}`);
+    const pathTiles = /* @__PURE__ */ new Set();
+    const ts = this.map.tileSize;
+    pathTiles.add(`${Math.floor(a.pos.x / ts)},${Math.floor(a.pos.y / ts)}`);
     for (const wp of path) pathTiles.add(`${Math.floor(wp.x / ts)},${Math.floor(wp.y / ts)}`);
-    return this.mapAnalysis.chokes.filter(c => pathTiles.has(`${c.tile.x},${c.tile.y}`));
+    return this.mapAnalysis.chokes.filter((c) => pathTiles.has(`${c.tile.x},${c.tile.y}`));
   }
-
-  private agentSiteWorldPos(a: Agent): Vec2 | null {
-    // CTs route to their specific hold point, not the plate, until something
-    // forces a fallback (post-plant, no hold point derivable for this map).
-    if (a.side === "CT" && !this.bombPlanted) {
-      const hp = this.holdPointWorldPos(a);
-      if (hp) return hp;
-    }
+  agentSiteWorldPos(a) {
     if (a.assignedSite === "mid") {
       return {
         x: this.map.width * this.map.tileSize * 0.5,
-        y: this.map.height * this.map.tileSize * 0.5,
+        y: this.map.height * this.map.tileSize * 0.5
       };
     }
-    const site = this.map.bombsites.find(s => s.id === a.assignedSite);
+    const site = this.map.bombsites.find((s) => s.id === a.assignedSite);
     if (!site) return null;
     return this.tileCenter(site.center);
   }
-
-  private tileCenter(tile: Vec2): Vec2 {
+  tileCenter(tile) {
     return { x: (tile.x + 0.5) * this.map.tileSize, y: (tile.y + 0.5) * this.map.tileSize };
   }
-
   // For an agent, choose the most useful choke on their path.
   // Strategy: pick the choke closest to enemy spawn (most forward / aggressive).
   // High smokeLineups picks optimally; low picks worse choices.
-  private pickChokeForAgent(a: Agent, mode: "in" | "enemy-side", usedTiles: Set<string>): Choke | null {
-    const candidates = this.chokesOnAgentPath(a).filter(c => !usedTiles.has(`${c.tile.x},${c.tile.y}`));
+  pickChokeForAgent(a, mode, usedTiles) {
+    const candidates = this.chokesOnAgentPath(a).filter((c) => !usedTiles.has(`${c.tile.x},${c.tile.y}`));
     if (!candidates.length) return null;
-    const player = this.players(a.playerId)!;
-    const skill = (player.stats.smokeLineups + player.stats.utility) / 200; // 0..1
-    // High-skill players pick the most-forward choke. Low-skill randomize.
+    const player = this.players(a.playerId);
+    const skill = (player.stats.smokeLineups + player.stats.utility) / 200;
     if (this.rng() > skill) {
       return candidates[Math.floor(this.rng() * candidates.length)];
     }
@@ -434,34 +955,29 @@ export class RoundSim {
     let bestD = enemyDist[best.tile.y * W + best.tile.x];
     for (const c of candidates) {
       const d = enemyDist[c.tile.y * W + c.tile.x];
-      if (d < bestD) { bestD = d; best = c; }
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
     }
     void mode;
     return best;
   }
-
   // Like pickChokeForAgent but returns the actual throw position (in choke or its enemy-side neighbor).
-  private pickChokeTargetForAgent(
-    a: Agent,
-    mode: "in" | "enemy-side",
-    usedTiles: Set<string>,
-  ): { choke: Choke; spot: Vec2 } | null {
+  pickChokeTargetForAgent(a, mode, usedTiles) {
     const choke = this.pickChokeForAgent(a, mode, usedTiles);
     if (!choke) return null;
     if (mode === "in") return { choke, spot: this.tileCenter(choke.tile) };
-    // enemy-side: throw past the choke into the enemy's holding area
     const enemyNeighbor = a.side === "T" ? choke.ctSide : choke.tSide;
     const target = enemyNeighbor ?? choke.tile;
     return { choke, spot: this.tileCenter(target) };
   }
-
-  private assignBombCarrier() {
-    const ts = this.agents.filter(a => a.side === "T");
+  assignBombCarrier() {
+    const ts = this.agents.filter((a) => a.side === "T");
     this.bombCarrier = ts[Math.floor(this.rng() * ts.length)].playerId;
   }
-
-  private scheduleSmokes() {
-    const usedTiles = new Set<string>();
+  scheduleSmokes() {
+    const usedTiles = /* @__PURE__ */ new Set();
     for (const a of this.agents) {
       if (!a.utility.includes("smoke")) continue;
       const choke = this.pickChokeForAgent(a, "in", usedTiles);
@@ -471,25 +987,22 @@ export class RoundSim {
       this.smokeQueue.push({
         thrower: a.playerId,
         spot,
-        throwAt: 1000 + this.rng() * 2000,
+        throwAt: 1e3 + this.rng() * 2e3
       });
     }
   }
-
-  tick(): void {
+  tick() {
     if (this.finished) return;
     this.t += TICK_MS;
     this.tickShots.length = 0;
     this.tickFlashes.length = 0;
     this.tickHEs.length = 0;
-
     this.tickGrenadeFlights();
     this.tickSmokes();
     this.tickFlashesUpdate();
     this.tickMolotovsUpdate();
     this.tickHEsUpdate();
     this.updateIntel();
-
     for (const a of this.agents) if (a.alive) this.think(a);
     for (const a of this.agents) if (a.alive) this.tickPeek(a);
     for (const a of this.agents) if (a.alive) this.move(a);
@@ -497,40 +1010,46 @@ export class RoundSim {
     for (const a of this.agents) if (a.alive) this.updateLook(a);
     for (const a of this.agents) if (a.alive) this.applyFacing(a);
     for (const a of this.agents) if (a.alive) this.maybeShoot(a);
-
-    // Prune expired trade marks
-    this.tradeMarks = this.tradeMarks.filter(m => m.expiresAt > this.t);
-
+    this.tradeMarks = this.tradeMarks.filter((m) => m.expiresAt > this.t);
     this.tickBomb();
     this.captureSnapshot();
     this.checkEnd();
   }
-
-  private captureSnapshot() {
+  captureSnapshot() {
     this.snapshots.push({
       t: this.t,
-      agents: this.agents.map(a => ({
-        playerId: a.playerId, side: a.side,
-        pos: { x: a.pos.x, y: a.pos.y }, facing: a.facing,
-        hp: a.hp, armor: a.armor, helmet: a.helmet, alive: a.alive,
-        weapon: a.weapon, ammo: a.ammo, reloadingUntil: a.reloadingUntil,
+      agents: this.agents.map((a) => ({
+        playerId: a.playerId,
+        side: a.side,
+        pos: { x: a.pos.x, y: a.pos.y },
+        facing: a.facing,
+        hp: a.hp,
+        armor: a.armor,
+        helmet: a.helmet,
+        alive: a.alive,
+        weapon: a.weapon,
+        ammo: a.ammo,
+        reloadingUntil: a.reloadingUntil,
         blindedUntil: a.blindedUntil,
-        moveMode: a.moveMode,
+        moveMode: a.moveMode
       })),
-      smokes: this.smokes.map(s => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
-      flashes: this.flashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, detonatesAt: f.detonatesAt, side: f.side })),
-      tickFlashes: this.tickFlashes.map(f => ({ pos: { x: f.pos.x, y: f.pos.y }, side: f.side })),
-      molotovs: this.molotovs.map(m => ({ pos: { x: m.pos.x, y: m.pos.y }, radius: m.radius, expiresAt: m.expiresAt, side: m.side, thrower: m.thrower })),
-      hes: this.hes.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, detonatesAt: h.detonatesAt, side: h.side, thrower: h.thrower })),
-      tickHEs: this.tickHEs.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, side: h.side })),
-      smokeHoles: this.smokeHoles.map(h => ({ pos: { x: h.pos.x, y: h.pos.y }, radius: h.radius, expiresAt: h.expiresAt })),
-      grenadeFlights: this.grenadeFlights.map(g => ({
-        kind: g.kind, thrower: g.thrower, side: g.side,
+      smokes: this.smokes.map((s) => ({ pos: { x: s.pos.x, y: s.pos.y }, radius: s.radius, expiresAt: s.expiresAt, side: s.side })),
+      flashes: this.flashes.map((f) => ({ pos: { x: f.pos.x, y: f.pos.y }, detonatesAt: f.detonatesAt, side: f.side })),
+      tickFlashes: this.tickFlashes.map((f) => ({ pos: { x: f.pos.x, y: f.pos.y }, side: f.side })),
+      molotovs: this.molotovs.map((m) => ({ pos: { x: m.pos.x, y: m.pos.y }, radius: m.radius, expiresAt: m.expiresAt, side: m.side, thrower: m.thrower })),
+      hes: this.hes.map((h) => ({ pos: { x: h.pos.x, y: h.pos.y }, detonatesAt: h.detonatesAt, side: h.side, thrower: h.thrower })),
+      tickHEs: this.tickHEs.map((h) => ({ pos: { x: h.pos.x, y: h.pos.y }, side: h.side })),
+      smokeHoles: this.smokeHoles.map((h) => ({ pos: { x: h.pos.x, y: h.pos.y }, radius: h.radius, expiresAt: h.expiresAt })),
+      grenadeFlights: this.grenadeFlights.map((g) => ({
+        kind: g.kind,
+        thrower: g.thrower,
+        side: g.side,
         start: { x: g.start.x, y: g.start.y },
         landing: { x: g.landing.x, y: g.landing.y },
-        startedAt: g.startedAt, landsAt: g.landsAt,
+        startedAt: g.startedAt,
+        landsAt: g.landsAt
       })),
-      drops: this.drops.map(d => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
+      drops: this.drops.map((d) => ({ pos: { x: d.pos.x, y: d.pos.y }, weapon: d.weapon })),
       bombPlanted: this.bombPlanted,
       bombPlantedAt: this.bombPlantedAt ? { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y } : null,
       bombCarrier: this.bombCarrier,
@@ -538,37 +1057,36 @@ export class RoundSim {
       bombDefuseProgress: this.bombDefuseProgress,
       defuseTimeMs: DEFUSE_TIME_MS,
       bombPlantedTime: this.bombPlantedTime,
-      tickShots: this.tickShots.map(s => ({
-        from: { x: s.from.x, y: s.from.y }, to: { x: s.to.x, y: s.to.y },
-        side: s.side, hit: s.hit, killerId: s.killerId,
-      })),
+      tickShots: this.tickShots.map((s) => ({
+        from: { x: s.from.x, y: s.from.y },
+        to: { x: s.to.x, y: s.to.y },
+        side: s.side,
+        hit: s.hit,
+        killerId: s.killerId
+      }))
     });
   }
-
   // ---- Intel ----
-  private updateIntel() {
-    // Decay
-    for (const side of ["CT", "T"] as const) {
+  updateIntel() {
+    for (const side of ["CT", "T"]) {
       this.intel[side].A.score *= INTEL_DECAY;
       this.intel[side].B.score *= INTEL_DECAY;
     }
-    // Each living agent bumps their team's intel for each visible enemy.
     for (const a of this.agents) {
       if (!a.alive) continue;
       for (const e of this.agents) {
         if (!e.alive || e.side === a.side) continue;
+        if (dist(a.pos, e.pos) > VISION_RANGE) continue;
         if (!this.hasLineOfSight(a.pos, e.pos)) continue;
         const site = this.nearestSiteId(e.pos);
         const intel = this.intel[a.side][site];
         intel.score = Math.min(INTEL_CAP, intel.score + INTEL_BUMP);
         intel.updatedAt = this.t;
-        // Spotting the bomb carrier is a much stronger signal than any other sighting.
         if (e.playerId === this.bombCarrier) {
           intel.bombSeenAt = this.t;
         }
       }
     }
-    // Sound: running agents leak intel to enemies within hearing range (no LOS required).
     for (const a of this.agents) {
       if (!a.alive || a.moveMode !== "run") continue;
       for (const e of this.agents) {
@@ -581,38 +1099,38 @@ export class RoundSim {
       }
     }
   }
-
-  private nearestSiteId(pos: Vec2): SiteId {
-    let best: SiteId = "A"; let bd = Infinity;
+  nearestSiteId(pos) {
+    let best = "A";
+    let bd = Infinity;
     for (const s of this.map.bombsites) {
       const c = worldCenterOfTile(s.center, this.map);
       const d = dist(c, pos);
-      if (d < bd) { bd = d; best = s.id; }
+      if (d < bd) {
+        bd = d;
+        best = s.id;
+      }
     }
     return best;
   }
-
   // ---- Flashes ----
-  private scheduleFlashes() {
-    const usedTiles = new Set<string>();
+  scheduleFlashes() {
+    const usedTiles = /* @__PURE__ */ new Set();
     for (const a of this.agents) {
       if (!a.utility.includes("flash")) continue;
       const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
       if (!target) continue;
-      const player = this.players(a.playerId)!;
+      const player = this.players(a.playerId);
       const earliness = (player.stats.aggression - 50) / 100;
-      const baseThrow = 4500 - earliness * 2000;
+      const baseThrow = 4500 - earliness * 2e3;
       this.flashQueue.push({
         thrower: a.playerId,
         spot: target.spot,
-        throwAt: baseThrow + this.rng() * 1500,
+        throwAt: baseThrow + this.rng() * 1500
       });
       usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
-
-  private tickFlashesUpdate() {
-    // Detonate
+  tickFlashesUpdate() {
     for (let i = this.flashes.length - 1; i >= 0; i--) {
       const f = this.flashes[i];
       if (this.t >= f.detonatesAt) {
@@ -622,8 +1140,7 @@ export class RoundSim {
       }
     }
   }
-
-  private applyFlashBlind(f: Flash) {
+  applyFlashBlind(f) {
     for (const a of this.agents) {
       if (!a.alive) continue;
       const dx = f.pos.x - a.pos.x, dy = f.pos.y - a.pos.y;
@@ -638,84 +1155,29 @@ export class RoundSim {
       const distFactor = 1 - d / FLASH_RANGE;
       const duration = FLASH_MIN_DURATION_MS + (FLASH_MAX_DURATION_MS - FLASH_MIN_DURATION_MS) * facingFactor * distFactor;
       a.blindedUntil = Math.max(a.blindedUntil, this.t + duration);
-      // Blinded but not paralyzed — find cover and walk toward it. gameSense
-      // controls how good the chosen spot is; low values pick worse tiles
-      // (or even step toward the flash).
-      const cover = this.pickBlindCoverGoal(a, f.pos);
-      if (cover) {
-        this.setGoal(a, cover);
-        // Drop any peek anchor so move() doesn't oscillate while blind.
-        a.peekState = "none"; a.coverPos = null; a.peekPos = null; a.peekCycles = 0;
-        // Keep think() from overriding the blind path before sight returns.
-        a.nextThinkAt = Math.max(a.nextThinkAt, this.t + duration + 200);
-      }
     }
   }
-
-  // Pick a tile to flee to while blinded. Prefers tiles with a wall between
-  // them and the flash position; falls back to a tile further from the flash.
-  // gameSense narrows the search and improves discrimination; very low
-  // gameSense will sometimes pick a random nearby tile instead.
-  private pickBlindCoverGoal(a: Agent, flashPos: Vec2): Vec2 | null {
-    const stats = this.players(a.playerId)!.stats;
-    const ts = this.map.tileSize;
-    const ax = Math.floor(a.pos.x / ts);
-    const ay = Math.floor(a.pos.y / ts);
-    const sense = stats.gameSense;
-    // Low gameSense: chance to scramble randomly instead of choosing cover.
-    if (sense < 50 && this.rng() < (50 - sense) / 100) {
-      for (let tries = 0; tries < 6; tries++) {
-        const ox = Math.floor(this.rng() * 5) - 2;
-        const oy = Math.floor(this.rng() * 5) - 2;
-        if (ox === 0 && oy === 0) continue;
-        const cx = ax + ox, cy = ay + oy;
-        if (!this.inBoundsTile(cx, cy) || this.wallAt(cx, cy)) continue;
-        return this.tileCenter({ x: cx, y: cy });
-      }
-    }
-    const radius = 2 + Math.floor(sense / 30); // 2..5 tiles
-    let best: { tile: Vec2; score: number } | null = null;
-    for (let r = 1; r <= radius; r++) {
-      for (let oy = -r; oy <= r; oy++) {
-        for (let ox = -r; ox <= r; ox++) {
-          if (Math.max(Math.abs(ox), Math.abs(oy)) !== r) continue;
-          const cx = ax + ox, cy = ay + oy;
-          if (!this.inBoundsTile(cx, cy) || this.wallAt(cx, cy)) continue;
-          const world = this.tileCenter({ x: cx, y: cy });
-          let score = 0;
-          if (!this.hasLineOfSight(world, flashPos)) score += 100;
-          score += Math.hypot(world.x - flashPos.x, world.y - flashPos.y) / ts;
-          score -= r * 0.5; // mild preference for closer tiles
-          if (!best || score > best.score) best = { tile: world, score };
-        }
-      }
-    }
-    return best?.tile ?? null;
-  }
-
   // ---- Molotovs ----
-  private scheduleMolotovs() {
-    const usedTiles = new Set<string>();
+  scheduleMolotovs() {
+    const usedTiles = /* @__PURE__ */ new Set();
     for (const a of this.agents) {
       if (!a.utility.includes("molotov")) continue;
       const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
       if (!target) continue;
-      const player = this.players(a.playerId)!;
-      const baseThrow = 5000 - (player.stats.utility - 50) * 30;
+      const player = this.players(a.playerId);
+      const baseThrow = 5e3 - (player.stats.utility - 50) * 30;
       this.molotovQueue.push({
         thrower: a.playerId,
         spot: target.spot,
-        throwAt: baseThrow + this.rng() * 1500,
+        throwAt: baseThrow + this.rng() * 1500
       });
       usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
-
-  private tickMolotovsUpdate() {
-    // Smoke extinguish: any smoke whose center is inside the fire's reach kills the fire.
+  tickMolotovsUpdate() {
     for (let i = this.molotovs.length - 1; i >= 0; i--) {
       const m = this.molotovs[i];
-      const extinguished = this.smokes.some(s => {
+      const extinguished = this.smokes.some((s) => {
         const dx = m.pos.x - s.pos.x, dy = m.pos.y - s.pos.y;
         const d = Math.hypot(dx, dy);
         return d < m.radius + s.radius * 0.6;
@@ -724,12 +1186,10 @@ export class RoundSim {
         this.molotovs.splice(i, 1);
       }
     }
-
-    // DOT + flee for agents in active fire (after fuse).
-    const dmgPerTick = (MOLOTOV_DOT_PER_SEC * TICK_MS) / 1000;
+    const dmgPerTick = MOLOTOV_DOT_PER_SEC * TICK_MS / 1e3;
     for (const m of this.molotovs) {
       const igniteAt = m.expiresAt - MOLOTOV_DURATION_MS;
-      if (this.t < igniteAt) continue; // still in fuse phase
+      if (this.t < igniteAt) continue;
       for (const a of this.agents) {
         if (!a.alive) continue;
         const dx = a.pos.x - m.pos.x, dy = a.pos.y - m.pos.y;
@@ -738,14 +1198,14 @@ export class RoundSim {
         const applied = Math.min(a.hp, dmgPerTick);
         a.hp -= dmgPerTick;
         this.addDamage(m.thrower, applied);
-        // Flee — set a goal away from the fire.
         const d = Math.sqrt(d2) || 1;
-        const flee: Vec2 = { x: a.pos.x + (dx / d) * 200, y: a.pos.y + (dy / d) * 200 };
+        const flee = { x: a.pos.x + dx / d * 200, y: a.pos.y + dy / d * 200 };
         this.setGoal(a, flee);
         a.fleeingFireUntil = this.t + 600;
         a.nextThinkAt = Math.max(a.nextThinkAt, a.fleeingFireUntil);
         if (a.hp <= 0) {
-          a.alive = false; a.hp = 0;
+          a.alive = false;
+          a.hp = 0;
           if (a.weapon !== "knife") {
             this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
           }
@@ -754,37 +1214,33 @@ export class RoundSim {
           this.bumpStat(m.thrower, "kills", 1);
           this.bumpStat(a.playerId, "deaths", 1);
         }
-        break; // one fire DOT per tick per agent
+        break;
       }
     }
   }
-
   // ---- HE grenades ----
-  private scheduleHEs() {
-    const usedTiles = new Set<string>();
+  scheduleHEs() {
+    const usedTiles = /* @__PURE__ */ new Set();
     for (const a of this.agents) {
       if (!a.utility.includes("he")) continue;
       const target = this.pickChokeTargetForAgent(a, "enemy-side", usedTiles);
       if (!target) continue;
-      const player = this.players(a.playerId)!;
-      const baseThrow = 4000 - (player.stats.aggression - 50) * 20;
+      const player = this.players(a.playerId);
+      const baseThrow = 4e3 - (player.stats.aggression - 50) * 20;
       this.heQueue.push({
         thrower: a.playerId,
         spot: target.spot,
-        throwAt: baseThrow + this.rng() * 1500,
+        throwAt: baseThrow + this.rng() * 1500
       });
       usedTiles.add(`${target.choke.tile.x},${target.choke.tile.y}`);
     }
   }
-
-  private tickHEsUpdate() {
-    // Detonate
+  tickHEsUpdate() {
     for (let i = this.hes.length - 1; i >= 0; i--) {
       const he = this.hes[i];
       if (this.t >= he.detonatesAt) {
         this.tickHEs.push({ pos: { ...he.pos }, side: he.side });
         this.applyHEDamage(he);
-        // Punch a hole in any nearby smoke for a brief moment.
         for (const sm of this.smokes) {
           const dx = sm.pos.x - he.pos.x, dy = sm.pos.y - he.pos.y;
           const d = Math.hypot(dx, dy);
@@ -792,7 +1248,7 @@ export class RoundSim {
             this.smokeHoles.push({
               pos: { x: he.pos.x, y: he.pos.y },
               radius: HE_HOLE_RADIUS,
-              expiresAt: this.t + HE_HOLE_DURATION_MS,
+              expiresAt: this.t + HE_HOLE_DURATION_MS
             });
             break;
           }
@@ -800,18 +1256,16 @@ export class RoundSim {
         this.hes.splice(i, 1);
       }
     }
-    // Expire smoke holes
-    this.smokeHoles = this.smokeHoles.filter(h => h.expiresAt > this.t);
+    this.smokeHoles = this.smokeHoles.filter((h) => h.expiresAt > this.t);
   }
-
-  private applyHEDamage(he: HE) {
+  applyHEDamage(he) {
     for (const a of this.agents) {
       if (!a.alive) continue;
-      if (a.side === he.side) continue; // no friendly fire
+      if (a.side === he.side) continue;
       const dx = a.pos.x - he.pos.x, dy = a.pos.y - he.pos.y;
       const d = Math.hypot(dx, dy);
       if (d > HE_RADIUS) continue;
-      if (!this.hasLineOfSight(a.pos, he.pos)) continue; // walls block damage
+      if (!this.hasLineOfSight(a.pos, he.pos)) continue;
       let dmg = HE_MAX_DAMAGE * (1 - d / HE_RADIUS);
       if (a.armor > 0) {
         dmg *= 0.6;
@@ -821,7 +1275,8 @@ export class RoundSim {
       a.hp -= dmg;
       this.addDamage(he.thrower, applied);
       if (a.hp <= 0) {
-        a.alive = false; a.hp = 0;
+        a.alive = false;
+        a.hp = 0;
         if (a.weapon !== "knife") {
           this.drops.push({ pos: { x: a.pos.x, y: a.pos.y }, weapon: a.weapon });
         }
@@ -832,18 +1287,16 @@ export class RoundSim {
       }
     }
   }
-
   // ---- Pickups ----
-  private checkPickups() {
+  checkPickups() {
     for (const a of this.agents) {
       if (!a.alive) continue;
       for (let i = this.drops.length - 1; i >= 0; i--) {
         const d = this.drops[i];
         if (dist(a.pos, d.pos) > 14) continue;
         if (WEAPONS[d.weapon].cost > WEAPONS[a.weapon].cost) {
-          const dropped = a.weapon !== "knife" ? a.weapon : null;
-          if (dropped) {
-            this.drops.push({ pos: { ...a.pos }, weapon: dropped });
+          if (a.weapon !== "knife") {
+            this.drops.push({ pos: { ...a.pos }, weapon: a.weapon });
           }
           a.weapon = d.weapon;
           const newW = WEAPONS[d.weapon];
@@ -851,44 +1304,38 @@ export class RoundSim {
           a.reserve = newW.reserveAmmo;
           a.reloadingUntil = 0;
           this.drops.splice(i, 1);
-          this.push({ t: this.t, kind: "pickup", player: a.playerId, weapon: d.weapon, dropped });
           break;
         }
       }
     }
   }
-
   // ---- Smokes ----
-  private tickSmokes() {
-    this.smokes = this.smokes.filter(s => s.expiresAt > this.t);
+  tickSmokes() {
+    this.smokes = this.smokes.filter((s) => s.expiresAt > this.t);
   }
-
   // ---- Grenade flight pipeline ----
   // Handles all four util types' transitions: queue → in-flight → spawn-at-landing.
   // Each flight has skill-based noise applied to the landing relative to the intended target.
-  private tickGrenadeFlights() {
-    const launchFromQueue = <Q extends { thrower: string; spot: Vec2; throwAt: number }>(
-      queue: Q[],
-      kind: GrenadeKind,
-      utilName: UtilityId,
-    ) => {
+  tickGrenadeFlights() {
+    const launchFromQueue = (queue, kind, utilName) => {
       for (let i = queue.length - 1; i >= 0; i--) {
         const q = queue[i];
         if (this.t < q.throwAt) continue;
-        const thrower = this.agents.find(a => a.playerId === q.thrower && a.alive);
+        const thrower = this.agents.find((a) => a.playerId === q.thrower && a.alive);
         if (thrower) {
           const noise = this.grenadeNoise(q.thrower, kind);
           const landing = this.applyNoise(q.spot, noise);
           this.grenadeFlights.push({
-            kind, thrower: q.thrower, side: thrower.side,
+            kind,
+            thrower: q.thrower,
+            side: thrower.side,
             start: { x: thrower.pos.x, y: thrower.pos.y },
             landing,
             startedAt: this.t,
-            landsAt: this.t + GRENADE_FLIGHT_MS,
+            landsAt: this.t + GRENADE_FLIGHT_MS
           });
           const idx = thrower.utility.indexOf(utilName);
           if (idx >= 0) thrower.utility.splice(idx, 1);
-          this.push({ t: this.t, kind: "util-throw", thrower: q.thrower, util: utilName });
         }
         queue.splice(i, 1);
       }
@@ -897,8 +1344,6 @@ export class RoundSim {
     launchFromQueue(this.flashQueue, "flash", "flash");
     launchFromQueue(this.molotovQueue, "molotov", "molotov");
     launchFromQueue(this.heQueue, "he", "he");
-
-    // In-flight → spawn at landing.
     for (let i = this.grenadeFlights.length - 1; i >= 0; i--) {
       const g = this.grenadeFlights[i];
       if (this.t < g.landsAt) continue;
@@ -908,14 +1353,14 @@ export class RoundSim {
             pos: { x: g.landing.x, y: g.landing.y },
             radius: SMOKE_RADIUS_WORLD,
             expiresAt: this.t + SMOKE_DURATION_MS,
-            side: g.side,
+            side: g.side
           });
           break;
         case "flash":
           this.flashes.push({
             pos: { x: g.landing.x, y: g.landing.y },
             detonatesAt: this.t + FLASH_FUSE_MS,
-            side: g.side,
+            side: g.side
           });
           break;
         case "molotov":
@@ -924,7 +1369,7 @@ export class RoundSim {
             radius: MOLOTOV_RADIUS_WORLD,
             expiresAt: this.t + MOLOTOV_FUSE_MS + MOLOTOV_DURATION_MS,
             side: g.side,
-            thrower: g.thrower,
+            thrower: g.thrower
           });
           break;
         case "he":
@@ -932,273 +1377,235 @@ export class RoundSim {
             pos: { x: g.landing.x, y: g.landing.y },
             detonatesAt: this.t + HE_FUSE_MS,
             side: g.side,
-            thrower: g.thrower,
+            thrower: g.thrower
           });
           break;
       }
       this.grenadeFlights.splice(i, 1);
     }
   }
-
-  private grenadeNoise(playerId: string, kind: GrenadeKind): number {
+  grenadeNoise(playerId, kind) {
     const player = this.players(playerId);
     if (!player) return 0;
-    let skill: number;
+    let skill;
     switch (kind) {
-      case "smoke":   skill = player.stats.smokeLineups; break;
-      case "flash":   skill = player.stats.flashTiming; break;
-      case "molotov": skill = player.stats.molotovUse; break;
-      case "he":      skill = player.stats.utility; break;
+      case "smoke":
+        skill = player.stats.smokeLineups;
+        break;
+      case "flash":
+        skill = player.stats.flashTiming;
+        break;
+      case "molotov":
+        skill = player.stats.molotovUse;
+        break;
+      case "he":
+        skill = player.stats.utility;
+        break;
     }
     return Math.max(0, 100 - skill) * GRENADE_NOISE_PER_SKILL_GAP;
   }
-
-  private applyNoise(target: Vec2, noise: number): Vec2 {
+  applyNoise(target, noise) {
     if (noise <= 0) return { x: target.x, y: target.y };
     const angle = this.rng() * Math.PI * 2;
     const d = this.rng() * noise;
     return { x: target.x + Math.cos(angle) * d, y: target.y + Math.sin(angle) * d };
   }
-
   // ---- AI ----
-  private think(a: Agent) {
+  think(a) {
     if (this.t < a.fleeingFireUntil) return;
     this.maybeSaveDecision(a);
     const arrived = a.target && a.path.length === 0 && dist(a.pos, a.target) < 6;
     const needNew = !a.target || arrived || a.dirty || this.t >= a.nextThinkAt;
     if (!needNew) return;
-
     const goal = this.pickGoal(a);
     if (goal) {
-      // Picking a new high-level goal invalidates the peek anchor.
       a.coverPos = null;
       a.peekPos = null;
       a.peekState = "none";
       this.setGoal(a, goal);
     }
-
-    // Adaptability + gameSense drive how often agents reconsider.
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     const decisionScore = (player.stats.adaptability + player.stats.gameSense) / 2;
     const period = 1200 + (100 - decisionScore) * 12 + this.rng() * 800;
     a.nextThinkAt = this.t + period;
     a.dirty = false;
-
     if (a.target && dist(a.pos, a.target) < 6) {
       a.holdAngle = this.holdDirectionFor(a);
     }
-
     this.decideMoveMode(a);
   }
-
-  private decideMoveMode(a: Agent) {
-    const player = this.players(a.playerId)!;
+  decideMoveMode(a) {
+    const player = this.players(a.playerId);
     const stats = player.stats;
-    // Saving: stealth no matter what.
-    if (a.saving) { a.moveMode = "walk"; return; }
-    // Lurkers sneak by default.
-    if (player.role === "lurker") { a.moveMode = "walk"; return; }
-    // Bomb retriever walks for the last stretch so they don't run blind into ambushes.
-    if (a.side === "T" && this.bombDropped && this.bombRetrieverId() === a.playerId) {
-      if (dist(a.pos, this.bombDropped) < this.map.tileSize * 5) { a.moveMode = "walk"; return; }
+    if (a.saving) {
+      a.moveMode = "walk";
+      return;
     }
-    // Cautious temperament — low aggression + high composure extends the
-    // "walk near contact" radius. Reckless players run all the way in.
-    const caution = clamp(((100 - stats.aggression) + stats.composure) / 200, 0, 1);
+    if (player.role === "lurker") {
+      a.moveMode = "walk";
+      return;
+    }
+    if (a.side === "T" && this.bombDropped && this.bombRetrieverId() === a.playerId) {
+      if (dist(a.pos, this.bombDropped) < this.map.tileSize * 5) {
+        a.moveMode = "walk";
+        return;
+      }
+    }
+    const caution = clamp((100 - stats.aggression + stats.composure) / 200, 0, 1);
     const walkRadius = CONTACT_RADIUS * (0.6 + caution * 0.9);
     const contact = this.contactZoneFor(a);
     const d = dist(a.pos, contact);
     a.moveMode = d < walkRadius ? "walk" : "run";
   }
-
-  private contactZoneFor(a: Agent): Vec2 {
+  contactZoneFor(a) {
     if (this.bombPlanted && this.bombPlantedAt) return this.bombPlantedAt;
-    if (a.side === "CT") {
-      const hp = this.holdPointWorldPos(a);
-      if (hp) return hp;
-    }
     if (a.assignedSite === "mid") {
       return { x: this.map.width * this.map.tileSize * 0.45, y: this.map.height * this.map.tileSize * 0.5 };
     }
     const site = this.siteByLetter(a.assignedSite);
     return worldCenterOfTile(site.center, this.map);
   }
-
-  private pickGoal(a: Agent): Vec2 | null {
+  pickGoal(a) {
     if (a.saving) return this.saveSpotFor(a);
     if (a.side === "T") return this.tGoal(a);
     return this.ctGoal(a);
   }
-
   // ---- Saving (keep your gun for next round) ----
   // Every save decision flows through one continuous score. Role-based
   // responsibility (bomb carrier, last CT vs plant, bomb retriever) is a
   // bias, not a gate — so a panicked low-composure carrier can still bail.
-  private maybeSaveDecision(a: Agent) {
+  maybeSaveDecision(a) {
     if (this.t < a.reassessSaveAt) return;
     a.reassessSaveAt = this.t + 1200 + this.rng() * 800;
-
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     const stats = player.stats;
     const w = WEAPONS[a.weapon];
-    const gunValue = w.cost
-      + (a.armor > 0 ? VEST_COST : 0)
-      + (a.helmet ? HELMET_UPGRADE_COST : 0);
-
-    // --- Situation read ---
-    const us = this.agents.filter(x => x.alive && x.side === a.side).length;
-    const them = this.agents.filter(x => x.alive && x.side !== a.side).length;
+    const gunValue = w.cost + (a.armor > 0 ? VEST_COST : 0) + (a.helmet ? HELMET_UPGRADE_COST : 0);
+    const us = this.agents.filter((x) => x.alive && x.side === a.side).length;
+    const them = this.agents.filter((x) => x.alive && x.side !== a.side).length;
     const trueWin = this.teamWinChance(a.side);
-    // gameSense noise: low-GS players misread the round state.
     const noise = (this.rng() - 0.5) * 2 * (1 - stats.gameSense / 100) * 0.15;
     const perceivedWin = clamp(trueWin + noise, 0, 1);
     const numericalDisadvantage = clamp((them - us) / 4, 0, 1);
-    const gunValueNorm = clamp((gunValue - 1000) / 4000, 0, 1);
+    const gunValueNorm = clamp((gunValue - 1e3) / 4e3, 0, 1);
     const scoreDef = Math.max(0, this.scoreDeficit(a.side));
-
-    // --- Score ---
     let saveScore = 0;
     saveScore += (1 - perceivedWin) * 0.55;
-    saveScore += numericalDisadvantage * 0.20;
-    saveScore += gunValueNorm * 0.30;
-    saveScore -= (stats.aggression / 100) * 0.40;
-    saveScore -= (stats.discipline / 100) * 0.10;
+    saveScore += numericalDisadvantage * 0.2;
+    saveScore += gunValueNorm * 0.3;
+    saveScore -= stats.aggression / 100 * 0.4;
+    saveScore -= stats.discipline / 100 * 0.1;
     saveScore -= Math.min(scoreDef, 6) * 0.03;
     saveScore += (stats.composure - 50) / 200;
-
-    // --- Role responsibilities push against saving, scaled by composure/discipline ---
     if (a.playerId === this.bombCarrier) {
-      // Strong push to plant; shaky carriers can still break.
-      saveScore -= 0.50 + (stats.discipline / 100) * 0.20;
+      saveScore -= 0.5 + stats.discipline / 100 * 0.2;
     }
     if (this.bombPlanted && a.side === "CT" && this.lastAliveOnSide("CT")) {
-      // The team needs you on defuse; disciplined + composed CTs honor it.
-      saveScore -= 0.20 + (stats.discipline / 100) * 0.20 + (stats.composure / 100) * 0.20;
+      saveScore -= 0.2 + stats.discipline / 100 * 0.2 + stats.composure / 100 * 0.2;
     }
     if (a.side === "T" && this.bombDropped && !this.bombCarrier) {
-      // If you've decided to retrieve the bomb, you don't also save.
       const retrieverId = this.bombRetrieverId();
-      if (retrieverId === a.playerId) saveScore -= 0.40;
+      if (retrieverId === a.playerId) saveScore -= 0.4;
     }
-
     if (a.saving) {
-      if (saveScore < 0.30) {
-        a.saving = false; a.dirty = true;
-        this.push({ t: this.t, kind: "save", player: a.playerId, on: false });
+      if (saveScore < 0.3) {
+        a.saving = false;
+        a.dirty = true;
       }
       return;
     }
     if (saveScore > 0.55) {
       a.saving = true;
       a.dirty = true;
-      this.push({ t: this.t, kind: "save", player: a.playerId, on: true });
     }
   }
-
   // Which T (if any) is heading for the dropped bomb? Driven by stats, not
   // proximity alone. Players with low gameSense / map awareness may not
   // register the bomb situation at all and just deathmatch.
-  private bombRetrieverId(): string | null {
+  bombRetrieverId() {
     if (!this.bombDropped || this.bombCarrier) return null;
-    let best: Agent | null = null;
+    let best = null;
     let bestScore = -Infinity;
     for (const a of this.agents) {
       if (!a.alive || a.side !== "T") continue;
       if (a.saving) continue;
-      const player = this.players(a.playerId)!;
+      const player = this.players(a.playerId);
       const stats = player.stats;
       const d = dist(a.pos, this.bombDropped);
       const proximity = clamp(1 - d / 800, 0, 1);
-      // Knowing the bomb matters and where it is.
       const awareness = (stats.gameSense + stats.mapAwareness) / 200;
-      // Willingness to play support over fragging.
       const teamMind = (stats.discipline + stats.communication) / 200;
       const aggressionPenalty = clamp((stats.aggression - 50) / 100, 0, 1);
-      const roleBonus = player.role === "support" ? 0.10
-        : player.role === "igl" ? 0.08
-        : player.role === "entry" ? -0.08
-        : player.role === "lurker" ? -0.10
-        : 0;
-      const desire =
-          proximity * 0.40
-        + awareness * 0.35
-        + teamMind  * 0.20
-        - aggressionPenalty * 0.20
-        + roleBonus;
-      if (desire > bestScore) { bestScore = desire; best = a; }
+      const roleBonus = player.role === "support" ? 0.1 : player.role === "igl" ? 0.08 : player.role === "entry" ? -0.08 : player.role === "lurker" ? -0.1 : 0;
+      const desire = proximity * 0.4 + awareness * 0.35 + teamMind * 0.2 - aggressionPenalty * 0.2 + roleBonus;
+      if (desire > bestScore) {
+        bestScore = desire;
+        best = a;
+      }
     }
-    return bestScore > 0.30 ? (best?.playerId ?? null) : null;
+    return bestScore > 0.3 ? best?.playerId ?? null : null;
   }
-
-  private closestAliveOnSide(side: Side, ref: Vec2): Agent | null {
-    let best: Agent | null = null;
+  closestAliveOnSide(side, ref) {
+    let best = null;
     let bd = Infinity;
     for (const ag of this.agents) {
       if (!ag.alive || ag.side !== side) continue;
       const d = dist(ag.pos, ref);
-      if (d < bd) { bd = d; best = ag; }
+      if (d < bd) {
+        bd = d;
+        best = ag;
+      }
     }
     return best;
   }
-
-  private teamWinChance(side: Side): number {
-    const us = this.agents.filter(a => a.alive && a.side === side).length;
-    const them = this.agents.filter(a => a.alive && a.side !== side).length;
+  teamWinChance(side) {
+    const us = this.agents.filter((a) => a.alive && a.side === side).length;
+    const them = this.agents.filter((a) => a.alive && a.side !== side).length;
     if (us === 0) return 0;
     if (them === 0) return 1;
-    // Weight slightly by total HP so a wounded team is rated lower.
-    const hpUs = this.agents.filter(a => a.alive && a.side === side).reduce((s, a) => s + a.hp, 0);
-    const hpThem = this.agents.filter(a => a.alive && a.side !== side).reduce((s, a) => s + a.hp, 0);
+    const hpUs = this.agents.filter((a) => a.alive && a.side === side).reduce((s, a) => s + a.hp, 0);
+    const hpThem = this.agents.filter((a) => a.alive && a.side !== side).reduce((s, a) => s + a.hp, 0);
     const headcount = us / (us + them);
     const hpRatio = hpUs / Math.max(1, hpUs + hpThem);
     let r = headcount * 0.7 + hpRatio * 0.3;
     if (this.bombPlanted) {
       if (side === "T") r = r * 0.55 + 0.4;
-      else              r = r * 0.85;
+      else r = r * 0.85;
     }
     return r;
   }
-
-  private saveSpotFor(a: Agent): Vec2 {
+  saveSpotFor(a) {
     const spawns = a.side === "CT" ? this.map.ctSpawns : this.map.tSpawns;
-    const ref = this.bombPlanted && this.bombPlantedAt
-      ? this.bombPlantedAt
-      : this.contactZoneFor(a);
+    const ref = this.bombPlanted && this.bombPlantedAt ? this.bombPlantedAt : this.contactZoneFor(a);
     let best = spawns[0];
     let bestD = -Infinity;
     for (const s of spawns) {
       const w = this.tileCenter(s);
       const d = dist(w, ref);
-      if (d > bestD) { bestD = d; best = s; }
+      if (d > bestD) {
+        bestD = d;
+        best = s;
+      }
     }
     return this.tileCenter(best);
   }
-
-  private tGoal(a: Agent): Vec2 | null {
-    // Post-plant: hold around the planted bomb.
+  tGoal(a) {
     if (this.bombPlanted && this.bombPlantedAt) {
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
-    // Bomb dropped: a T with the highest "go-get-it" desire (stats-driven,
-    // not just proximity) heads to retrieve. Could be nobody — if no one's
-    // game sense / discipline registers the bomb, the team plays it as
-    // deathmatch instead. Other Ts fall through to normal site duty.
     if (this.bombDropped) {
       const retrieverId = this.bombRetrieverId();
       if (retrieverId && a.playerId === retrieverId) {
         return { x: this.bombDropped.x, y: this.bombDropped.y };
       }
     }
-
-    // Intel-driven rotation: Ts prefer the lighter (less CT-defended) site.
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     const intel = this.intel.T;
     const sA = intel.A.score, sB = intel.B.score;
     const dominanceNeeded = INTEL_DOMINANCE * (1 - (player.stats.gameSense - 60) / 200);
-    let preferred: SiteId | "mid" = a.assignedSite;
+    let preferred = a.assignedSite;
     const canRotate = (player.role !== "lurker" || a.playerId === this.bombCarrier) && this.t >= ROTATE_MIN_T;
     if (canRotate) {
-      // Lighter side wins: A heavy → go B; B heavy → go A.
       if (sA - sB >= dominanceNeeded) preferred = "B";
       else if (sB - sA >= dominanceNeeded) preferred = "A";
     }
@@ -1210,50 +1617,41 @@ export class RoundSim {
       }
       a.assignedSite = preferred;
     }
-
-    // Bomb carrier: head straight to assigned site.
     if (a.playerId === this.bombCarrier) {
       const site = this.siteByLetter(a.assignedSite === "mid" ? "A" : a.assignedSite);
       return worldCenterOfTile(site.center, this.map);
     }
-    // Others jitter near assigned site.
     const target = a.assignedSite === "mid" ? this.map.bombsites[0] : this.siteByLetter(a.assignedSite);
     return jitter(worldCenterOfTile(target.center, this.map), 80, this.rng);
   }
-
-  private ctGoal(a: Agent): Vec2 | null {
-    // Bomb dropped (not yet picked up): only the closest CT routes to the
-    // drop to guard. Others continue with their normal site duty so the team
-    // doesn't collapse onto one point.
+  ctGoal(a) {
     if (this.bombDropped && !this.bombPlanted) {
       const closest = this.closestAliveOnSide("CT", this.bombDropped);
       if (closest && a.playerId === closest.playerId) {
         return jitter(this.bombDropped, 90, this.rng);
       }
-      // fall through to normal ctGoal logic below
     }
-    // Bomb planted: designated defuser routes exactly to the bomb; others orbit for cover.
     if (this.bombPlanted && this.bombPlantedAt) {
-      const cts = this.agents.filter(x => x.side === "CT" && x.alive);
+      const cts = this.agents.filter((x) => x.side === "CT" && x.alive);
       let defuser = cts[0];
       let bestD = Infinity;
       for (const c of cts) {
         const d = dist(c.pos, this.bombPlantedAt);
-        if (d < bestD) { bestD = d; defuser = c; }
+        if (d < bestD) {
+          bestD = d;
+          defuser = c;
+        }
       }
       if (defuser && a.playerId === defuser.playerId) {
         return { x: this.bombPlantedAt.x, y: this.bombPlantedAt.y };
       }
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
-    // Intel-driven rotation: prefer the site with decisively more enemy activity.
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     const intel = this.intel.CT;
     const sA = intel.A.score, sB = intel.B.score;
     const dominanceNeeded = INTEL_DOMINANCE * (1 - (player.stats.gameSense - 60) / 200);
-    let preferred: SiteId | "mid" = a.assignedSite;
-
-    // Bomb sightings override everything — chase the bomb regardless of timing or score weight.
+    let preferred = a.assignedSite;
     const bombA = this.t - intel.A.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
     const bombB = this.t - intel.B.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
     if (bombA && !bombB) preferred = "A";
@@ -1263,123 +1661,87 @@ export class RoundSim {
       if (sA - sB >= dominanceNeeded) preferred = "A";
       else if (sB - sA >= dominanceNeeded) preferred = "B";
     }
-    // Lurker stays anchored unless either intel is decisive OR the bomb itself is seen.
     if (player.role === "lurker" && !bombA && !bombB && Math.abs(sA - sB) < dominanceNeeded * 2) {
       preferred = a.assignedSite;
     }
-    // Log rotation (rate-limited per agent)
     if (preferred !== a.assignedSite && preferred !== "mid") {
       const last = this.lastRotationLog[a.playerId] ?? -Infinity;
       if (this.t - last >= ROTATE_LOG_COOLDOWN) {
         this.rotationLog.push({ t: this.t, agentId: a.playerId, from: a.assignedSite, to: preferred });
         this.lastRotationLog[a.playerId] = this.t;
       }
-      a.assignedSite = preferred; // commit the rotation
-      // Re-pick a hold point in the new region.
-      a.holdPoint = this.pickHoldPoint(a);
+      a.assignedSite = preferred;
     }
-    // Route to the specific hold point if one is available.
-    const hp = this.holdPointWorldPos(a);
-    if (hp) return jitter(hp, 60, this.rng);
     if (a.assignedSite === "mid") {
-      const center: Vec2 = { x: this.map.width * this.map.tileSize * 0.45, y: this.map.height * this.map.tileSize * 0.5 };
+      const center = { x: this.map.width * this.map.tileSize * 0.45, y: this.map.height * this.map.tileSize * 0.5 };
       return jitter(center, 60, this.rng);
     }
     const site = this.siteByLetter(a.assignedSite);
     return jitter(worldCenterOfTile(site.center, this.map), 70, this.rng);
   }
-
-  private siteByLetter(letter: "A" | "B") {
-    return this.map.bombsites.find(s => s.id === letter)!;
+  siteByLetter(letter) {
+    return this.map.bombsites.find((s) => s.id === letter);
   }
-
   // ---- Peek and retreat ----
   // When an agent has reached their hold position and is not in combat, look
   // for nearby cover and oscillate between a covered tile and an exposed
   // (peek) tile one step toward the threat direction.
-  private tickPeek(a: Agent) {
+  tickPeek(a) {
     if (this.t < a.fleeingFireUntil) return;
     if (this.t < a.blindedUntil) return;
     if (a.stance === "rush" || a.stance === "disengage") return;
-    if (this.bombPlanted) return; // post-plant: be present, not peeking
-    // Mid-move toward a non-peek goal: don't disturb it.
+    if (this.bombPlanted) return;
     if (a.path.length > 0 && a.peekState === "none") return;
-
     if (a.peekState === "none") {
       if (a.path.length > 0) return;
       if (!this.setupPeek(a)) return;
     }
-
     if (this.t < a.peekUntil) return;
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     if (a.peekState === "cover" && a.peekPos) {
       a.peekState = "peek";
       const timing = player.stats.timing;
       a.peekUntil = this.t + 350 + timing * 4;
       this.setGoalForPeek(a, a.peekPos);
     } else if (a.peekState === "peek" && a.coverPos) {
-      a.peekCycles++;
-      // Cap stalemates: after N full cover↔peek oscillations without a kill,
-      // bail out of the peek loop and force a stance decision biased toward
-      // action so two jiggling agents don't deadlock until time runs out.
-      if (a.peekCycles >= 3) {
-        a.peekState = "none";
-        a.coverPos = null; a.peekPos = null;
-        a.peekCycles = 0;
-        a.stance = a.hp > 50 ? "rush" : "disengage";
-        a.stanceUntil = this.t + (a.stance === "rush" ? 1200 : 1800);
-        a.dirty = true; // force think() to repick a goal next tick
-        return;
-      }
       a.peekState = "cover";
       const patience = player.stats.patience;
       a.peekUntil = this.t + 800 + (100 - patience) * 10 + this.rng() * 400;
       this.setGoalForPeek(a, a.coverPos);
     }
   }
-
-  private setGoalForPeek(a: Agent, goal: Vec2) {
-    // Same as setGoal but doesn't clobber peek state.
+  setGoalForPeek(a, goal) {
     const path = findPath(this.map, a.pos, goal);
     if (path === null) return;
     a.target = goal;
     a.path = path;
     a.holdAngle = null;
   }
-
-  private setupPeek(a: Agent): boolean {
+  setupPeek(a) {
     const ts = this.map.tileSize;
     const ax = Math.floor(a.pos.x / ts);
     const ay = Math.floor(a.pos.y / ts);
     const focus = a.side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
     const tx = focus.x - a.pos.x, ty = focus.y - a.pos.y;
-    // Cardinal-snap the threat direction.
     let dx = 0, dy = 0;
     if (Math.abs(tx) >= Math.abs(ty)) dx = tx > 0 ? 1 : -1;
     else dy = ty > 0 ? 1 : -1;
-
-    // Search outward for a covered floor tile within a small radius.
     for (let r = 0; r <= 2; r++) {
       for (let oy = -r; oy <= r; oy++) {
         for (let ox = -r; ox <= r; ox++) {
           if (Math.max(Math.abs(ox), Math.abs(oy)) !== r) continue;
           const cx = ax + ox, cy = ay + oy;
           if (!this.inBoundsTile(cx, cy) || this.wallAt(cx, cy)) continue;
-          // Cover requires a wall directly in the threat direction.
           if (!this.wallAt(cx + dx, cy + dy)) continue;
-          // Try both perpendicular peek options; require the peek tile to be
-          // floor AND have an open threat-direction so it's actually exposed.
-          for (const [px, py] of [[-dy, dx], [dy, -dx]] as const) {
+          for (const [px, py] of [[-dy, dx], [dy, -dx]]) {
             const pxT = cx + px, pyT = cy + py;
             if (!this.inBoundsTile(pxT, pyT) || this.wallAt(pxT, pyT)) continue;
             if (this.wallAt(pxT + dx, pyT + dy)) continue;
             a.coverPos = this.tileCenter({ x: cx, y: cy });
             a.peekPos = this.tileCenter({ x: pxT, y: pyT });
             a.peekState = "cover";
-            a.peekCycles = 0;
-            const patience = this.players(a.playerId)!.stats.patience;
+            const patience = this.players(a.playerId).stats.patience;
             a.peekUntil = this.t + 600 + (100 - patience) * 8 + this.rng() * 400;
-            // If we're not already at the cover tile, route there first.
             if (ox !== 0 || oy !== 0) this.setGoalForPeek(a, a.coverPos);
             return true;
           }
@@ -1388,70 +1750,25 @@ export class RoundSim {
     }
     return false;
   }
-
-  // Reactive cover: an enemy is newly visible and the agent is near a tile that
-  // would put a wall between them and that enemy. Start the peek oscillation
-  // immediately, oriented at this specific threat. Range is intentionally tight
-  // (≤1 tile) so the agent doesn't detour mid-push for distant cover.
-  private tryReactivePeek(a: Agent, threat: Vec2): boolean {
-    if (a.stance === "rush" || a.stance === "disengage") return false;
-    if (this.bombPlanted) return false;
-    if (a.peekState !== "none") return false;
-    if (this.t < a.fleeingFireUntil || this.t < a.blindedUntil) return false;
-    // Bomb carrier has an objective — no time to jiggle.
-    if (a.playerId === this.bombCarrier) return false;
-    const ts = this.map.tileSize;
-    const ax = Math.floor(a.pos.x / ts);
-    const ay = Math.floor(a.pos.y / ts);
-    const tx = threat.x - a.pos.x, ty = threat.y - a.pos.y;
-    let dx = 0, dy = 0;
-    if (Math.abs(tx) >= Math.abs(ty)) dx = tx > 0 ? 1 : -1;
-    else dy = ty > 0 ? 1 : -1;
-
-    for (let r = 0; r <= 1; r++) {
-      for (let oy = -r; oy <= r; oy++) {
-        for (let ox = -r; ox <= r; ox++) {
-          if (Math.max(Math.abs(ox), Math.abs(oy)) !== r) continue;
-          const cx = ax + ox, cy = ay + oy;
-          if (!this.inBoundsTile(cx, cy) || this.wallAt(cx, cy)) continue;
-          if (!this.wallAt(cx + dx, cy + dy)) continue;
-          for (const [px, py] of [[-dy, dx], [dy, -dx]] as const) {
-            const pxT = cx + px, pyT = cy + py;
-            if (!this.inBoundsTile(pxT, pyT) || this.wallAt(pxT, pyT)) continue;
-            if (this.wallAt(pxT + dx, pyT + dy)) continue;
-            a.coverPos = this.tileCenter({ x: cx, y: cy });
-            a.peekPos = this.tileCenter({ x: pxT, y: pyT });
-            a.peekState = "cover";
-            a.peekCycles = 0;
-            const patience = this.players(a.playerId)!.stats.patience;
-            a.peekUntil = this.t + 500 + (100 - patience) * 6 + this.rng() * 300;
-            if (ox !== 0 || oy !== 0) this.setGoalForPeek(a, a.coverPos);
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  private inBoundsTile(tx: number, ty: number): boolean {
+  inBoundsTile(tx, ty) {
     return tx >= 0 && ty >= 0 && tx < this.map.width && ty < this.map.height;
   }
-  private wallAt(tx: number, ty: number): boolean {
+  wallAt(tx, ty) {
     if (!this.inBoundsTile(tx, ty)) return true;
     return this.map.walls[ty * this.map.width + tx];
   }
-
-  private setGoal(a: Agent, goal: Vec2) {
+  setGoal(a, goal) {
     const path = findPath(this.map, a.pos, goal);
-    if (path === null) { a.target = null; a.path = []; return; }
+    if (path === null) {
+      a.target = null;
+      a.path = [];
+      return;
+    }
     a.target = goal;
     a.path = path;
     a.holdAngle = null;
   }
-
-  private holdDirectionFor(a: Agent): number {
-    // CTs hold toward T entry; Ts hold toward CT angles. If post-plant, face away from bomb.
+  holdDirectionFor(a) {
     if (this.bombPlanted && this.bombPlantedAt && a.side === "T") {
       const dx = a.pos.x - this.bombPlantedAt.x, dy = a.pos.y - this.bombPlantedAt.y;
       return Math.atan2(dy, dx);
@@ -1459,61 +1776,49 @@ export class RoundSim {
     const focus = a.side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
     return Math.atan2(focus.y - a.pos.y, focus.x - a.pos.x);
   }
-
   // ---- Movement (waypoint-based) ----
-  private move(a: Agent) {
-    // Blinded agents still move (toward the cover goal picked at flash time),
-    // they just can't see, shoot, or react.
-    const blind = this.t < a.blindedUntil;
-    if (!blind && a.stance === "hold" && this.t < a.stanceUntil) return;
+  move(a) {
+    if (this.t < a.blindedUntil) return;
+    if (a.stance === "hold" && this.t < a.stanceUntil) return;
     if (a.path.length === 0) {
       if (a.holdAngle !== null) a.facing = a.holdAngle;
       return;
     }
-    const player = this.players(a.playerId)!;
-
-    // Smoke avoidance: most agents wait at the edge of a smoke instead of walking through blind.
+    const player = this.players(a.playerId);
     const nextWp = a.path[0];
-    const smokeAhead = this.smokes.find(s => dist(nextWp, s.pos) < s.radius);
+    const smokeAhead = this.smokes.find((s) => dist(nextWp, s.pos) < s.radius);
     if (smokeAhead) {
       const isCarrier = a.playerId === this.bombCarrier;
       const isRushing = a.stance === "rush";
-      const fading = (smokeAhead.expiresAt - this.t) < 3000;
-      // Push if aggression decisively beats patience (rating-driven temperament).
+      const fading = smokeAhead.expiresAt - this.t < 3e3;
       const willPushPersonality = player.stats.aggression > player.stats.patience + 15;
       if (!isCarrier && !isRushing && !fading && !willPushPersonality) {
-        // Hold at smoke edge — face it, in case anyone comes through.
         a.holdAngle = Math.atan2(smokeAhead.pos.y - a.pos.y, smokeAhead.pos.x - a.pos.x);
         return;
       }
     }
-
-    const baseSpeed = (60 + player.stats.movement * 0.8) / 1000 * TICK_MS;
+    const baseSpeed = (60 + player.stats.movement * 0.8) / 1e3 * TICK_MS;
     const speed = a.moveMode === "walk" ? baseSpeed * WALK_SPEED_FACTOR : baseSpeed;
     const wp = a.path[0];
     const dx = wp.x - a.pos.x;
     const dy = wp.y - a.pos.y;
     const d = Math.hypot(dx, dy);
     if (d < speed) {
-      a.pos.x = wp.x; a.pos.y = wp.y;
+      a.pos.x = wp.x;
+      a.pos.y = wp.y;
       a.path.shift();
       return;
     }
-    a.pos.x += (dx / d) * speed;
-    a.pos.y += (dy / d) * speed;
-    // facing is no longer snapped to movement vector — handled by scan/lerp pass.
+    a.pos.x += dx / d * speed;
+    a.pos.y += dy / d * speed;
   }
-
   // ---- Looking around ----
-  private updateLook(a: Agent) {
+  updateLook(a) {
     if (this.t < a.lookChangeAt && a.lookTarget) return;
-
-    const player = this.players(a.playerId)!;
+    const player = this.players(a.playerId);
     const focus = a.side === "CT" ? this.ctThreatFocus : this.tThreatFocus;
     const threatDir = Math.atan2(focus.y - a.pos.y, focus.x - a.pos.x);
-
     let baseDir = threatDir;
-    // Stationary: pre-aim onto a smoke in our threat direction if there is one.
     if (a.path.length === 0) {
       const smoke = this.findThreatSmoke(a, threatDir);
       if (smoke) {
@@ -1526,21 +1831,17 @@ export class RoundSim {
       const moveDir = Math.atan2(wp.y - a.pos.y, wp.x - a.pos.x);
       baseDir = this.rng() < 0.6 ? threatDir : moveDir;
     }
-
-    // Crosshair placement tightens the scan arc; adaptability speeds cadence.
     const cp = player.stats.crosshairPlacement / 100;
     const arcHalf = Math.PI * 0.5 * (1.1 - Math.max(0.4, cp));
     const offset = (this.rng() - 0.5) * 2 * arcHalf;
     const dir = baseDir + offset;
-
     a.lookTarget = { x: a.pos.x + Math.cos(dir) * 120, y: a.pos.y + Math.sin(dir) * 120 };
     const cadence = 500 + (100 - player.stats.adaptability) * 8 + this.rng() * 400;
     a.lookChangeAt = this.t + cadence;
   }
-
   // Smokes within ~280 px and roughly in the agent's threat direction (±60°).
-  private findThreatSmoke(a: Agent, threatDir: number): Smoke | null {
-    let best: Smoke | null = null;
+  findThreatSmoke(a, threatDir) {
+    let best = null;
     let bestD = 280;
     for (const s of this.smokes) {
       const d = dist(a.pos, s.pos);
@@ -1549,32 +1850,28 @@ export class RoundSim {
       let angDiff = Math.abs(smokeDir - threatDir);
       while (angDiff > Math.PI) angDiff = Math.PI * 2 - angDiff;
       if (angDiff > Math.PI / 3) continue;
-      best = s; bestD = d;
+      best = s;
+      bestD = d;
     }
     return best;
   }
-
   // Smoothly rotate facing toward lookTarget.
-  private applyFacing(a: Agent) {
+  applyFacing(a) {
     if (!a.lookTarget) return;
     const desired = Math.atan2(a.lookTarget.y - a.pos.y, a.lookTarget.x - a.pos.x);
     let diff = desired - a.facing;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    const player = this.players(a.playerId)!;
-    // Turn rate driven by handSpeed (with reflexes as a small contributor).
+    const player = this.players(a.playerId);
     const speed = (player.stats.handSpeed * 0.7 + player.stats.reflexes * 0.3) / 100;
     const maxStep = 0.08 + speed * 0.18;
     const step = Math.max(-maxStep, Math.min(maxStep, diff));
     a.facing += step;
   }
-
   // ---- Combat ----
-  private maybeShoot(a: Agent) {
-    const player = this.players(a.playerId)!;
+  maybeShoot(a) {
+    const player = this.players(a.playerId);
     const weaponStats = WEAPONS[a.weapon];
-
-    // Complete any in-progress reload.
     if (a.reloadingUntil > 0 && this.t >= a.reloadingUntil) {
       const needed = weaponStats.magSize - a.ammo;
       const taken = Math.min(needed, a.reserve);
@@ -1582,120 +1879,87 @@ export class RoundSim {
       a.reserve -= taken;
       a.reloadingUntil = 0;
     }
-    if (a.reloadingUntil > 0) return; // still reloading
-
-    if (this.t < a.fleeingFireUntil) return; // can't fight while fleeing fire
-    const reactionMs = 80 + Math.max(0, (100 - player.stats.reflexes)) * 4;
+    if (a.reloadingUntil > 0) return;
+    if (this.t < a.fleeingFireUntil) return;
+    const reactionMs = 80 + Math.max(0, 100 - player.stats.reflexes) * 4;
     const stats = player.stats;
     const enemy = this.acquireTarget(a, reactionMs);
-
     if (!enemy) {
-      // Idle auto-reload: top off when no contact, mag low, reserve available.
       if (a.weapon !== "knife" && a.ammo < weaponStats.magSize * 0.4 && a.reserve > 0) {
         a.reloadingUntil = this.t + weaponStats.reloadMs;
         return;
       }
-      // Blind spray: hear a running enemy through smoke → shoot toward them.
       if (a.weapon !== "knife" && a.ammo > 0 && this.smokes.length > 0) {
         const blind = this.tryBlindSpray(a);
         if (blind) this.fireBlind(a, blind, weaponStats);
       }
       return;
     }
-
-    // Refresh stance only when previous one has expired — avoids flapping.
     if (this.t >= a.stanceUntil) this.decideStance(a, enemy);
-
-    // Disengage: skip firing; the path is already moving us toward cover.
     if (a.stance === "disengage") return;
-
     const weapon = weaponStats;
-    const cooldown = 1000 / weapon.fireRate;
+    const cooldown = 1e3 / weapon.fireRate;
     if (this.t - a.lastShotAt < cooldown) return;
-
-    // Forced reload when the mag is empty.
     if (a.weapon !== "knife" && a.ammo <= 0) {
       if (a.reserve > 0) a.reloadingUntil = this.t + weapon.reloadMs;
       return;
     }
-
     a.lastShotAt = this.t;
     if (a.weapon !== "knife") a.ammo--;
-    // Snap-aim to the target when actually firing; also redirect scanning to them.
     a.facing = Math.atan2(enemy.pos.y - a.pos.y, enemy.pos.x - a.pos.x);
     a.lookTarget = { x: enemy.pos.x, y: enemy.pos.y };
     a.lookChangeAt = this.t + 300;
-
     const d = dist(a.pos, enemy.pos);
-    // Hit chance gets a mild penalty past the weapon's effective range.
     const rangeFactor = d <= weapon.range ? 1 : Math.max(0.25, 1 - (d - weapon.range) / weapon.range);
-
-    // Base aim: accuracy with weapon-pref scaling 30% of the way toward the preferred-weapon rating.
     const slot = WEAPONS[a.weapon].slot;
-    const prefMap: Record<typeof slot, number> = {
+    const prefMap = {
       knife: 50,
       pistol: stats.pistolPref,
       smg: stats.smgPref,
       rifle: stats.riflePref,
-      awp: stats.awpPref,
+      awp: stats.awpPref
     };
     const weaponPref = (prefMap[slot] ?? 50) / 100;
-    let aimMod = (stats.accuracy / 100) * 0.7 + weaponPref * 0.3;
-
-    // Last alive — composure carries you. Score deficit punishes low composure.
+    let aimMod = stats.accuracy / 100 * 0.7 + weaponPref * 0.3;
     if (this.lastAliveOnSide(a.side)) aimMod += (stats.composure - 60) / 200;
     if (this.scoreDeficit(a.side) >= 3) aimMod -= Math.max(0, 60 - stats.composure) / 400;
-
-    // Trade-frag window
-    if (this.tradeMarks.some(m => m.killerId === enemy.playerId && m.victimSide === a.side)) {
+    if (this.tradeMarks.some((m) => m.killerId === enemy.playerId && m.victimSide === a.side)) {
       aimMod += TRADE_AIM_BONUS;
     }
-
-    // First shot vs sustained spray: tapping helps the first crisp shot; sprayControl helps follow-ups.
     const sinceLastShot = this.t - a.lastShotAt;
     if (a.lastShotAt > 0 && sinceLastShot < 500) {
       aimMod += (stats.sprayControl - 50) / 400;
     } else {
       aimMod += (stats.tapping - 50) / 500;
     }
-
-    // Stationary aim bonus, weighted by counter-strafe (stopping accuracy).
     if (a.path.length === 0) {
       aimMod += 0.04 + (stats.counterStrafe - 50) / 600;
     } else {
       aimMod -= 0.05;
     }
-
-    // Mood is a softer modifier — represents in-the-moment confidence.
     aimMod += (player.mood - 50) / 400;
-
     const hitChance = clamp(weapon.accuracy * aimMod * rangeFactor, 0.05, 0.95);
     const hit = this.rng() < hitChance;
     this.tickShots.push({
-      from: { ...a.pos }, to: { ...enemy.pos }, side: a.side, hit, killerId: a.playerId,
+      from: { ...a.pos },
+      to: { ...enemy.pos },
+      side: a.side,
+      hit,
+      killerId: a.playerId
     });
     if (!hit) return;
-
-    // CS2-style multiplicative damage falloff with range.
     const falloff = Math.pow(weapon.rangeModifier, d / WEAPON_FALLOFF_UNIT);
     let dmg = weapon.damage * falloff * (0.92 + this.rng() * 0.16);
-
-    // Headshot roll — crosshair placement contributes most, then accuracy.
     const hsBase = HEADSHOT_BASE[a.weapon];
     const hsChance = clamp(hsBase + (stats.crosshairPlacement - 50) / 350 + (stats.accuracy - 50) / 600, 0.03, 0.55);
     const isHeadshot = this.rng() < hsChance;
     if (isHeadshot) {
       dmg *= weapon.headshotMultiplier;
-      // CS2 armor: damage at an armored zone = dmg * (armor_ratio / 2),
-      // which is our `armorPen`. High-pen guns (AK, Deagle, AWP) one-tap
-      // through helmets; low-pen guns (Glock, MP9, MAC) do not.
       if (enemy.helmet) {
         dmg *= weapon.armorPen;
         enemy.helmet = false;
       }
     } else if (enemy.armor > 0) {
-      // Same model on the body: vest absorbs damage by the same ratio, and
-      // the absorbed portion chips the vest (CS2 armor_bonus = 0.5).
       const before = dmg;
       dmg *= weapon.armorPen;
       enemy.armor = Math.max(0, enemy.armor - (before - dmg) * 0.5);
@@ -1703,9 +1967,10 @@ export class RoundSim {
     const applied = Math.min(enemy.hp, dmg);
     enemy.hp -= dmg;
     this.addDamage(a.playerId, applied);
-    // Taking damage breaks save mode — you've been found.
-    if (enemy.saving) { enemy.saving = false; enemy.dirty = true; }
-
+    if (enemy.saving) {
+      enemy.saving = false;
+      enemy.dirty = true;
+    }
     if (enemy.hp <= 0) {
       enemy.alive = false;
       enemy.hp = 0;
@@ -1713,75 +1978,59 @@ export class RoundSim {
         this.drops.push({ pos: { ...enemy.pos }, weapon: enemy.weapon });
       }
       this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: enemy.playerId, weapon: a.weapon, headshot: isHeadshot });
-      const killer = this.players(a.playerId)!;
+      const killer = this.players(a.playerId);
       killer.mood = clamp(killer.mood + 4, 0, 100);
-      const victim = this.players(enemy.playerId)!;
+      const victim = this.players(enemy.playerId);
       victim.mood = clamp(victim.mood - 3, 0, 100);
       this.bumpStat(a.playerId, "kills", 1);
       this.bumpStat(enemy.playerId, "deaths", 1);
-
-      // Open trade window: enemy's teammates can punish a.playerId.
       this.tradeMarks.push({
         killerId: a.playerId,
         victimSide: enemy.side,
-        expiresAt: this.t + TRADE_WINDOW_MS,
+        expiresAt: this.t + TRADE_WINDOW_MS
       });
-
       if (enemy.playerId === this.bombCarrier) this.dropBomb(enemy);
     }
   }
-
-  private dropBomb(victim: Agent) {
+  dropBomb(victim) {
     this.bombDropped = { x: victim.pos.x, y: victim.pos.y };
     this.bombCarrier = null;
     for (const ag of this.agents) if (ag.alive) ag.dirty = true;
   }
-
   // ---- Engagement stance ----
-  private decideStance(a: Agent, enemy: Agent) {
-    const player = this.players(a.playerId)!;
+  decideStance(a, enemy) {
+    const player = this.players(a.playerId);
     const stats = player.stats;
     const isLastAlive = this.lastAliveOnSide(a.side);
-
-    // Saving: try to avoid engagement, but if cornered with an enemy in
-    // close range, drop save and fight back. Composure scales the reaction
-    // radius — calm players notice and react sooner.
     if (a.saving) {
       const d = dist(a.pos, enemy.pos);
-      const reactRange = 100 + (stats.composure / 100) * 140; // 100-240px
+      const reactRange = 100 + stats.composure / 100 * 140;
       if (d < reactRange) {
         a.saving = false;
-        // Fall through to normal stance decision below.
       } else {
         a.stance = "disengage";
-        a.stanceUntil = this.t + 2000;
+        a.stanceUntil = this.t + 2e3;
         this.setGoal(a, this.saveSpotFor(a));
         return;
       }
     }
-
-    // Count visible enemies.
     let visibleEnemies = 0;
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
+      if (dist(a.pos, e.pos) > VISION_RANGE) continue;
       if (!this.hasLineOfSight(a.pos, e.pos)) continue;
       visibleEnemies++;
     }
-    // Nearby allies — low-composure players want closer support to feel safe.
     const allyRange = 240 + (80 - stats.composure) * 0.8;
     let nearbyAllies = 0;
     for (const al of this.agents) {
       if (!al.alive || al.side !== a.side || al.playerId === a.playerId) continue;
       if (dist(a.pos, al.pos) < allyRange) nearbyAllies++;
     }
-
-    // Low-composure player behind on score will retreat even from solo contact.
     const tiltPressure = stats.composure < 45 && this.scoreDeficit(a.side) >= 3;
     const enemyThreshold = tiltPressure ? 1 : 2;
-    // Composed clutch players refuse to disengage when last alive.
     const refuseDisengage = isLastAlive && stats.composure > 70;
-
-    let stance: Agent["stance"];
+    let stance;
     if (!refuseDisengage && visibleEnemies >= enemyThreshold && nearbyAllies === 0) {
       stance = "disengage";
     } else {
@@ -1789,48 +2038,41 @@ export class RoundSim {
       const theirCost = WEAPONS[enemy.weapon].cost;
       const ratio = myCost / Math.max(1, theirCost);
       const d = dist(a.pos, enemy.pos);
-      // Aggression scales rush threshold; clutch-last-alive adds extra push.
       const rushBias = (stats.aggression - 60) / 200 + (isLastAlive && stats.composure > 65 ? 0.25 : 0);
       if (ratio < 0.5 + rushBias && d > 160 && a.hp > 45) stance = "rush";
       else stance = "hold";
     }
-
     a.stance = stance;
     const duration = stance === "rush" ? 900 : stance === "disengage" ? 1500 : 700;
     a.stanceUntil = this.t + duration;
-    // Don't let think() overwrite the stance path.
     a.nextThinkAt = Math.max(a.nextThinkAt, a.stanceUntil + 200);
-
     if (stance === "rush") {
       this.setGoal(a, { x: enemy.pos.x, y: enemy.pos.y });
     } else if (stance === "disengage") {
       const dx = a.pos.x - enemy.pos.x, dy = a.pos.y - enemy.pos.y;
       const dd = Math.hypot(dx, dy) || 1;
-      const goal: Vec2 = { x: a.pos.x + (dx / dd) * 220, y: a.pos.y + (dy / dd) * 220 };
+      const goal = { x: a.pos.x + dx / dd * 220, y: a.pos.y + dy / dd * 220 };
       this.setGoal(a, goal);
     } else {
-      // hold — stop moving, no path
       a.target = null;
       a.path = [];
     }
   }
-
   // ---- Blind spray (audio cue through smoke) ----
-  private tryBlindSpray(a: Agent): Agent | null {
+  tryBlindSpray(a) {
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
       if (e.moveMode !== "run") continue;
       const d = dist(a.pos, e.pos);
       if (d > HEARING_RANGE) continue;
-      if (this.hasLineOfSight(a.pos, e.pos)) continue; // direct LOS handled by acquireTarget
-      if (this.wallOnLine(a.pos, e.pos)) continue;    // walls block bullets even through smoke
+      if (this.hasLineOfSight(a.pos, e.pos)) continue;
+      if (this.wallOnLine(a.pos, e.pos)) continue;
       if (!this.smokeOnLine(a.pos, e.pos)) continue;
       return e;
     }
     return null;
   }
-
-  private wallOnLine(p1: Vec2, p2: Vec2): boolean {
+  wallOnLine(p1, p2) {
     const ts = this.map.tileSize;
     const W = this.map.width, H = this.map.height;
     let tx = Math.floor(p1.x / ts);
@@ -1856,13 +2098,17 @@ export class RoundSim {
         if (this.map.walls[ty * W + tx]) return true;
       }
       if (tx === ex && ty === ey) return false;
-      if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
-      else                { ty += stepY; tMaxY += tDeltaY; }
+      if (tMaxX < tMaxY) {
+        tx += stepX;
+        tMaxX += tDeltaX;
+      } else {
+        ty += stepY;
+        tMaxY += tDeltaY;
+      }
     }
     return false;
   }
-
-  private smokeOnLine(p1: Vec2, p2: Vec2): boolean {
+  smokeOnLine(p1, p2) {
     const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
     const steps = Math.ceil(d / 10);
     for (let i = 1; i < steps; i++) {
@@ -1876,9 +2122,8 @@ export class RoundSim {
     }
     return false;
   }
-
-  private fireBlind(a: Agent, target: Agent, weapon: typeof WEAPONS[keyof typeof WEAPONS]) {
-    const cooldown = 1000 / weapon.fireRate;
+  fireBlind(a, target, weapon) {
+    const cooldown = 1e3 / weapon.fireRate;
     if (this.t - a.lastShotAt < cooldown) return;
     a.lastShotAt = this.t;
     if (a.weapon !== "knife") a.ammo--;
@@ -1887,7 +2132,9 @@ export class RoundSim {
     this.tickShots.push({
       from: { x: a.pos.x, y: a.pos.y },
       to: { x: target.pos.x, y: target.pos.y },
-      side: a.side, hit, killerId: a.playerId,
+      side: a.side,
+      hit,
+      killerId: a.playerId
     });
     if (!hit) return;
     const dBlind = dist(a.pos, target.pos);
@@ -1901,7 +2148,10 @@ export class RoundSim {
     const applied = Math.min(target.hp, dmg);
     target.hp -= dmg;
     this.addDamage(a.playerId, applied);
-    if (target.saving) { target.saving = false; target.dirty = true; }
+    if (target.saving) {
+      target.saving = false;
+      target.dirty = true;
+    }
     if (target.hp <= 0) {
       target.alive = false;
       target.hp = 0;
@@ -1914,49 +2164,41 @@ export class RoundSim {
       if (target.playerId === this.bombCarrier) this.dropBomb(target);
     }
   }
-
   // Target acquisition with reaction delay.
   // The agent must have LOS to an enemy for at least reactionMs before they can fire.
-  private acquireTarget(a: Agent, reactionMs: number): Agent | null {
+  acquireTarget(a, reactionMs) {
     if (this.t < a.blindedUntil) {
-      // Blinded — can't see anything, forget all prior sightings.
       for (const id of Object.keys(a.spotted)) delete a.spotted[id];
       return null;
     }
-    const visibleEnemies: { e: Agent; d: number }[] = [];
-    const stillSeen = new Set<string>();
-
+    const visibleEnemies = [];
+    const stillSeen = /* @__PURE__ */ new Set();
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
-      if (!this.hasLineOfSight(a.pos, e.pos)) continue;
       const d = dist(a.pos, e.pos);
+      if (d > VISION_RANGE) continue;
+      if (!this.hasLineOfSight(a.pos, e.pos)) continue;
       visibleEnemies.push({ e, d });
       stillSeen.add(e.playerId);
-      if (a.spotted[e.playerId] === undefined) {
+      if (a.spotted[e.playerId] === void 0) {
         a.spotted[e.playerId] = this.t;
-        // First sight of this enemy this contact — try to take nearby cover
-        // before committing to a fight. Tight radius so this doesn't pull
-        // pushers off-path when no good cover is right there.
-        this.tryReactivePeek(a, e.pos);
       }
     }
-
-    // Forget enemies we no longer see (so re-spotting requires re-acquiring).
     for (const id of Object.keys(a.spotted)) {
       if (!stillSeen.has(id)) delete a.spotted[id];
     }
-
-    // Among acquired enemies (spotted long enough), pick the closest.
-    let best: Agent | null = null; let bestD = Infinity;
+    let best = null;
+    let bestD = Infinity;
     for (const { e, d } of visibleEnemies) {
       if (this.t - a.spotted[e.playerId] < reactionMs) continue;
-      if (d < bestD) { bestD = d; best = e; }
+      if (d < bestD) {
+        bestD = d;
+        best = e;
+      }
     }
     return best;
   }
-
-  private hasLineOfSight(a: Vec2, b: Vec2): boolean {
-    // Grid traversal (Amanatides–Woo) — visits every tile the segment touches.
+  hasLineOfSight(a, b) {
     const ts = this.map.tileSize;
     const W = this.map.width, H = this.map.height;
     let tx = Math.floor(a.x / ts);
@@ -1975,56 +2217,55 @@ export class RoundSim {
     let tMaxY = dy !== 0 ? (nextBoundaryY - a.y) * invDy : Infinity;
     const tDeltaX = dx !== 0 ? Math.abs(ts * invDx) : Infinity;
     const tDeltaY = dy !== 0 ? Math.abs(ts * invDy) : Infinity;
-
-    const checkSmoke = (px: number, py: number): boolean => {
+    const checkSmoke = (px, py) => {
       for (const sm of this.smokes) {
         const sdx = px - sm.pos.x, sdy = py - sm.pos.y;
         if (sdx * sdx + sdy * sdy >= sm.radius * sm.radius) continue;
         let inHole = false;
         for (const h of this.smokeHoles) {
           const hdx = px - h.pos.x, hdy = py - h.pos.y;
-          if (hdx * hdx + hdy * hdy < h.radius * h.radius) { inHole = true; break; }
+          if (hdx * hdx + hdy * hdy < h.radius * h.radius) {
+            inHole = true;
+            break;
+          }
         }
-        if (!inHole) return true; // blocked by smoke
+        if (!inHole) return true;
       }
       return false;
     };
-
-    // Walk tiles along the segment. Bail if we hit a wall or smoke.
     let safety = (W + H) * 2;
     while (safety-- > 0) {
       if (tx < 0 || ty < 0 || tx >= W || ty >= H) return false;
-      // Skip the start tile (shooter/eye is inside it).
       if (!(tx === Math.floor(a.x / ts) && ty === Math.floor(a.y / ts))) {
         if (this.map.walls[ty * W + tx]) return false;
       }
-      // Sample point near the entry into this tile for smoke check.
       const tAlong = Math.min(tMaxX, tMaxY);
       const px = a.x + dx * Math.min(1, Math.max(0, tAlong));
       const py = a.y + dy * Math.min(1, Math.max(0, tAlong));
       if (checkSmoke(px, py)) return false;
-
       if (tx === ex && ty === ey) return true;
-      if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
-      else                { ty += stepY; tMaxY += tDeltaY; }
+      if (tMaxX < tMaxY) {
+        tx += stepX;
+        tMaxX += tDeltaX;
+      } else {
+        ty += stepY;
+        tMaxY += tDeltaY;
+      }
     }
     return true;
   }
-
-  private lastAliveOnSide(side: Side) {
-    return this.agents.filter(x => x.side === side && x.alive).length === 1;
+  lastAliveOnSide(side) {
+    return this.agents.filter((x) => x.side === side && x.alive).length === 1;
   }
-  private scoreDeficit(side: Side) {
+  scoreDeficit(side) {
     if (side === "CT") return this.tSide.roundsWon - this.ct.roundsWon;
     return this.ct.roundsWon - this.tSide.roundsWon;
   }
-
   // ---- Bomb ----
-  private tickBomb() {
+  tickBomb() {
     if (this.bombPlanted) {
-      const onSite = this.agents.find(a =>
-        a.alive && a.side === "CT" &&
-        dist(a.pos, this.bombPlantedAt!) < this.map.tileSize * 1.2
+      const onSite = this.agents.find(
+        (a) => a.alive && a.side === "CT" && dist(a.pos, this.bombPlantedAt) < this.map.tileSize * 1.2
       );
       if (onSite) {
         this.bombDefusing = onSite.playerId;
@@ -2043,29 +2284,28 @@ export class RoundSim {
       }
       return;
     }
-
-    // Dropped bomb pickup: any alive T who walks over it grabs it.
     if (this.bombDropped && !this.bombCarrier) {
       const PICKUP_RANGE = this.map.tileSize * 0.9;
-      let closest: Agent | null = null;
+      let closest = null;
       let bestD = Infinity;
       for (const ag of this.agents) {
         if (!ag.alive || ag.side !== "T") continue;
         const d = dist(ag.pos, this.bombDropped);
-        if (d < PICKUP_RANGE && d < bestD) { bestD = d; closest = ag; }
+        if (d < PICKUP_RANGE && d < bestD) {
+          bestD = d;
+          closest = ag;
+        }
       }
       if (closest) {
         this.bombCarrier = closest.playerId;
         this.bombDropped = null;
         closest.dirty = true;
-        this.push({ t: this.t, kind: "bomb-pickup", player: closest.playerId });
       }
     }
-
     if (!this.bombCarrier) return;
-    const carrier = this.agents.find(a => a.playerId === this.bombCarrier && a.alive);
+    const carrier = this.agents.find((a) => a.playerId === this.bombCarrier && a.alive);
     if (!carrier) return;
-    const site = this.map.bombsites.find(s => {
+    const site = this.map.bombsites.find((s) => {
       const c = worldCenterOfTile(s.center, this.map);
       return dist(c, carrier.pos) < s.radius * this.map.tileSize;
     });
@@ -2078,7 +2318,6 @@ export class RoundSim {
         this.bombPlantedTime = this.t;
         this.planter = carrier.playerId;
         this.push({ t: this.t, kind: "bomb-plant", planter: carrier.playerId });
-        // All living agents reassess: CTs rotate to plant, Ts hold around it.
         for (const ag of this.agents) if (ag.alive) ag.dirty = true;
       }
     } else {
@@ -2086,59 +2325,376 @@ export class RoundSim {
       this.plantProgress = Math.max(0, this.plantProgress - TICK_MS);
     }
   }
-
-  private enemiesNearby(a: Agent, range: number): boolean {
-    return this.agents.some(e => e.alive && e.side !== a.side && dist(e.pos, a.pos) < range);
+  enemiesNearby(a, range) {
+    return this.agents.some((e) => e.alive && e.side !== a.side && dist(e.pos, a.pos) < range);
   }
-
-  private checkEnd() {
+  checkEnd() {
     if (this.finished) return;
-    const ctAlive = this.agents.some(a => a.side === "CT" && a.alive);
-    const tAlive = this.agents.some(a => a.side === "T" && a.alive);
+    const ctAlive = this.agents.some((a) => a.side === "CT" && a.alive);
+    const tAlive = this.agents.some((a) => a.side === "T" && a.alive);
     if (!tAlive && !this.bombPlanted) return this.finish("t-elim", "CT");
     if (!ctAlive && !this.bombPlanted) return this.finish("ct-elim", "T");
-    // Post-plant: if no CT is alive there's no possible defuse, so detonate now.
     if (this.bombPlanted && !ctAlive) {
       this.push({ t: this.t, kind: "bomb-detonate" });
       return this.finish("bomb-detonated", "T");
     }
     if (this.t >= ROUND_TIME_MS && !this.bombPlanted) return this.finish("time-expired", "CT");
   }
-
-  private finish(outcome: RoundResult["outcome"], winningSide: Side) {
+  finish(outcome, winningSide) {
     this.finished = true;
     this.push({ t: this.t, kind: "round-end", winner: winningSide });
     this.result = { outcome, winningSide, durationMs: this.t, events: this.events };
-    // Count round played for every agent that participated.
     for (const ag of this.agents) this.bumpStat(ag.playerId, "roundsPlayed", 1);
   }
-
-  private teamOfPlayer(id: string): Team | null {
-    if (this.ct.players.some(p => p.id === id)) return this.ct;
-    if (this.tSide.players.some(p => p.id === id)) return this.tSide;
+  teamOfPlayer(id) {
+    if (this.ct.players.some((p) => p.id === id)) return this.ct;
+    if (this.tSide.players.some((p) => p.id === id)) return this.tSide;
     return null;
   }
-
-  private bumpStat(playerId: string, key: "kills" | "deaths" | "roundsPlayed", amount: number) {
+  bumpStat(playerId, key, amount) {
     const team = this.teamOfPlayer(playerId);
     if (!team) return;
     team.matchStats[playerId][key] += amount;
   }
-
-  private addDamage(playerId: string, amount: number) {
+  addDamage(playerId, amount) {
     const team = this.teamOfPlayer(playerId);
     if (!team) return;
     team.matchStats[playerId].damage += amount;
   }
+};
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
-
-function dist(a: Vec2, b: Vec2) { return Math.hypot(a.x - b.x, a.y - b.y); }
-function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
-function worldCenterOfTile(t: Vec2, map: GameMap): Vec2 {
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+function worldCenterOfTile(t, map) {
   return { x: (t.x + 0.5) * map.tileSize, y: (t.y + 0.5) * map.tileSize };
 }
-function jitter(p: Vec2, r: number, rng: () => number): Vec2 {
+function jitter(p, r, rng) {
   const a = rng() * Math.PI * 2;
   const d = rng() * r;
   return { x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d };
+}
+
+// src/sim/economy.ts
+var WIN_BONUS = 3250;
+var LOSS_STREAK_BASE = 1400;
+var LOSS_STREAK_BONUS = 500;
+var MAX_LOSS_BONUS = 3400;
+var KILL_REWARD = 300;
+var PLAYER_MONEY_CAP = 16e3;
+function applyRoundReward(ct, t, result, ctLossStreak, tLossStreak) {
+  const winner = result.winningSide === "CT" ? ct : t;
+  const loser = result.winningSide === "CT" ? t : ct;
+  const loserBonus = Math.min(
+    MAX_LOSS_BONUS,
+    LOSS_STREAK_BASE + LOSS_STREAK_BONUS * (result.winningSide === "CT" ? tLossStreak : ctLossStreak)
+  );
+  for (const p of winner.players) p.money += WIN_BONUS;
+  for (const p of loser.players) p.money += loserBonus;
+  for (const e of result.events) {
+    if (e.kind !== "kill") continue;
+    const killer = ct.players.find((p) => p.id === e.killer) ?? t.players.find((p) => p.id === e.killer);
+    if (killer) killer.money += KILL_REWARD;
+  }
+  for (const team of [ct, t]) {
+    for (const p of team.players) p.money = Math.min(p.money, PLAYER_MONEY_CAP);
+  }
+  return {
+    ctLossStreak: result.winningSide === "CT" ? 0 : ctLossStreak + 1,
+    tLossStreak: result.winningSide === "T" ? 0 : tLossStreak + 1
+  };
+}
+
+// src/balance/balanceWorker.ts
+var INDEPENDENT_ROUND_STIPEND = 4500;
+var ALL_PRESETS = ["pistol", "pistol+armor", "smg", "rifle", "awp"];
+var PRESET_LABELS = {
+  "auto": "Auto (eco-driven)",
+  "pistol": "Pistol",
+  "pistol+armor": "Pistol + vest",
+  "smg": "SMG + vest",
+  "rifle": "Rifle (full buy)",
+  "awp": "4 rifles + 1 AWP"
+};
+function emptyStats() {
+  return {
+    rounds: 0,
+    ctWins: 0,
+    tWins: 0,
+    outcomes: {
+      "ct-elim": 0,
+      "t-elim": 0,
+      "bomb-detonated": 0,
+      "bomb-defused": 0,
+      "time-expired": 0
+    },
+    totalDurationMs: 0,
+    ctKills: 0,
+    tKills: 0,
+    plants: 0,
+    defuses: 0,
+    detonations: 0,
+    ctElims: 0,
+    tElims: 0,
+    timeouts: 0
+  };
+}
+function simpleBuy(team) {
+  const rifle = team.side === "CT" ? "m4" : "ak";
+  const rifleCost = team.side === "CT" ? 3100 : 2700;
+  const VEST = 650, HELMET = 350;
+  for (const p of team.players) {
+    const l = team.loadouts[p.id];
+    let spent = 0;
+    if (!l.keptWeapon && p.money >= rifleCost) {
+      l.weapon = rifle;
+      spent += rifleCost;
+    } else if (l.keptWeapon) l.weapon = l.keptWeapon;
+    if (!l.keptArmor && p.money - spent >= VEST) {
+      l.armor = true;
+      spent += VEST;
+    }
+    if (l.armor && !l.keptHelmet && p.money - spent >= HELMET) {
+      l.helmet = true;
+      spent += HELMET;
+    }
+    p.money = Math.max(0, p.money - spent);
+  }
+}
+function applyPreset(team, preset) {
+  if (preset === "auto") {
+    simpleBuy(team);
+    return;
+  }
+  const rifle = team.side === "CT" ? "m4" : "ak";
+  const smg = team.side === "CT" ? "mp9" : "mac10";
+  const pistol = defaultPistol(team.side);
+  team.players.forEach((p, i) => {
+    let weapon = pistol;
+    let armor = false, helmet = false;
+    switch (preset) {
+      case "pistol":
+        weapon = pistol;
+        break;
+      case "pistol+armor":
+        weapon = pistol;
+        armor = true;
+        break;
+      case "smg":
+        weapon = smg;
+        armor = true;
+        break;
+      case "rifle":
+        weapon = rifle;
+        armor = true;
+        helmet = true;
+        break;
+      case "awp":
+        weapon = i === 0 ? "awp" : rifle;
+        armor = true;
+        helmet = true;
+        break;
+    }
+    team.loadouts[p.id] = {
+      weapon,
+      utility: [],
+      armor,
+      helmet,
+      keptWeapon: null,
+      keptArmor: false,
+      keptHelmet: false,
+      keptUtility: []
+    };
+  });
+}
+function simulateCell(p) {
+  setSeed(Date.now());
+  const home = makeTeam("home", "Home", "CT");
+  const away = makeTeam("away", "Away", "T");
+  if (p.neutralize) {
+    neutralizeTeamStats(home, 60);
+    neutralizeTeamStats(away, 60);
+  }
+  for (const team of [home, away]) for (const pl of team.players) {
+    team.loadouts[pl.id] = {
+      weapon: defaultPistol(team.side),
+      utility: [],
+      armor: false,
+      helmet: false,
+      keptWeapon: null,
+      keptArmor: false,
+      keptHelmet: false,
+      keptUtility: []
+    };
+  }
+  const ctForced = p.ctLoadout !== "auto";
+  const tForced = p.tLoadout !== "auto";
+  const forced = ctForced || tForced;
+  let ctLossStreak = 0, tLossStreak = 0;
+  const stats = emptyStats();
+  const progressEvery = Math.max(1, Math.floor(p.rounds / 50));
+  for (let i = 0; i < p.rounds; i++) {
+    if (p.resetEachRound || forced) {
+      for (const team of [home, away]) {
+        for (const pl of team.players) {
+          pl.money = INDEPENDENT_ROUND_STIPEND;
+          team.loadouts[pl.id] = {
+            weapon: defaultPistol(team.side),
+            utility: [],
+            armor: false,
+            helmet: false,
+            keptWeapon: null,
+            keptArmor: false,
+            keptHelmet: false,
+            keptUtility: []
+          };
+        }
+      }
+      ctLossStreak = 0;
+      tLossStreak = 0;
+    }
+    if (p.neutralize || p.resetEachRound || forced) {
+      for (const team of [home, away]) for (const pl of team.players) {
+        pl.mood = 65;
+        pl.morale = 65;
+      }
+    }
+    applyPreset(home, p.ctLoadout);
+    applyPreset(away, p.tLoadout);
+    const sim = new RoundSim(home, away, p.map, Math.floor(Math.random() * 1e9));
+    let safety = 1e5;
+    while (!sim.finished && safety-- > 0) sim.tick();
+    if (!sim.result) continue;
+    const r = sim.result;
+    stats.rounds++;
+    stats.totalDurationMs += r.durationMs;
+    stats.outcomes[r.outcome]++;
+    if (r.winningSide === "CT") stats.ctWins++;
+    else stats.tWins++;
+    if (r.outcome === "ct-elim") stats.tElims++;
+    else if (r.outcome === "t-elim") stats.ctElims++;
+    else if (r.outcome === "bomb-detonated") stats.detonations++;
+    else if (r.outcome === "bomb-defused") stats.defuses++;
+    else if (r.outcome === "time-expired") stats.timeouts++;
+    for (const e of r.events) {
+      if (e.kind === "kill") {
+        if (home.players.some((pl) => pl.id === e.killer)) stats.ctKills++;
+        else stats.tKills++;
+      } else if (e.kind === "bomb-plant") {
+        stats.plants++;
+      }
+    }
+    for (const ag of sim.agents) {
+      const team = home.players.some((pl) => pl.id === ag.playerId) ? home : away;
+      if (ag.alive) {
+        const hasVest = ag.armor > 30;
+        const keptUtil = [...ag.utility];
+        team.loadouts[ag.playerId] = {
+          weapon: ag.weapon,
+          utility: keptUtil,
+          armor: hasVest,
+          helmet: ag.helmet,
+          keptWeapon: ag.weapon === "knife" ? null : ag.weapon,
+          keptArmor: hasVest,
+          keptHelmet: ag.helmet,
+          keptUtility: keptUtil
+        };
+      } else {
+        team.loadouts[ag.playerId] = {
+          weapon: defaultPistol(team.side),
+          utility: [],
+          armor: false,
+          helmet: false,
+          keptWeapon: null,
+          keptArmor: false,
+          keptHelmet: false,
+          keptUtility: []
+        };
+      }
+    }
+    const next = applyRoundReward(home, away, r, ctLossStreak, tLossStreak);
+    ctLossStreak = next.ctLossStreak;
+    tLossStreak = next.tLossStreak;
+    if ((i + 1) % progressEvery === 0) p.onProgress(i + 1);
+  }
+  return stats;
+}
+if (typeof self !== "undefined" && typeof self.addEventListener === "function") {
+  self.addEventListener("message", (e) => {
+    const req = e.data;
+    if (req.kind !== "run") return;
+    if (req.matrix) {
+      const cells = [];
+      const total = ALL_PRESETS.length * ALL_PRESETS.length;
+      let cellIndex = 0;
+      for (const ct of ALL_PRESETS) {
+        for (const t of ALL_PRESETS) {
+          cellIndex++;
+          const stats = simulateCell({
+            map: req.map,
+            rounds: req.rounds,
+            neutralize: req.neutralize,
+            resetEachRound: req.resetEachRound,
+            ctLoadout: ct,
+            tLoadout: t,
+            onProgress: (done) => {
+              const msg = {
+                kind: "progress",
+                done,
+                total: req.rounds,
+                cell: { ct, t, index: cellIndex, count: total }
+              };
+              self.postMessage(msg);
+            }
+          });
+          cells.push({ ct, t, stats });
+        }
+      }
+      const result = { kind: "done-matrix", cells };
+      self.postMessage(result);
+    } else {
+      const stats = simulateCell({
+        map: req.map,
+        rounds: req.rounds,
+        neutralize: req.neutralize,
+        resetEachRound: req.resetEachRound,
+        ctLoadout: req.ctLoadout,
+        tLoadout: req.tLoadout,
+        onProgress: (done) => {
+          const msg = { kind: "progress", done, total: req.rounds };
+          self.postMessage(msg);
+        }
+      });
+      const result = { kind: "done", stats };
+      self.postMessage(result);
+    }
+  });
+}
+
+// scripts/matrix.ts
+var MAP = JSON.parse(process.argv[2]);
+var ROUNDS = Number(process.argv[3] ?? 5e3);
+console.log(`Matrix on "${MAP.name}", ${ROUNDS} rounds/cell, neutralize=true, resetEachRound=false
+`);
+var pad = (s, n) => s.padEnd(n);
+console.log(`${pad("CT", 18)} ${pad("T", 18)} ${pad("CT win %", 9)} ${pad("Plant %", 9)} avg dur (s)`);
+for (const ct of ALL_PRESETS) {
+  for (const t of ALL_PRESETS) {
+    const stats = simulateCell({
+      map: MAP,
+      rounds: ROUNDS,
+      neutralize: true,
+      resetEachRound: false,
+      ctLoadout: ct,
+      tLoadout: t,
+      onProgress: () => {
+      }
+    });
+    const ctPct = (100 * stats.ctWins / stats.rounds).toFixed(1);
+    const plantPct = (100 * stats.plants / stats.rounds).toFixed(1);
+    const dur = (stats.totalDurationMs / stats.rounds / 1e3).toFixed(1);
+    console.log(`${pad(PRESET_LABELS[ct], 18)} ${pad(PRESET_LABELS[t], 18)} ${pad(ctPct + "%", 9)} ${pad(plantPct + "%", 9)} ${dur}`);
+  }
 }

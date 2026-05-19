@@ -1,8 +1,8 @@
 import type { Loadout, Player, Team, UtilityId, WeaponId } from "../domain/types.ts";
-import { HELMET_UPGRADE_COST, UTILITIES, VEST_COST, WEAPONS } from "../domain/weapons.ts";
+import { HELMET_UPGRADE_COST, UTILITIES, VEST_COST, WEAPONS, defaultPistol } from "../domain/weapons.ts";
 import { statSummary } from "../domain/statSummary.ts";
 
-const ALL_WEAPONS: WeaponId[] = ["pistol", "deagle", "mp9", "mac10", "m4", "ak", "awp"];
+const ALL_WEAPONS: WeaponId[] = ["glock", "usp", "deagle", "mp9", "mac10", "m4", "ak", "awp"];
 const UTILITY_OPTIONS: UtilityId[] = ["smoke", "flash", "he", "molotov"];
 
 export interface BuyPanelHandlers {
@@ -35,7 +35,7 @@ export class BuyPanel {
     if (n === 1 || n === 13) {
       for (const p of this.team.players) {
         const l = this.team.loadouts[p.id];
-        if (WEAPONS[l.weapon].slot !== "pistol") l.weapon = "pistol";
+        if (WEAPONS[l.weapon].slot !== "pistol") l.weapon = defaultPistol(this.team.side);
         l.helmet = false;
       }
     }
@@ -64,7 +64,7 @@ export class BuyPanel {
     if (!gun) return;
     // Giver downgrades to pistol; loses kept gun.
     fromL.keptWeapon = null;
-    if (fromL.weapon === gun) fromL.weapon = "pistol";
+    if (fromL.weapon === gun) fromL.weapon = defaultPistol(this.team.side);
     // Recipient gains kept gun (free) and selects it as their loadout.
     toL.keptWeapon = gun;
     toL.weapon = gun;
@@ -319,13 +319,10 @@ export class BuyPanel {
     const simBtn = document.createElement("button");
     simBtn.className = "secondary";
     simBtn.textContent = "Sim round";
-    simBtn.disabled = anyOver;
-    simBtn.title = "Run the next round headless, then watch the replay";
-    simBtn.onclick = () => {
-      if (anyOver) return;
-      for (const p of this.team.players) p.money -= this.playerCost(p);
-      this.handlers.onSimNow();
-    };
+    simBtn.title = "Auto-buy for your team and run the next round headless, then watch the replay";
+    // Sim round delegates buying to the AI, so the manual-loadout budget
+    // check doesn't apply — leave the button enabled even when over budget.
+    simBtn.onclick = () => this.handlers.onSimNow();
     btnRow.appendChild(simBtn);
 
     this.el.appendChild(btnRow);

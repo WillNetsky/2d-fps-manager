@@ -6,7 +6,7 @@ import type {
   BalanceMatrixResult, BalanceProgress, BalanceRequest, BalanceResult,
   LoadoutPreset, RunStats,
 } from "./balanceWorker.ts";
-import { ALL_PRESETS, PRESET_LABELS } from "./balanceWorker.ts";
+import { ALL_PRESETS, ALL_T_STRATEGIES, PRESET_LABELS } from "./balanceWorker.ts";
 
 export class BalanceMode {
   private root: HTMLElement;
@@ -265,7 +265,56 @@ export class BalanceMode {
         <tr><th>CT elim wins</th><td>${s.tElims}</td></tr>
         <tr><th>T elim wins</th><td>${s.ctElims}</td></tr>
         <tr><th>Time-expired</th><td>${s.timeouts}</td></tr>
-      </table>`;
+      </table>
+      ${this.renderBreakdowns(s)}`;
+  }
+
+  private renderBreakdowns(s: RunStats): string {
+    const tStratEntries = ALL_T_STRATEGIES.map(k => [k, s.byTStrategy[k]] as const);
+    const ctSetupEntries = Object.entries(s.byCtSetup).sort(([a], [b]) => a.localeCompare(b));
+    return this.renderBreakdownTable("By T strategy", "Strategy", tStratEntries)
+         + this.renderBreakdownTable("By CT setup", "Setup", ctSetupEntries);
+  }
+
+  private renderBreakdownTable(
+    title: string, keyLabel: string,
+    entries: ReadonlyArray<readonly [string, import("./balanceWorker.ts").StrategyStats]>,
+  ): string {
+    let html = `<h4 style="margin-top:16px;">${title}</h4>`;
+    html += `<table class="balance-table"><tr>`;
+    const headers = [keyLabel, "Rounds", "CT win %", "T win %", "CT K/D", "T K/D", "Avg CT kills", "Avg T kills", "Plant %", "Defuse %", "Det %", "Timeout %", "Avg dur (s)"];
+    for (const h of headers) html += `<th>${h}</th>`;
+    html += `</tr>`;
+    if (entries.length === 0) {
+      html += `<tr><td colspan="${headers.length}" style="opacity:0.6;">No rounds played.</td></tr>`;
+    }
+    for (const [key, r] of entries) {
+      if (r.rounds === 0) {
+        html += `<tr><td>${key}</td>` + `<td>0</td>` + `<td>—</td>`.repeat(headers.length - 2) + `</tr>`;
+        continue;
+      }
+      const pct = (n: number) => `${((n / r.rounds) * 100).toFixed(1)}%`;
+      const avg = (n: number) => (n / r.rounds).toFixed(1);
+      const kd = (k: number, d: number) => (d === 0 ? "∞" : (k / d).toFixed(2));
+      const dur = (r.totalDurationMs / r.rounds / 1000).toFixed(1);
+      html += `<tr>
+        <td>${key}</td>
+        <td>${r.rounds}</td>
+        <td>${pct(r.ctWins)}</td>
+        <td>${pct(r.tWins)}</td>
+        <td>${kd(r.ctKills, r.tKills)}</td>
+        <td>${kd(r.tKills, r.ctKills)}</td>
+        <td>${avg(r.ctKills)}</td>
+        <td>${avg(r.tKills)}</td>
+        <td>${pct(r.plants)}</td>
+        <td>${pct(r.defuses)}</td>
+        <td>${pct(r.detonations)}</td>
+        <td>${pct(r.timeouts)}</td>
+        <td>${dur}</td>
+      </tr>`;
+    }
+    html += `</table>`;
+    return html;
   }
 
   private renderMatrix(cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[]) {
@@ -306,6 +355,27 @@ export class BalanceMode {
       html += `<tr><td>${PRESET_LABELS[c.ct]}</td><td>${PRESET_LABELS[c.t]}</td><td>${s.rounds}</td><td>${ctW.toFixed(1)}%</td><td>${plantP.toFixed(0)}%</td><td>${dur}</td></tr>`;
     }
     html += `</table>`;
+
+    // Aggregate strategy + setup stats across all cells so the matrix run
+    // also surfaces which T strategies / CT setups actually win on this map.
+    const agg: RunStats = { byTStrategy: {} as RunStats["byTStrategy"], byCtSetup: {} } as RunStats;
+    type Bucket = RunStats["byCtSetup"][string];
+    const empty = (): Bucket => ({ rounds: 0, ctWins: 0, tWins: 0, plants: 0, defuses: 0, detonations: 0, timeouts: 0, ctKills: 0, tKills: 0, totalDurationMs: 0 });
+    for (const st of ALL_T_STRATEGIES) agg.byTStrategy[st] = empty();
+    const accum = (dst: Bucket, src: Bucket) => {
+      dst.rounds += src.rounds; dst.ctWins += src.ctWins; dst.tWins += src.tWins;
+      dst.plants += src.plants; dst.defuses += src.defuses; dst.detonations += src.detonations; dst.timeouts += src.timeouts;
+      dst.ctKills += src.ctKills; dst.tKills += src.tKills;
+      dst.totalDurationMs += src.totalDurationMs;
+    };
+    for (const c of cells) {
+      for (const st of ALL_T_STRATEGIES) accum(agg.byTStrategy[st], c.stats.byTStrategy[st]);
+      for (const [key, src] of Object.entries(c.stats.byCtSetup)) {
+        const dst = agg.byCtSetup[key] ?? (agg.byCtSetup[key] = empty());
+        accum(dst, src);
+      }
+    }
+    html += this.renderBreakdowns(agg);
 
     this.resultsEl.innerHTML = html;
   }

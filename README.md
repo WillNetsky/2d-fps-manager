@@ -4,19 +4,43 @@ A 2D top-down team-management game inspired by Counter-Strike (legally distinct)
 
 ## What's in it
 
-- Per-tick simulation of two 5-player teams on a Dust2-shaped grid map (32×20, 28px tiles)
-- ~30 fine-grained per-player ratings (aim, mechanical, cognitive, mental, utility, weapon prefs, team) — sim is ratings-driven, not trait-gated
-- A* pathfinding, LOS raycasting with smoke + smoke-hole occlusion, BFS intel decay
-- Four utility types: smokes (LOS block), flashes (blind cone), molotovs (DOT, extinguished by smokes), HEs (damage + temporary smoke hole) — landing positions auto-detected from map chokepoints
-- Engagement stances (hold/rush/disengage) chosen from visible-enemy / nearby-ally count
-- Walk vs run, audible footsteps as intel without LOS
-- MR12 ruleset: first to 13 over 24 rounds, halftime side swap, $3000 starting bank, weapon/armor carryover for survivors, free pistols, vest XOR utility on pistol rounds
-- Round timeline scrubber with per-tick replay
-- Built-in map editor at `#editor` with localStorage persistence
+### Match sim
+- Per-tick simulation of two 5-player teams on a grid map (default 32×20, 28px tiles)
+- ~30 per-player ratings across aim, mechanical, cognitive, mental, utility, weapon prefs, and team categories — sim is ratings-driven, not trait-gated
+- A* pathfinding, LOS raycasting with smoke + smoke-hole occlusion, BFS-based intel decay
+- Utility: smokes (LOS block), flashes (blind cone), molotovs (DOT, extinguished by smokes), HEs (damage + temporary smoke hole). Landing positions auto-detected from map chokepoints
+- Two movement speeds: walk (slow, quiet) and run (fast, loud) — footsteps are audible intel without LOS
+- Engagement stances (hold / rush / disengage) chosen from visible-enemy and nearby-ally counts
+- Saving logic: agents that decide a round is unwinnable hide and try to keep their weapon
+
+### Weapons (CS2-style math)
+- Glock (T) and USP-S (CT) as side-specific free pistols, plus Deagle, MP9, MAC-10, M4, AK, AWP
+- CS2 damage falloff: `dmg *= rangeModifier ^ (distance / 500)`
+- CS2 armor formula: `dmg *= armorPen` on armored hits — AK one-taps helmets, M4 does not, Deagle one-shots headshots through helmet, AWP one-shots body through vest
+- Headshot multiplier (×4 for most guns); helmet halves HS via armorPen rather than a separate constant
+
+### Rules & economy
+- MR12 ruleset: first to 13 over 24 rounds, halftime side swap
+- $3000 starting bank, weapon/armor carryover for survivors, free side pistols, vest XOR utility on pistol rounds
+- T strategies: rush-A, rush-B, default, split-A, split-B
+- CT setup shapes: 2A/2B/1M (55%), 3A/2B (25%), 2A/3B (20%); per-player CT assignment (`A`/`B`/`mid`/`auto`) is coach-settable
+
+### UI / UX
+- Live round view with CS-style overlays: kill feed in the top-right of the map, centered MVP card on round end (winner, outcome, duration, MVP + what they did)
+- Verbose round log: kills, pickups (weapon swaps), util throws, save/re-engage toggles, bomb pickups, plant/defuse/detonate
+- Round timeline scrubber with per-tick replay and event markers
+- "Sim round" button autobuys for both sides and fast-forwards the round
+- Built-in map editor at `#editor` with localStorage persistence, validation, "Copy JSON" export, color customization, multiple built-in maps
+
+### Balance lab
+- Map balance tester runs N rounds per cell in a Web Worker (off the main thread) using neutralized stats by default
+- Loadout matrix mode: pits preset buys (full / rifle-only / eco / etc.) against each other
+- Per-T-strategy and per-CT-setup breakdowns with rounds played, win%, K/D, average kills, plant/defuse/detonation/timeout %, and average duration
+- Mood/morale reset per round when neutralizing — avoids runaway feedback loops in long sweeps
 
 ## Requirements
 
-- Node.js 18+ (Vite 6 requires it)
+- Node.js 18+ (Vite 6)
 - npm
 
 ## Run it
@@ -25,10 +49,11 @@ A 2D top-down team-management game inspired by Counter-Strike (legally distinct)
 npm run dev
 ```
 
-Vite will print a local URL (default http://localhost:5173). Open it in a browser.
+Vite will print a local URL (default http://localhost:5173).
 
 - Game: `/`
 - Map editor: append `#editor` to the URL
+- Balance lab: in-app from the game UI
 
 ## Build
 
@@ -44,9 +69,11 @@ src/
   domain/      types, factory (players, map, ratings), weapons, stat summaries
   sim/         RoundSim, pathfinding, map analysis (chokes), economy, replay
   render/      Pixi renderer (live + replay share a SimView interface)
-  ui/          buy panel, team panel, timeline scrubber
+  ui/          buy panel, team panel, timeline scrubber, kill feed
   editor/      hash-routed map editor
+  balance/     balance mode UI + Web Worker
   game.ts      glue between sim, UI, renderer
   main.ts      dispatcher: editor vs game
+scripts/       Node-side helpers (damage tables, matrix runs) via esbuild
 TODO.md        running checklist
 ```
