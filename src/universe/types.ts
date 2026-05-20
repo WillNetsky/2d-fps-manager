@@ -31,6 +31,23 @@ export interface Matchup {
   ctScore?: number;
   tScore?: number;
   winnerSide?: "CT" | "T";
+  clutches?: Clutch[];                      // clutches won during this match
+  playerStats?: Record<string, PlayerMatchStats>;
+}
+
+export interface Clutch {
+  playerId: string;
+  kills: number;                            // kills the player got while last alive
+}
+
+export interface PlayerMatchStats {
+  kills: number;
+  deaths: number;
+  assists: number;
+  damage: number;
+  roundsPlayed: number;
+  // Rounds in which the player got exactly N kills (for HLTV 1.0 rating).
+  k1: number; k2: number; k3: number; k4: number; k5: number;
 }
 
 export interface CompletedDay {

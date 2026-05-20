@@ -5,7 +5,8 @@ import { aiBuyFor } from "../sim/aiBuy.ts";
 import { defaultPistol } from "../domain/weapons.ts";
 import { Renderer } from "../render/renderer.ts";
 import { KillFeed } from "../ui/killFeed.ts";
-import { buildTeam, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
+import { buildTeam, buildPlayerStats, detectClutch, tallyMultiKills, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
+import type { Clutch } from "./types.ts";
 
 const { STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS, isPistolRound } = MATCH_CONSTANTS;
 
@@ -98,6 +99,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   let lastEventIdx = 0;
   let cleaned = false;
   const roundMvps: Record<string, number> = {};
+  const clutches: Clutch[] = [];
+  const multi = new Map<string, [number, number, number, number, number]>();
 
   paintHud();
   startRound();
@@ -186,6 +189,9 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     const r = sim.result;
     const winner = r.winningSide === "CT" ? ctSide : tSideRef;
     winner.roundsWon++;
+    const clutch = detectClutch(r, ctSide.players.map(p => p.id), tSideRef.players.map(p => p.id));
+    if (clutch) clutches.push(clutch);
+    tallyMultiKills(r, multi);
     lossStreaks = applyRoundReward(ctSide, tSideRef, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
     carryOverLoadouts(ctSide, sim);
     carryOverLoadouts(tSideRef, sim);
@@ -203,7 +209,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
     if (matchOver) {
       const winnerSide: "CT" | "T" = ct.roundsWon > tSide.roundsWon ? "CT" : "T";
-      const result: MatchResult = { ctScore: ct.roundsWon, tScore: tSide.roundsWon, winnerSide };
+      const result: MatchResult = {
+        ctScore: ct.roundsWon, tScore: tSide.roundsWon, winnerSide, clutches,
+        playerStats: buildPlayerStats(ct, tSide, multi),
+      };
       showPostgame(result);
       return;
     }

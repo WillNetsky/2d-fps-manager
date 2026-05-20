@@ -1,5 +1,6 @@
 import type { Player } from "../domain/types.ts";
 import { makeMap, makePlayer, setSeed } from "../domain/factory.ts";
+import { flagEmoji } from "../domain/countries.ts";
 import { loadCustomMap } from "../editor/mapEditor.ts";
 import { applyMatchElo } from "./elo.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
@@ -12,13 +13,16 @@ import {
   type Matchup, type Universe,
 } from "./types.ts";
 
-type Screen = "menu" | "players" | "matchups" | "match" | "standings";
+type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "player";
 
 export class UniverseMode {
   private root: HTMLElement;
   private universe: Universe | null = null;
   private screen: Screen = "menu";
   private activeMatchupId: string | null = null;
+  private activePlayerId: string | null = null;
+  // Screen to return to from the player page (set when navigating in).
+  private playerReturnScreen: Screen = "standings";
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -49,7 +53,15 @@ export class UniverseMode {
       case "matchups":  this.renderMatchups(body); break;
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
+      case "player":    this.renderPlayer(body); break;
     }
+  }
+
+  private openPlayer(playerId: string) {
+    this.activePlayerId = playerId;
+    this.playerReturnScreen = this.screen === "player" ? this.playerReturnScreen : this.screen;
+    this.screen = "player";
+    this.render();
   }
 
   private topBar(): HTMLElement {
@@ -86,7 +98,17 @@ export class UniverseMode {
       const cont = btn(label, "primary", () => this.continueFromMatchups());
       right.appendChild(cont);
     } else if (this.screen === "standings" && this.universe) {
+      right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
       right.appendChild(btn("Next day →", "primary", () => this.nextDay()));
+    } else if (this.screen === "players" && this.universe && this.universe.history.length === 0) {
+      // Allow skipping ahead from the initial roster screen too.
+      right.insertBefore(btn("Sim X days", "", () => this.simManyDays()), right.firstChild);
+    } else if (this.screen === "player" && this.universe) {
+      right.appendChild(btn("← Back", "", () => {
+        this.screen = this.playerReturnScreen;
+        this.activePlayerId = null;
+        this.render();
+      }));
     }
 
     const menu = btn("☰ Main menu", "", () => {
@@ -201,7 +223,7 @@ export class UniverseMode {
   private renderPlayers(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
-    const table = playerTable(u.players, u.elos, /* showElo */ false);
+    const table = playerTable(u.players, u.elos, /* showElo */ false, id => this.openPlayer(id));
     body.appendChild(table);
   }
 
@@ -292,6 +314,8 @@ export class UniverseMode {
     m.ctScore = result.ctScore;
     m.tScore  = result.tScore;
     m.winnerSide = result.winnerSide;
+    m.clutches = result.clutches;
+    m.playerStats = result.playerStats;
     const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
     applyMatchElo(winners, losers, u.elos);
@@ -327,6 +351,8 @@ export class UniverseMode {
         m.ctScore = result.ctScore;
         m.tScore  = result.tScore;
         m.winnerSide = result.winnerSide;
+        m.clutches = result.clutches;
+    m.playerStats = result.playerStats;
         const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
         applyMatchElo(winners, losers, u.elos);
@@ -361,6 +387,45 @@ export class UniverseMode {
     this.render();
   }
 
+  private async simManyDays() {
+    if (!this.universe) return;
+    const input = prompt("How many days to simulate?", "30");
+    if (input === null) return;
+    const n = Math.floor(Number(input));
+    if (!Number.isFinite(n) || n <= 0) return;
+    const capped = Math.min(n, 1000); // soft guard — 1000 days is already a lot
+    const u = this.universe;
+
+    const overlay = makeSimOverlay(capped);
+    this.root.appendChild(overlay.el);
+    // Let the browser paint the overlay before we start chewing through days.
+    await nextFrame();
+
+    for (let i = 0; i < capped; i++) {
+      if (!u.pendingDay) {
+        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players) };
+      }
+      for (const m of u.pendingDay.matchups) {
+        if (m.status !== "completed") this.runInstantSim(m);
+      }
+      u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
+      u.pendingDay = null;
+      u.day++;
+
+      // Yield to the browser every few days so the progress bar updates and
+      // the page stays responsive. Tuned so even 1000 days feels live.
+      if (i % 3 === 0 || i === capped - 1) {
+        overlay.update(i + 1);
+        await nextFrame();
+      }
+    }
+
+    this.persist();
+    overlay.el.remove();
+    this.screen = "standings";
+    this.render();
+  }
+
   private nextDay() {
     if (!this.universe) return;
     this.universe.day++;
@@ -373,8 +438,26 @@ export class UniverseMode {
   private renderStandings(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
-    const table = playerTable(u.players, u.elos, /* showElo */ true);
+    const table = playerTable(u.players, u.elos, /* showElo */ true, id => this.openPlayer(id));
     body.appendChild(table);
+  }
+
+  // ---- Player page ----
+
+  private renderPlayer(body: HTMLElement) {
+    if (!this.universe || !this.activePlayerId) {
+      this.screen = this.playerReturnScreen;
+      this.render();
+      return;
+    }
+    const u = this.universe;
+    const p = u.players.find(x => x.id === this.activePlayerId);
+    if (!p) {
+      this.screen = this.playerReturnScreen;
+      this.render();
+      return;
+    }
+    body.appendChild(playerPage(p, u));
   }
 }
 
@@ -434,16 +517,18 @@ function rosterColumn(
   for (const p of players) {
     const row = document.createElement("div");
     row.className = "umc-roster-row";
-    row.innerHTML = `<span class="umc-name">${escapeHtml(shortName(p))}</span><span class="umc-elo">${Math.round(elos[p.id] ?? STARTING_ELO)}</span>`;
+    row.innerHTML = `<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span><span class="umc-elo">${Math.round(elos[p.id] ?? STARTING_ELO)}</span>`;
     col.appendChild(row);
   }
   return col;
 }
 
-type SortKey = "name" | "role" | "elo" | "aim" | "mechanical" | "cognitive" | "mental" | "utility" | "leader" | "overall";
+type SortKey = "name" | "country" | "age" | "role" | "elo" | "aim" | "mechanical" | "cognitive" | "mental" | "utility" | "leader" | "overall";
 
 const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Player, elo: number) => number | string }[] = [
   { key: "name",       label: "Name",      getter: (p) => p.name },
+  { key: "country",    label: "From",      getter: (p) => p.country },
+  { key: "age",        label: "Age",       getter: (p) => p.age },
   { key: "role",       label: "Role",      getter: (p) => p.role },
   { key: "elo",        label: "Elo", needsElo: true, getter: (_p, e) => Math.round(e) },
   { key: "aim",        label: "Aim",       getter: (p) => avgStats(p, ["accuracy", "crosshairPlacement", "tapping", "flickAim", "sprayControl"]) },
@@ -455,7 +540,12 @@ const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Pl
   { key: "overall",    label: "OVR",       getter: (p) => Math.round(avgStats(p, ["accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe","reflexes","handSpeed","movement","jiggle","mapAwareness","positioning","gameSense","timing","adaptability","composure","aggression","patience","discipline","recovery","utility","smokeLineups","flashTiming","molotovUse"])) },
 ];
 
-function playerTable(players: Player[], elos: Record<string, number>, showElo: boolean): HTMLElement {
+function playerTable(
+  players: Player[],
+  elos: Record<string, number>,
+  showElo: boolean,
+  onPick?: (playerId: string) => void,
+): HTMLElement {
   let sortKey: SortKey = showElo ? "elo" : "overall";
   let sortDir: 1 | -1 = -1;
 
@@ -493,12 +583,26 @@ function playerTable(players: Player[], elos: Record<string, number>, showElo: b
     const tbody = document.createElement("tbody");
     for (const p of sorted) {
       const tr = document.createElement("tr");
+      if (onPick) {
+        tr.classList.add("clickable-row");
+        tr.onclick = () => onPick(p.id);
+      }
       for (const col of COLUMNS) {
         if (col.needsElo && !showElo) continue;
         const td = document.createElement("td");
         const v = col.getter(p, elos[p.id] ?? STARTING_ELO);
-        td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
+        if (col.key === "country") {
+          td.innerHTML = `<span class="flag">${flagEmoji(p.country)}</span> ${escapeHtml(p.country)}`;
+          td.className = "country-cell";
+        } else {
+          td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
+        }
         if (col.key === "name") td.className = "name-cell";
+        // Color-code stat ratings on a red→yellow→green gradient. Elo, age,
+        // country, name, and role stay uncolored — they aren't 0-100 ratings.
+        if (typeof v === "number" && col.key !== "elo" && col.key !== "age") {
+          td.style.color = ratingColor(v);
+        }
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -509,6 +613,14 @@ function playerTable(players: Player[], elos: Record<string, number>, showElo: b
 
   renderTable();
   return wrap;
+}
+
+// Map a 0-100 rating to a red→yellow→green background. Stats here cluster in
+// roughly 30-90, so anchor the gradient between those for stronger contrast.
+function ratingColor(v: number): string {
+  const t = Math.max(0, Math.min(1, (v - 30) / 60));
+  const hue = t * 120; // 0 = red, 60 = yellow, 120 = green
+  return `hsl(${hue}, 75%, 62%)`;
 }
 
 function avgStats(p: Player, keys: string[]): number {
@@ -524,6 +636,368 @@ function shortName(p: Player): string {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise(r => requestAnimationFrame(() => r()));
+}
+
+function makeSimOverlay(total: number): { el: HTMLElement; update: (done: number) => void } {
+  const el = document.createElement("div");
+  el.className = "universe-sim-overlay";
+  el.innerHTML = `
+    <div class="usim-card">
+      <div class="usim-title">Simulating…</div>
+      <div class="usim-bar"><div class="usim-fill"></div></div>
+      <div class="usim-count">0 / ${total} days</div>
+    </div>`;
+  const fill = el.querySelector(".usim-fill") as HTMLElement;
+  const count = el.querySelector(".usim-count") as HTMLElement;
+  return {
+    el,
+    update(done: number) {
+      const pct = Math.min(100, Math.round((done / total) * 100));
+      fill.style.width = `${pct}%`;
+      count.textContent = `${done} / ${total} days`;
+    },
+  };
+}
+
+// Stat groupings used by both the table summary columns and the player page.
+const STAT_GROUPS: { label: string; keys: (keyof import("../domain/types.ts").PlayerStats)[] }[] = [
+  { label: "Aim",        keys: ["accuracy", "crosshairPlacement", "sprayControl", "tapping", "flickAim", "counterStrafe"] },
+  { label: "Mechanical", keys: ["reflexes", "handSpeed", "movement", "jiggle"] },
+  { label: "Cognitive",  keys: ["mapAwareness", "positioning", "gameSense", "timing", "adaptability"] },
+  { label: "Mental",     keys: ["composure", "aggression", "patience", "discipline", "recovery"] },
+  { label: "Utility",    keys: ["utility", "smokeLineups", "flashTiming", "molotovUse"] },
+  { label: "Team",       keys: ["igl", "communication"] },
+  { label: "Weapon prefs", keys: ["pistolPref", "riflePref", "awpPref", "smgPref"] },
+];
+
+function playerPage(p: Player, u: Universe): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "universe-player-page";
+
+  const elo = Math.round(u.elos[p.id] ?? STARTING_ELO);
+  const log = buildGameLog(p.id, u);
+  const career = summarizeCareer(log);
+  const clutchBuckets = summarizeClutches(log);
+  const totalClutches = clutchBuckets.reduce((s, b) => s + b.count, 0);
+
+  // ----- Header -----
+  const header = document.createElement("div");
+  header.className = "upp-header";
+  header.innerHTML = `
+    <div class="upp-identity">
+      <div class="upp-flag">${flagEmoji(p.country)}</div>
+      <div>
+        <div class="upp-name">${escapeHtml(p.name)}</div>
+        <div class="upp-handle">"${escapeHtml(p.handle)}"</div>
+        <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}</div>
+      </div>
+    </div>
+    <div class="upp-headline-stats">
+      <div class="upp-hl"><div class="upp-hl-label">Elo</div><div class="upp-hl-val">${elo}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Matches</div><div class="upp-hl-val">${career.played}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Record</div><div class="upp-hl-val">${career.wins}-${career.losses}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Win %</div><div class="upp-hl-val">${career.played > 0 ? Math.round((career.wins / career.played) * 100) : 0}%</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Rounds</div><div class="upp-hl-val">${career.roundsWon}-${career.roundsLost}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Round diff</div><div class="upp-hl-val">${career.roundDiff >= 0 ? "+" : ""}${career.roundDiff}</div></div>
+      ${career.hasStats ? `
+        <div class="upp-hl"><div class="upp-hl-label">K / D / A</div><div class="upp-hl-val">${career.kills} / ${career.deaths} / ${career.assists}</div></div>
+        <div class="upp-hl"><div class="upp-hl-label">ADR</div><div class="upp-hl-val">${career.adr !== null ? career.adr.toFixed(1) : "—"}</div></div>
+        <div class="upp-hl"><div class="upp-hl-label">Rating</div><div class="upp-hl-val" style="color:${(career.rating ?? 0) >= 1 ? "var(--good)" : "var(--bad)"}">${career.rating !== null ? career.rating.toFixed(2) : "—"}</div></div>
+      ` : ""}
+    </div>
+  `;
+  root.appendChild(header);
+
+  // ----- Traits -----
+  const traits = document.createElement("div");
+  traits.className = "upp-traits";
+  if (p.traits.length === 0) {
+    traits.innerHTML = `<span class="upp-trait-empty">No notable traits</span>`;
+  } else {
+    for (const t of p.traits) {
+      const chip = document.createElement("span");
+      chip.className = "upp-trait";
+      chip.textContent = t;
+      traits.appendChild(chip);
+    }
+  }
+  root.appendChild(traits);
+
+  // ----- Dynamic state (money/mood/morale) -----
+  const dyn = document.createElement("div");
+  dyn.className = "upp-dyn";
+  dyn.innerHTML = `
+    <div class="upp-dyn-item"><span>Money</span><b>$${p.money}</b></div>
+    <div class="upp-dyn-item"><span>Mood</span><b style="color:${ratingColor(p.mood)}">${Math.round(p.mood)}</b></div>
+    <div class="upp-dyn-item"><span>Morale</span><b style="color:${ratingColor(p.morale)}">${Math.round(p.morale)}</b></div>
+    <div class="upp-dyn-item"><span>CT assignment</span><b>${p.ctAssignment}</b></div>
+  `;
+  root.appendChild(dyn);
+
+  // ----- Stat groups -----
+  const grid = document.createElement("div");
+  grid.className = "upp-stat-grid";
+  const statsObj = p.stats as unknown as Record<string, number>;
+  for (const g of STAT_GROUPS) {
+    const card = document.createElement("div");
+    card.className = "upp-stat-card";
+    const title = document.createElement("div");
+    title.className = "upp-stat-title";
+    title.textContent = g.label;
+    card.appendChild(title);
+    for (const k of g.keys) {
+      const v = statsObj[k as string] ?? 0;
+      const row = document.createElement("div");
+      row.className = "upp-stat-row";
+      row.innerHTML = `
+        <span class="upp-stat-key">${escapeHtml(prettifyKey(k as string))}</span>
+        <span class="upp-stat-bar"><span class="upp-stat-fill" style="width:${Math.max(0, Math.min(100, v))}%;background:${ratingColor(v)}"></span></span>
+        <span class="upp-stat-val" style="color:${ratingColor(v)}">${Math.round(v)}</span>
+      `;
+      card.appendChild(row);
+    }
+    grid.appendChild(card);
+  }
+  root.appendChild(grid);
+
+  // ----- Relationships (only show non-zero, capped) -----
+  const rels = Object.entries(p.relationships ?? {}).filter(([, v]) => v !== 0);
+  if (rels.length > 0) {
+    const relsCard = document.createElement("div");
+    relsCard.className = "upp-rels";
+    const title = document.createElement("div");
+    title.className = "upp-stat-title";
+    title.textContent = "Relationships";
+    relsCard.appendChild(title);
+    const byId = new Map(u.players.map(x => [x.id, x] as const));
+    rels.sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 20).forEach(([id, v]) => {
+      const other = byId.get(id);
+      if (!other) return;
+      const row = document.createElement("div");
+      row.className = "upp-rel-row";
+      const color = v > 0 ? "var(--ct, #6ea6ff)" : "#e57373";
+      row.innerHTML = `<span>${escapeHtml(other.name)}</span><span style="color:${color}">${v > 0 ? "+" : ""}${v}</span>`;
+      relsCard.appendChild(row);
+    });
+    root.appendChild(relsCard);
+  }
+
+  // ----- Clutches -----
+  const clutchCard = document.createElement("div");
+  clutchCard.className = "upp-clutches";
+  const clutchTitle = document.createElement("div");
+  clutchTitle.className = "upp-stat-title";
+  clutchTitle.textContent = `Clutches (${totalClutches})`;
+  clutchCard.appendChild(clutchTitle);
+  if (totalClutches === 0) {
+    const empty = document.createElement("div");
+    empty.className = "upp-gamelog-empty";
+    empty.textContent = "No clutches yet.";
+    clutchCard.appendChild(empty);
+  } else {
+    const row = document.createElement("div");
+    row.className = "upp-clutch-row";
+    for (const b of clutchBuckets) {
+      const cell = document.createElement("div");
+      cell.className = "upp-clutch-cell";
+      cell.innerHTML = `<div class="upp-clutch-label">${escapeHtml(b.label)}</div><div class="upp-clutch-val">${b.count}</div>`;
+      row.appendChild(cell);
+    }
+    clutchCard.appendChild(row);
+  }
+  root.appendChild(clutchCard);
+
+  // ----- Game log -----
+  const logCard = document.createElement("div");
+  logCard.className = "upp-gamelog";
+  const logTitle = document.createElement("div");
+  logTitle.className = "upp-stat-title";
+  logTitle.textContent = `Game log (${log.length})`;
+  logCard.appendChild(logTitle);
+
+  if (log.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "upp-gamelog-empty";
+    empty.textContent = "No matches played yet.";
+    logCard.appendChild(empty);
+  } else {
+    const table = document.createElement("table");
+    table.className = "upp-gamelog-table";
+    table.innerHTML = `<thead><tr>
+      <th>Day</th><th>Side</th><th>Score</th><th>Result</th><th>Opponent</th>
+      <th>K</th><th>D</th><th>A</th><th>DMG</th><th>ADR</th><th>Rating</th>
+      <th>Clutch</th>
+    </tr></thead>`;
+    const tbody = document.createElement("tbody");
+    const byId = new Map(u.players.map(x => [x.id, x] as const));
+    for (const g of log) {
+      const tr = document.createElement("tr");
+      const opp = g.opponentIds.map(id => byId.get(id)).filter((x): x is Player => !!x);
+      const oppCaptain = [...opp].sort((a, b) => {
+        const da = u.elos[a.id] ?? STARTING_ELO;
+        const db = u.elos[b.id] ?? STARTING_ELO;
+        if (db !== da) return db - da;
+        return a.id.localeCompare(b.id);
+      })[0];
+      const oppLabel = oppCaptain ? `Team ${shortName(oppCaptain)}` : "—";
+      const sideClass = g.side === "CT" ? "ct" : "t";
+      const resultClass = g.won ? "good" : "bad";
+      const clutchLabel = g.clutches.length
+        ? g.clutches.map(k => `1v${k}`).join(", ")
+        : "";
+      const s = g.stats;
+      const adr = s && s.roundsPlayed > 0 ? s.damage / s.roundsPlayed : null;
+      const rating = s ? hltvRating1(s) : null;
+      const numCell = (v: number | null, digits = 0) =>
+        v === null ? `<td class="upp-gl-stat upp-gl-missing">—</td>`
+                   : `<td class="upp-gl-stat">${digits === 0 ? Math.round(v) : v.toFixed(digits)}</td>`;
+      const ratingCell = rating === null
+        ? `<td class="upp-gl-stat upp-gl-missing">—</td>`
+        : `<td class="upp-gl-stat upp-gl-rating" style="color:${rating >= 1 ? "var(--good)" : "var(--bad)"}">${rating.toFixed(2)}</td>`;
+      tr.innerHTML = `
+        <td>${g.day}</td>
+        <td class="upp-gl-side ${sideClass}">${g.side}</td>
+        <td class="upp-gl-score"><b>${g.ownScore}</b> : ${g.oppScore}</td>
+        <td class="upp-gl-result ${resultClass}">${g.won ? "W" : "L"}</td>
+        <td>${escapeHtml(oppLabel)}</td>
+        ${numCell(s?.kills ?? null)}
+        ${numCell(s?.deaths ?? null)}
+        ${numCell(s?.assists ?? null)}
+        ${numCell(s?.damage ?? null)}
+        ${numCell(adr, 1)}
+        ${ratingCell}
+        <td class="upp-gl-clutch">${clutchLabel}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    logCard.appendChild(table);
+  }
+  root.appendChild(logCard);
+
+  // ----- Raw JSON (collapsed) for debugging while we iterate -----
+  const details = document.createElement("details");
+  details.className = "upp-raw";
+  const summary = document.createElement("summary");
+  summary.textContent = "Raw player data";
+  details.appendChild(summary);
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(p, null, 2);
+  details.appendChild(pre);
+  root.appendChild(details);
+
+  return root;
+}
+
+interface GameLogEntry {
+  day: number;
+  side: "CT" | "T";
+  ownScore: number;
+  oppScore: number;
+  won: boolean;
+  opponentIds: string[];
+  clutches: number[];        // per-clutch kill counts (e.g. [2, 3] = 1v2 + 1v3)
+  stats: import("./types.ts").PlayerMatchStats | null;
+}
+
+// HLTV 1.0 rating from per-match stats. Constants are the league averages used
+// in the original formula. Returns 0 if the player did not play any rounds.
+function hltvRating1(s: import("./types.ts").PlayerMatchStats): number {
+  const R = s.roundsPlayed;
+  if (R <= 0) return 0;
+  const kr = (s.kills / R) / 0.679;
+  const sr = ((R - s.deaths) / R) / 0.317;
+  const mkr = (s.k1 + 4 * s.k2 + 9 * s.k3 + 16 * s.k4 + 25 * s.k5) / R / 1.277;
+  return (kr + 0.7 * sr + mkr) / 2.7;
+}
+
+function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
+  const out: GameLogEntry[] = [];
+  for (const day of u.history) {
+    for (const m of day.matchups) {
+      if (m.status !== "completed" || !m.winnerSide
+          || m.ctScore === undefined || m.tScore === undefined) continue;
+      const onCt = m.ctPlayerIds.includes(playerId);
+      const onT  = m.tPlayerIds.includes(playerId);
+      if (!onCt && !onT) continue;
+      const side: "CT" | "T" = onCt ? "CT" : "T";
+      const ownScore = onCt ? m.ctScore : m.tScore;
+      const oppScore = onCt ? m.tScore : m.ctScore;
+      const clutches = (m.clutches ?? [])
+        .filter(c => c.playerId === playerId)
+        .map(c => c.kills);
+      out.push({
+        day: day.day,
+        side,
+        ownScore,
+        oppScore,
+        won: (onCt && m.winnerSide === "CT") || (onT && m.winnerSide === "T"),
+        opponentIds: onCt ? m.tPlayerIds : m.ctPlayerIds,
+        clutches,
+        stats: m.playerStats?.[playerId] ?? null,
+      });
+    }
+  }
+  // Most recent first.
+  out.sort((a, b) => b.day - a.day);
+  return out;
+}
+
+// Group clutches into 1v1..1v5 buckets by the number of kills the player got
+// while last alive. Any clutch with 0 kills (e.g. T-side clutch where the bomb
+// detonates) is bucketed as 1v0 only if present.
+function summarizeClutches(log: GameLogEntry[]): { label: string; count: number }[] {
+  const counts = new Map<number, number>();
+  for (const g of log) {
+    for (const k of g.clutches) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const keys = [...counts.keys()].sort((a, b) => a - b);
+  return keys.map(k => ({ label: `1v${k}`, count: counts.get(k)! }));
+}
+
+function summarizeCareer(log: GameLogEntry[]) {
+  let wins = 0, losses = 0, roundsWon = 0, roundsLost = 0;
+  let kills = 0, deaths = 0, assists = 0, damage = 0, rounds = 0;
+  let k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;
+  let matchesWithStats = 0;
+  for (const g of log) {
+    if (g.won) wins++; else losses++;
+    roundsWon += g.ownScore;
+    roundsLost += g.oppScore;
+    if (g.stats) {
+      matchesWithStats++;
+      kills += g.stats.kills;
+      deaths += g.stats.deaths;
+      assists += g.stats.assists;
+      damage += g.stats.damage;
+      rounds += g.stats.roundsPlayed;
+      k1 += g.stats.k1; k2 += g.stats.k2; k3 += g.stats.k3;
+      k4 += g.stats.k4; k5 += g.stats.k5;
+    }
+  }
+  const rating = matchesWithStats > 0
+    ? hltvRating1({ kills, deaths, assists, damage, roundsPlayed: rounds, k1, k2, k3, k4, k5 })
+    : null;
+  return {
+    played: log.length,
+    wins,
+    losses,
+    roundsWon,
+    roundsLost,
+    roundDiff: roundsWon - roundsLost,
+    kills, deaths, assists, damage, rounds,
+    adr: rounds > 0 ? damage / rounds : null,
+    rating,
+    hasStats: matchesWithStats > 0,
+  };
+}
+
+function prettifyKey(k: string): string {
+  return k.replace(/([A-Z])/g, " $1").replace(/^./, c => c.toUpperCase());
 }
 
 function btn(label: string, cls: string, onClick: () => void): HTMLButtonElement {
