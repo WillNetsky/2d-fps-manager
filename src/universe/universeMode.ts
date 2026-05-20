@@ -1,5 +1,5 @@
 import type { GameMap, Player } from "../domain/types.ts";
-import { makeMap, makePlayer, setSeed } from "../domain/factory.ts";
+import { makePlayer, setSeed } from "../domain/factory.ts";
 import { flagEmoji } from "../domain/countries.ts";
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
@@ -283,7 +283,7 @@ export class UniverseMode {
       history: [],
       pendingDay: null,
       // Start with one map in rotation — settings tab lets the user add more.
-      maps: [loadCustomMap() ?? makeMap()],
+      maps: [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])],
     };
     this.persist();
     this.screen = "players";
@@ -295,7 +295,7 @@ export class UniverseMode {
     if (!u) return;
     // Migrate older saves that predate the universe-level map / map rotation.
     if (!u.maps || u.maps.length === 0) {
-      u.maps = [u.map ?? loadCustomMap() ?? makeMap()];
+      u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     }
     delete u.map;
     // Older saves may have rolled a day into history without generating the
@@ -401,7 +401,7 @@ export class UniverseMode {
   private runInstantSim(m: Matchup) {
     if (!this.universe) return;
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
       m.mapIndex = Math.floor(Math.random() * u.maps.length);
     }
@@ -440,7 +440,7 @@ export class UniverseMode {
     const m = this.findMatchup(this.activeMatchupId);
     if (!m) { this.screen = "matchups"; this.render(); return; }
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
       m.mapIndex = Math.floor(Math.random() * u.maps.length);
     }
@@ -566,7 +566,7 @@ export class UniverseMode {
   private renderSettings(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
 
     const wrap = document.createElement("div");
     wrap.className = "universe-settings";
@@ -620,10 +620,6 @@ export class UniverseMode {
         label: m.name,
         map: () => deepCloneMap(m),
       })),
-    });
-    sources.push({
-      group: "Default",
-      items: [{ key: "default", label: "de_dust2_legally_distinct", map: () => makeMap() }],
     });
     const saved = loadSavedMapsAll();
     const savedNames = Object.keys(saved).sort();
