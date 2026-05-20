@@ -175,21 +175,15 @@ export class UniverseMode {
     right.className = "universe-topbar-right";
 
     if (this.screen === "players" && this.universe) {
-      const cont = btn("Continue to matchups →", "primary", () => this.startDay());
-      right.appendChild(cont);
-    } else if (DAY_TABS.includes(this.screen) && this.universe) {
-      const u = this.universe;
-      if (u.pendingDay) {
-        const allDone = u.pendingDay.matchups.every(m => m.status === "completed");
-        const label = allDone ? "Finish day →" : "Sim all remaining + continue →";
-        right.appendChild(btn(label, "primary", () => this.continueFromMatchups()));
+      right.appendChild(btn("Continue to universe →", "primary", () => this.startDay()));
+    } else if (DAY_TABS.includes(this.screen) && this.universe && this.universe.pendingDay) {
+      right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
+      const allDone = this.universe.pendingDay.matchups.every(m => m.status === "completed");
+      if (allDone) {
+        right.appendChild(btn("Continue →", "primary", () => this.continueFromMatchups()));
       } else {
-        right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
-        right.appendChild(btn("Next day →", "primary", () => this.nextDay()));
+        right.appendChild(btn("Sim all remaining", "primary", () => this.simRemaining()));
       }
-    } else if (this.screen === "players" && this.universe && this.universe.history.length === 0) {
-      // Allow skipping ahead from the initial roster screen too.
-      right.insertBefore(btn("Sim X days", "", () => this.simManyDays()), right.firstChild);
     } else if (this.screen === "player" && this.universe) {
       right.appendChild(btn("← Back", "", () => {
         this.screen = this.playerReturnScreen;
@@ -296,12 +290,14 @@ export class UniverseMode {
     if (!u) return;
     // Migrate older saves that predate the universe-level map.
     if (!u.map) u.map = loadCustomMap() ?? makeMap();
+    // Older saves may have rolled a day into history without generating the
+    // next day's matchups. The day view now always expects a pendingDay, so
+    // backfill one before rendering.
+    if (!u.pendingDay && u.history.length > 0) {
+      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+    }
     this.universe = u;
-    // Resume on the relevant screen: pending matchups → matchups, otherwise
-    // standings if any days have been played, else the initial roster view.
-    if (u.pendingDay) this.screen = "matchups";
-    else if (u.history.length > 0) this.screen = "standings";
-    else this.screen = "players";
+    this.screen = u.pendingDay ? "matchups" : "players";
     this.render();
   }
 
@@ -314,7 +310,7 @@ export class UniverseMode {
   private renderPlayers(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
-    const table = playerTable(u.players, u.elos, /* showElo */ false, id => this.openPlayer(id));
+    const table = playerTable(u.players, u.elos, /* showElo */ true, id => this.openPlayer(id));
     body.appendChild(table);
   }
 
@@ -468,20 +464,29 @@ export class UniverseMode {
     });
   }
 
-  private continueFromMatchups() {
+  // Headless-sim every still-pending matchup of the current day. Leaves the
+  // user on their current tab so they can review the results.
+  private simRemaining() {
     if (!this.universe || !this.universe.pendingDay) return;
-    // Auto-sim any remaining pending matchups.
     for (const m of this.universe.pendingDay.matchups) {
       if (m.status !== "completed") this.runInstantSim(m);
     }
-    // Roll completed matchups into history and clear pending.
-    this.universe.history.push({
-      day: this.universe.pendingDay.day,
-      matchups: this.universe.pendingDay.matchups,
-    });
-    this.universe.pendingDay = null;
     this.persist();
-    this.screen = "standings";
+    this.render();
+  }
+
+  // Roll the (fully-completed) current day into history and start the next
+  // day's matchups. The universe always has a pendingDay while in the day
+  // view, so the user is dropped straight back onto the Matchups tab.
+  private continueFromMatchups() {
+    if (!this.universe || !this.universe.pendingDay) return;
+    const u = this.universe;
+    const done = u.pendingDay!;
+    u.history.push({ day: done.day, matchups: done.matchups });
+    u.day++;
+    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+    this.persist();
+    this.screen = "matchups";
     this.render();
   }
 
@@ -510,25 +515,20 @@ export class UniverseMode {
       u.pendingDay = null;
       u.day++;
 
-      // Yield to the browser every few days so the progress bar updates and
-      // the page stays responsive. Tuned so even 1000 days feels live.
-      if (i % 3 === 0 || i === capped - 1) {
-        overlay.update(i + 1);
-        await nextFrame();
-      }
+      // Yield to the browser every day so the progress bar updates smoothly.
+      overlay.update(i + 1);
+      await nextFrame();
     }
 
+    // Drop the user into the next day's pending matchups so the day view
+    // always has something to act on.
+    if (!u.pendingDay) {
+      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+    }
     this.persist();
     overlay.el.remove();
-    this.screen = "standings";
+    this.screen = "matchups";
     this.render();
-  }
-
-  private nextDay() {
-    if (!this.universe) return;
-    this.universe.day++;
-    this.persist();
-    this.startDay();
   }
 
   // ---- Standings (player ratings) screen ----
@@ -837,11 +837,11 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
         const rate = Math.round((b.wins / b.attempts) * 100);
         return `<span>${b.wins}/${b.attempts}</span> <span class="upp-gl-missing" style="font-size:11px">${rate}%</span>`;
       },
-      // Sort primarily by conversion rate, then by attempts (more attempts wins ties).
+      // Sort by total successful clutches in this bucket; tiebreak by attempts.
       cmp: (a: CareerRow, b2: CareerRow) => {
-        const ra = a.clutchBuckets[bn - 1].attempts > 0 ? a.clutchBuckets[bn - 1].wins / a.clutchBuckets[bn - 1].attempts : -1;
-        const rb = b2.clutchBuckets[bn - 1].attempts > 0 ? b2.clutchBuckets[bn - 1].wins / b2.clutchBuckets[bn - 1].attempts : -1;
-        if (ra !== rb) return ra - rb;
+        const wa = a.clutchBuckets[bn - 1].wins;
+        const wb = b2.clutchBuckets[bn - 1].wins;
+        if (wa !== wb) return wa - wb;
         return a.clutchBuckets[bn - 1].attempts - b2.clutchBuckets[bn - 1].attempts;
       },
     })),
