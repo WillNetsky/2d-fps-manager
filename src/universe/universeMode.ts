@@ -633,14 +633,6 @@ export class UniverseMode {
         })),
       });
     }
-    const draft = loadCustomMap();
-    if (draft) {
-      sources.push({
-        group: "Editor draft",
-        items: [{ key: "draft", label: draft.name || "Current draft", map: () => deepCloneMap(draft) }],
-      });
-    }
-
     const addRow = document.createElement("div");
     addRow.className = "universe-map-add";
     const select = document.createElement("select");

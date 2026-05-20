@@ -1,6 +1,6 @@
 import type { GameMap } from "../domain/types.ts";
-import { makeMap } from "../domain/factory.ts";
-import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
+import { loadSavedMapsAll } from "../editor/mapEditor.ts";
+import { builtinMaps } from "../domain/builtinMaps.ts";
 import BalanceWorker from "./balanceWorker.ts?worker";
 import type {
   BalanceMatrixResult, BalanceProgress, BalanceRequest, BalanceResult,
@@ -41,19 +41,33 @@ export class BalanceMode {
     sidebar.appendChild(mapLabel);
     this.mapSelect = document.createElement("select");
     this.mapSelect.className = "balance-select";
+    // Two groups: shipped built-ins and named maps the user has saved in the
+    // editor. The editor's in-progress draft isn't a testable map — save it
+    // first to make it appear here.
+    const builtins = builtinMaps();
     const savedMaps = loadSavedMapsAll();
-    const opts = [{ key: "__default__", label: "Default (built-in)" }];
-    if (localStorage.getItem("2d-fps-manager-custom-map")) {
-      opts.push({ key: "__active__", label: "Active custom map" });
-    }
-    for (const name of Object.keys(savedMaps).sort()) opts.push({ key: name, label: name });
-    for (const o of opts) {
+    const savedNames = Object.keys(savedMaps).sort();
+    const builtinGroup = document.createElement("optgroup");
+    builtinGroup.label = "Built-in";
+    for (const m of builtins) {
       const opt = document.createElement("option");
-      opt.value = o.key;
-      opt.textContent = o.label;
-      this.mapSelect.appendChild(opt);
+      opt.value = `b:${m.name}`;
+      opt.textContent = m.name;
+      builtinGroup.appendChild(opt);
     }
-    if (opts.find(o => o.key === "__active__")) this.mapSelect.value = "__active__";
+    this.mapSelect.appendChild(builtinGroup);
+    if (savedNames.length > 0) {
+      const savedGroup = document.createElement("optgroup");
+      savedGroup.label = "Saved";
+      for (const name of savedNames) {
+        const opt = document.createElement("option");
+        opt.value = `s:${name}`;
+        opt.textContent = name;
+        savedGroup.appendChild(opt);
+      }
+      this.mapSelect.appendChild(savedGroup);
+      this.mapSelect.value = `s:${savedNames[0]}`;
+    }
     sidebar.appendChild(this.mapSelect);
 
     // Rounds
@@ -177,10 +191,17 @@ export class BalanceMode {
 
   private pickMap(): GameMap {
     const key = this.mapSelect.value;
-    if (key === "__default__") return makeMap();
-    if (key === "__active__") return loadCustomMap() ?? makeMap();
-    const saved = loadSavedMapsAll()[key];
-    return saved ? JSON.parse(JSON.stringify(saved)) as GameMap : makeMap();
+    if (key.startsWith("b:")) {
+      const name = key.slice(2);
+      const m = builtinMaps().find(x => x.name === name) ?? builtinMaps()[0];
+      return JSON.parse(JSON.stringify(m)) as GameMap;
+    }
+    if (key.startsWith("s:")) {
+      const name = key.slice(2);
+      const saved = loadSavedMapsAll()[name];
+      if (saved) return JSON.parse(JSON.stringify(saved)) as GameMap;
+    }
+    return JSON.parse(JSON.stringify(builtinMaps()[0])) as GameMap;
   }
 
   private worker: Worker | null = null;
