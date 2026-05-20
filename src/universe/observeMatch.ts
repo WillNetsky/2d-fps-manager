@@ -97,7 +97,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   if (opts.isReplay) {
     const prevBtn = document.createElement("button");
     prevBtn.className = "speed-btn";
-    prevBtn.textContent = "⏮ Prev round";
+    prevBtn.textContent = "⏮ Prev";
     prevBtn.onclick = () => {
       paused = false;
       jumpToRound(roundNumber - 1);
@@ -106,7 +106,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
     const nextBtn = document.createElement("button");
     nextBtn.className = "speed-btn";
-    nextBtn.textContent = "Next round ⏭";
+    nextBtn.textContent = "Next ⏭";
     nextBtn.onclick = () => {
       // First click on a fresh paused round → resume that round.
       // Otherwise advance to the next round.
@@ -123,13 +123,13 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
   const skipBtn = document.createElement("button");
   skipBtn.className = "speed-btn";
-  skipBtn.textContent = "⏭ End round";
+  skipBtn.textContent = "End round";
   skipBtn.onclick = () => skipRound();
   controls.appendChild(skipBtn);
 
   const finishBtn = document.createElement("button");
   finishBtn.className = "speed-btn";
-  finishBtn.textContent = "⏭⏭ Sim rest";
+  finishBtn.textContent = "Sim rest";
   finishBtn.onclick = () => { simRestInstantly = true; skipRound(); };
   controls.appendChild(finishBtn);
 
@@ -236,12 +236,14 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
   function paintHud() {
     const half = roundNumber <= HALFTIME_ROUND ? 1 : 2;
-    // Score is tracked per original team identity, not by current side, so the
-    // labels stay stable across halftime.
+    // Color follows the side each team is *currently* playing: whichever
+    // team is on CT this half gets the CT color, etc. Team names stay
+    // attached to their team identity so the scoreboard still tracks
+    // "Team X has N wins" correctly across the halftime swap.
     hud.innerHTML =
-      `<span class="ct">${ct.name} ${ct.roundsWon}</span>` +
+      `<span class="ct">${escapeHtmlObs(ctSide.name)} ${ctSide.roundsWon}</span>` +
       `<span class="sep">R${roundNumber} · H${half}</span>` +
-      `<span class="t">${tSide.roundsWon} ${tSide.name}</span>`;
+      `<span class="t">${tSideRef.roundsWon} ${escapeHtmlObs(tSideRef.name)}</span>`;
   }
 
   function startRound() {
@@ -618,6 +620,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 }
 
 // ---- Round MVP ----
+
+function escapeHtmlObs(s: string): string {
+  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
+}
 
 function pickRoundMvp(r: import("../domain/types.ts").RoundResult, winner: Team): string | null {
   const kills = new Map<string, number>();

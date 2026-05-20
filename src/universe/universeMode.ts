@@ -94,8 +94,8 @@ export class UniverseMode {
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
     const back = () => this.exitReplay();
     await observeMatch(body, {
-      ctName: "CT-side",
-      tName: "T-side",
+      ctName: teamNameFor(ctPlayers, u.elos),
+      tName:  teamNameFor(tPlayers,  u.elos),
       ctPlayers, tPlayers,
       map,
       seed: m.seed,
@@ -501,8 +501,8 @@ export class UniverseMode {
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
 
     await observeMatch(body, {
-      ctName: "CT-side",
-      tName: "T-side",
+      ctName: teamNameFor(ctPlayers, u.elos),
+      tName:  teamNameFor(tPlayers,  u.elos),
       ctPlayers, tPlayers, map,
       seed: m.seed,
       onDone: (result) => {
@@ -779,6 +779,20 @@ function generateMatchups(players: Player[], elos: Record<string, number>, mapCo
 
 function newSeed(): number {
   return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+// Faceit-style team name: the highest-elo player in the lineup names the
+// team. Stable tiebreak by id so the name doesn't drift if elos happen to
+// tie. Mirrors rosterColumn's captain-pick logic used on the matchups grid.
+function teamNameFor(players: Player[], elos: Record<string, number>): string {
+  if (players.length === 0) return "Team";
+  const captain = [...players].sort((a, b) => {
+    const da = elos[a.id] ?? STARTING_ELO;
+    const db = elos[b.id] ?? STARTING_ELO;
+    if (db !== da) return db - da;
+    return a.id.localeCompare(b.id);
+  })[0];
+  return `Team ${shortName(captain)}`;
 }
 
 // Deep-clone a map so adding the same source twice doesn't share mutable
@@ -1569,14 +1583,19 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
       const ownScore = onCt ? m.ctScore : m.tScore;
       const oppScore = onCt ? m.tScore : m.ctScore;
       const myClutches = (m.clutches ?? []).filter(c => c.playerId === playerId);
-      // Only successful clutches show in the game log (you can replay them).
-      // Legacy entries (no `won` field) are treated as successful.
-      const clutches = myClutches
-        .filter(c => c.won !== false)
-        .map(c => ({ kills: c.kills, round: c.round }));
+      // Re-derive whether each clutch attempt was actually converted from
+      // data we always have: the player's side this match and the match
+      // winner. The saved `won` field is treated as advisory only — legacy
+      // entries don't have it, and we've seen cases where the algorithm
+      // recorded `won: true` despite the player dying / their side losing.
+      const playerSide: "CT" | "T" = onCt ? "CT" : "T";
+      const won = playerSide === m.winnerSide;
+      const clutches = won
+        ? myClutches.map(c => ({ kills: c.kills, round: c.round }))
+        : [];
       const clutchAttempts = myClutches.map(c => ({
         bucket: clutchBucket(c),
-        won: c.won !== false,
+        won,
         round: c.round,
       }));
       out.push({

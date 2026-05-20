@@ -1147,11 +1147,15 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .universe-canvas-host { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; width: 100%; }
 .universe-canvas-host canvas { display: block; max-width: 100%; max-height: 100%; }
-.universe-match-controls { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.universe-match-controls {
+  display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+  width: 100%; align-self: stretch;
+}
 .universe-match .replay { width: 100%; align-self: stretch; border-radius: 4px; border: 1px solid var(--line); }
 .universe-match-controls .speed-btn {
   background: var(--panel); border: 1px solid var(--line); color: var(--text);
-  border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+  border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  white-space: nowrap; line-height: 1.4;
 }
 .universe-match-controls .speed-btn:hover { border-color: var(--accent); color: var(--accent); }
 
