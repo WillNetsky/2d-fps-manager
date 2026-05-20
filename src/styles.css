@@ -1052,6 +1052,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   display: flex; justify-content: space-between; padding: 3px 6px;
   background: var(--panel-2); border-radius: 2px; font-size: 11px;
 }
+.umc-roster-row.clickable { cursor: pointer; }
+.umc-roster-row.clickable:hover { background: var(--panel); }
 .umc-name { font-weight: 500; flex: 1; }
 .umc-flag { margin-right: 6px; }
 .umc-elo { color: var(--muted); font-family: ui-monospace, monospace; }

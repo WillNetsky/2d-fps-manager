@@ -353,7 +353,7 @@ export class UniverseMode {
 
       const teams = document.createElement("div");
       teams.className = "umc-teams";
-      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m));
+      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id)));
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
@@ -365,7 +365,7 @@ export class UniverseMode {
         vs.textContent = "vs";
       }
       teams.appendChild(vs);
-      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m));
+      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id)));
       card.appendChild(teams);
 
       const actions = document.createElement("div");
@@ -611,6 +611,7 @@ function rosterColumn(
   byId: Map<string, Player>,
   elos: Record<string, number>,
   matchup: Matchup,
+  onPick?: (playerId: string) => void,
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
@@ -654,6 +655,12 @@ function rosterColumn(
       eloHtml += `<span class="${cls}">${sign}${Math.abs(delta)}</span>`;
     }
     row.innerHTML = `<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span>${eloHtml}`;
+    if (onPick) {
+      row.classList.add("clickable");
+      row.title = "View player";
+      const pid = p.id;
+      row.onclick = () => onPick(pid);
+    }
     col.appendChild(row);
   }
   return col;
