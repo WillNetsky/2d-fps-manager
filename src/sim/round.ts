@@ -37,15 +37,12 @@ const GRENADE_NOISE_PER_SKILL_GAP = 1.5; // px per (100 - skill)
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
 
-const INTEL_DECAY = 0.985;       // per tick (~26% / second)
-const INTEL_BUMP = 1;            // per visible enemy per tick
-const INTEL_CAP = 5;
-const INTEL_DOMINANCE = 1.0;     // diff to trigger rotation
+const INTEL_DOMINANCE = 1.0;     // radar-pressure diff to trigger rotation
 const ROTATE_MIN_T = 6000;       // don't rotate in first N ms of round
 const ROTATE_LOG_COOLDOWN = 4000;
 
+const LOS_REFRESH_MS = 200;      // min gap between successive LOS pings for the same enemy
 const HEARING_RANGE = 240;       // pixels — enemy footsteps audible within this
-const SOUND_INTEL_BUMP = 0.5;    // less precise than LOS sighting
 // Comms-gated callouts: a hearing agent broadcasts a perceived enemy POSITION
 // to their team. Lower communication → longer delay and a larger random
 // offset on the called position.
@@ -173,13 +170,15 @@ export class RoundSim {
   // perceived enemy *position* (noisy for low-comms callers) and lands on the
   // team radar at arrivesAt — until then the team doesn't know about it.
   private commsCalls: { side: Side; enemyId: string; pos: Vec2; arrivesAt: number }[] = [];
-  // Shared team radar — what each side "knows" about enemy positions right
-  // now. LOS sightings populate it instantly with true positions; comms
-  // callouts populate it after a delay with possibly-wrong positions. Both
-  // sources expire if nothing refreshes them.
-  perceived: Record<Side, Map<string, { pos: Vec2; at: number; source: "los" | "sound" }>> = {
-    CT: new Map(),
-    T: new Map(),
+  // Shared team radar — an accumulating trail of pings. Each ping is a
+  // time-stamped position the team perceived at that moment. LOS pings
+  // append actual positions (rate-limited per enemy so we don't add 20/sec);
+  // comms callouts append delayed, possibly-noisy positions. Pings expire
+  // after their source-dependent TTL, so the radar naturally fades as the
+  // team's knowledge ages.
+  perceived: Record<Side, { pos: Vec2; at: number; source: "los" | "sound"; enemyId: string }[]> = {
+    CT: [],
+    T: [],
   };
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
@@ -622,31 +621,37 @@ export class RoundSim {
 
   // ---- Intel / shared radar ----
   private updateIntel() {
-    // Decay site scores (kept around as a derived rotation signal).
+    // Expire radar pings whose source TTL has elapsed. Older pings stay on
+    // the radar until then, so the team's perception is the *trail* of pings
+    // rather than a single current pin per enemy.
     for (const side of ["CT", "T"] as const) {
-      this.intel[side].A.score *= INTEL_DECAY;
-      this.intel[side].B.score *= INTEL_DECAY;
-      // Expire radar pings whose source TTL has elapsed.
-      for (const [id, entry] of this.perceived[side]) {
-        const ttl = entry.source === "los" ? RADAR_TTL_LOS_MS : RADAR_TTL_SOUND_MS;
-        if (this.t - entry.at > ttl) this.perceived[side].delete(id);
-      }
+      this.perceived[side] = this.perceived[side].filter(p => {
+        const ttl = p.source === "los" ? RADAR_TTL_LOS_MS : RADAR_TTL_SOUND_MS;
+        return this.t - p.at <= ttl;
+      });
     }
 
-    // LOS sightings: any teammate seeing an enemy publishes the actual enemy
-    // position to the shared radar (CS2-style — everyone reads from the same
-    // map). Overwrites any prior sound entry for that enemy since LOS is
-    // always more authoritative than a relayed callout.
+    // LOS sightings: append a fresh ping for each visible enemy, but
+    // rate-limit so we don't add an entry every tick (would explode the trail
+    // size). One LOS ping per enemy per LOS_REFRESH_MS is plenty to recover
+    // the trail's shape.
     for (const a of this.agents) {
       if (!a.alive) continue;
       for (const e of this.agents) {
         if (!e.alive || e.side === a.side) continue;
         if (!this.hasLineOfSight(a.pos, e.pos)) continue;
-        this.perceived[a.side].set(e.playerId, {
-          pos: { x: e.pos.x, y: e.pos.y },
-          at: this.t,
-          source: "los",
-        });
+        const trail = this.perceived[a.side];
+        const recent = trail.some(p =>
+          p.enemyId === e.playerId && p.source === "los" && this.t - p.at < LOS_REFRESH_MS
+        );
+        if (!recent) {
+          trail.push({
+            pos: { x: e.pos.x, y: e.pos.y },
+            at: this.t,
+            source: "los",
+            enemyId: e.playerId,
+          });
+        }
         if (e.playerId === this.bombCarrier) {
           // Bomb-carrier sighting still gets the dedicated bombSeenAt flag
           // that the rotation logic checks separately.
@@ -678,33 +683,36 @@ export class RoundSim {
       }
     }
 
-    // Drain landed callouts onto the radar. Don't clobber a fresh LOS ping
-    // with a stale sound guess — what the team actually saw beats a guess.
+    // Drain landed callouts onto the radar. Each landing call appends its
+    // own ping — sound pings stack alongside LOS pings, so the team's
+    // perception is a *trail* of everywhere they think an enemy has been,
+    // not a single most-recent pin.
     if (this.commsCalls.length > 0) {
       const stillPending: typeof this.commsCalls = [];
       for (const c of this.commsCalls) {
         if (c.arrivesAt > this.t) { stillPending.push(c); continue; }
-        const existing = this.perceived[c.side].get(c.enemyId);
-        if (existing && existing.source === "los" && this.t - existing.at < RADAR_TTL_LOS_MS) continue;
-        this.perceived[c.side].set(c.enemyId, {
-          pos: c.pos, at: c.arrivesAt, source: "sound",
+        this.perceived[c.side].push({
+          pos: c.pos, at: c.arrivesAt, source: "sound", enemyId: c.enemyId,
         });
       }
       this.commsCalls = stillPending;
     }
+  }
 
-    // Derive per-site intel scores from the radar so existing rotation logic
-    // (which reads intel[side][site].score) keeps working but is now driven
-    // by perceived positions rather than direct LOS bumps. An LOS ping is
-    // worth a full INTEL_BUMP; a sound ping the smaller SOUND bump.
-    for (const side of ["CT", "T"] as const) {
-      for (const entry of this.perceived[side].values()) {
-        const site = this.nearestSiteId(entry.pos);
-        const bump = entry.source === "los" ? INTEL_BUMP : SOUND_INTEL_BUMP;
-        this.intel[side][site].score = Math.min(INTEL_CAP, this.intel[side][site].score + bump);
-        this.intel[side][site].updatedAt = this.t;
-      }
+  // Aggregate the radar trail into per-site "pressure". Each ping
+  // contributes its source weight (LOS > sound) scaled by freshness — older
+  // pings in the trail count less than recent ones. The trail itself is the
+  // team's accumulated knowledge over time, not just a single current pin.
+  private radarPressure(side: Side): { A: number; B: number } {
+    const out = { A: 0, B: 0 };
+    for (const entry of this.perceived[side]) {
+      const site = this.nearestSiteId(entry.pos);
+      const sourceW = entry.source === "los" ? 1.0 : 0.55;
+      const ttl = entry.source === "los" ? RADAR_TTL_LOS_MS : RADAR_TTL_SOUND_MS;
+      const freshness = Math.max(0, 1 - (this.t - entry.at) / ttl);
+      out[site] += sourceW * freshness;
     }
+    return out;
   }
 
   private nearestSiteId(pos: Vec2): SiteId {
@@ -1316,10 +1324,13 @@ export class RoundSim {
       }
     }
 
-    // Intel-driven rotation: Ts prefer the lighter (less CT-defended) site.
+    // Radar-driven rotation: Ts prefer the lighter (less CT-defended) site.
+    // Pressure is summed straight off the perceived trail, so a low-comms
+    // team can legitimately misread which site is heavier when their sound
+    // pings drifted to the wrong half of the map.
     const player = this.players(a.playerId)!;
-    const intel = this.intel.T;
-    const sA = intel.A.score, sB = intel.B.score;
+    const pressure = this.radarPressure("T");
+    const sA = pressure.A, sB = pressure.B;
     const dominanceNeeded = INTEL_DOMINANCE * (1 - (player.stats.gameSense - 60) / 200);
     let preferred: SiteId | "mid" = a.assignedSite;
     // Sticky-anchor T players resist rotating off their split unless they
@@ -1376,19 +1387,21 @@ export class RoundSim {
       }
       return jitter(this.bombPlantedAt, 70, this.rng);
     }
-    // Intel-driven rotation: prefer the site with decisively more enemy activity.
+    // Radar-driven rotation: CTs prefer the site where the perceived enemy
+    // trail is denser. Same source as Ts, just looking at the opposite team.
     const player = this.players(a.playerId)!;
-    const intel = this.intel.CT;
-    const sA = intel.A.score, sB = intel.B.score;
+    const pressure = this.radarPressure("CT");
+    const sA = pressure.A, sB = pressure.B;
+    const ctBomb = this.intel.CT;
     const dominanceNeeded = INTEL_DOMINANCE * (1 - (player.stats.gameSense - 60) / 200);
     let preferred: SiteId | "mid" = a.assignedSite;
 
-    // Bomb sightings override everything — chase the bomb regardless of timing or score weight.
-    const bombA = this.t - intel.A.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
-    const bombB = this.t - intel.B.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
+    // Bomb sightings override everything — chase the bomb regardless of timing or pressure.
+    const bombA = this.t - ctBomb.A.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
+    const bombB = this.t - ctBomb.B.bombSeenAt < BOMB_SIGHTING_RECENT_MS;
     if (bombA && !bombB) preferred = "A";
     else if (bombB && !bombA) preferred = "B";
-    else if (bombA && bombB) preferred = intel.A.bombSeenAt > intel.B.bombSeenAt ? "A" : "B";
+    else if (bombA && bombB) preferred = ctBomb.A.bombSeenAt > ctBomb.B.bombSeenAt ? "A" : "B";
     else if (this.t >= ROTATE_MIN_T) {
       if (sA - sB >= dominanceNeeded) preferred = "A";
       else if (sB - sA >= dominanceNeeded) preferred = "B";
