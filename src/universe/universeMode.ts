@@ -358,7 +358,9 @@ export class UniverseMode {
       vs.className = "umc-vs";
       if (m.status === "completed") {
         const ctWon = m.winnerSide === "CT";
-        vs.innerHTML = `<div class="umc-score"><span class="ct${ctWon ? " winner" : ""}">${m.ctScore}</span><span>:</span><span class="t${ctWon ? "" : " winner"}">${m.tScore}</span></div>`;
+        vs.innerHTML = `<div class="umc-score clickable" title="View box score"><span class="ct${ctWon ? " winner" : ""}">${m.ctScore}</span><span>:</span><span class="t${ctWon ? "" : " winner"}">${m.tScore}</span></div>`;
+        const scoreEl = vs.querySelector(".umc-score") as HTMLElement;
+        scoreEl.onclick = () => showMatchStatsModal(m, this.universe!);
       } else {
         vs.textContent = "vs";
       }
@@ -899,6 +901,104 @@ function avgStats(p: Player, keys: string[]): number {
   let sum = 0;
   for (const k of keys) sum += (p.stats as unknown as Record<string, number>)[k] ?? 0;
   return sum / keys.length;
+}
+
+// Modal: box-score view of a completed match. Lists each side's roster with
+// K/D/A, damage, ADR, and HLTV 1.0 rating. Cheap to render — pulls from the
+// playerStats snapshot already stored on the matchup.
+function showMatchStatsModal(m: Matchup, u: Universe) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "universe-modal-backdrop";
+  const close = () => {
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  backdrop.onclick = (e) => { if (e.target === backdrop) close(); };
+  const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+
+  const modal = document.createElement("div");
+  modal.className = "universe-modal universe-stats-modal";
+
+  const header = document.createElement("div");
+  header.className = "ustats-header";
+  const ctWon = m.winnerSide === "CT";
+  header.innerHTML =
+    `<div class="ustats-score">` +
+      `<span class="ct${ctWon ? " winner" : ""}">${m.ctScore ?? 0}</span>` +
+      `<span class="sep">:</span>` +
+      `<span class="t${ctWon ? "" : " winner"}">${m.tScore ?? 0}</span>` +
+    `</div>`;
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "ustats-close";
+  closeBtn.textContent = "✕";
+  closeBtn.onclick = close;
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  const wrap = document.createElement("div");
+  wrap.className = "ustats-teams";
+  wrap.appendChild(boxScoreTable("CT", m.ctPlayerIds, m, u));
+  wrap.appendChild(boxScoreTable("T",  m.tPlayerIds,  m, u));
+  modal.appendChild(wrap);
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+}
+
+function boxScoreTable(side: "CT" | "T", ids: string[], m: Matchup, u: Universe): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = `ustats-team ${side === "CT" ? "ct" : "t"}`;
+  const title = document.createElement("div");
+  title.className = "ustats-team-title";
+  title.textContent = `${side} side`;
+  wrap.appendChild(title);
+
+  const table = document.createElement("table");
+  table.className = "ustats-team-table";
+  table.innerHTML = `<thead><tr>
+    <th>Player</th><th>K</th><th>D</th><th>A</th><th>DMG</th><th>ADR</th><th>Rating</th>
+  </tr></thead>`;
+  const tbody = document.createElement("tbody");
+
+  const rows = ids.map(id => {
+    const p = u.players.find(x => x.id === id);
+    const s = m.playerStats?.[id] ?? null;
+    return { id, p, s };
+  });
+  // Sort by rating desc so the top performers float to the top.
+  rows.sort((a, b) => {
+    const ra = a.s ? hltvRating1(a.s) : -1;
+    const rb = b.s ? hltvRating1(b.s) : -1;
+    return rb - ra;
+  });
+
+  for (const r of rows) {
+    if (!r.p) continue;
+    const s = r.s;
+    const adr = s && s.roundsPlayed > 0 ? s.damage / s.roundsPlayed : null;
+    const rating = s ? hltvRating1(s) : null;
+    const num = (v: number | null, d = 0) =>
+      v === null ? `<td class="ustats-missing">—</td>`
+                 : `<td>${d === 0 ? Math.round(v) : v.toFixed(d)}</td>`;
+    const ratingCell = rating === null
+      ? `<td class="ustats-missing">—</td>`
+      : `<td style="color:${rating >= 1 ? "var(--good)" : "var(--bad)"};font-weight:700">${rating.toFixed(2)}</td>`;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="ustats-name">${escapeHtml(shortName(r.p))}</td>
+      ${num(s?.kills ?? null)}
+      ${num(s?.deaths ?? null)}
+      ${num(s?.assists ?? null)}
+      ${num(s?.damage ?? null)}
+      ${num(adr, 1)}
+      ${ratingCell}
+    `;
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
 }
 
 function shortName(p: Player): string {
