@@ -8,6 +8,7 @@ import { KillFeed } from "../ui/killFeed.ts";
 import { buildTeam, buildPlayerStats, detectClutch, mulberry32, simulateMatchInstant, tallyMultiKills, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
 import type { Clutch } from "./types.ts";
 import { Timeline } from "../ui/timeline.ts";
+import { TeamPanel } from "../ui/teamPanel.ts";
 
 const TICK_MS = 50;
 
@@ -48,9 +49,22 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   timelineEl.className = "universe-match-timeline";
   if (opts.isReplay) host.appendChild(timelineEl);
 
+  // Stage row: left team panel | canvas | right team panel.
+  const stage = document.createElement("div");
+  stage.className = "universe-match-stage";
+  host.appendChild(stage);
+
+  const leftPanelCol = document.createElement("div");
+  leftPanelCol.className = "ums-side";
+  stage.appendChild(leftPanelCol);
+
   const canvasHost = document.createElement("div");
   canvasHost.className = "canvas-host universe-canvas-host";
-  host.appendChild(canvasHost);
+  stage.appendChild(canvasHost);
+
+  const rightPanelCol = document.createElement("div");
+  rightPanelCol.className = "ums-side";
+  stage.appendChild(rightPanelCol);
 
   // Replay-only: full timeline scrubber with kill markers (reuses the same
   // widget the live-play replay uses).
@@ -151,12 +165,40 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     opts.seed,
   );
 
-  // --- Teams (mutable so jumpToRound can rebuild fresh state) ---
-  let ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
-  let tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T");
+  // --- Teams ---
+  const ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
+  const tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T");
   // After halftime these references swap (the same Team object plays the other side).
   let ctSide: Team = ct;
   let tSideRef: Team = tSide;
+
+  // Side panels (rosters with loadouts + live stats). Bound to the persistent
+  // team objects; resetMatchState() mutates state in-place so these stay valid
+  // across jump-to-round operations.
+  const leftPanel = new TeamPanel(leftPanelCol, ct);
+  const rightPanel = new TeamPanel(rightPanelCol, tSide);
+
+  // Reset both teams to round-1 conditions in place, leaving the TeamPanel
+  // bindings intact. Used by jumpToRound when the user navigates the timeline.
+  function resetMatchState() {
+    ct.side = "CT";
+    tSide.side = "T";
+    ctSide = ct;
+    tSideRef = tSide;
+    for (const team of [ct, tSide]) {
+      team.roundsWon = 0;
+      for (const p of team.players) p.money = STARTING_BANK;
+      for (const id of Object.keys(team.matchStats)) {
+        team.matchStats[id] = { kills: 0, deaths: 0, assists: 0, damage: 0, roundsPlayed: 0 };
+      }
+      for (const p of team.players) {
+        team.loadouts[p.id] = {
+          weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
+          keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
+        };
+      }
+    }
+  }
 
   let sim: RoundSim | null = null;
   let simInterval: number | null = null;
@@ -233,6 +275,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     renderer.syncAgents(sim);
     paintHud();
     renderTimeline();
+    leftPanel.setAgents(sim.agents);
+    rightPanel.setAgents(sim.agents);
     if (roundScrub) {
       const totalTicks = Math.max(1, Math.ceil(roundDurationMs / TICK_MS) + 1);
       roundScrub.setReplay(totalTicks, roundEvents, TICK_MS, `Round ${roundNumber}`, sideOfPlayer);
@@ -274,6 +318,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     for (let s = 0; s < simSpeed && !sim.finished; s++) sim.tick();
     drainEvents();
     renderer.syncAgents(sim);
+    leftPanel.setAgents(sim.agents);
+    rightPanel.setAgents(sim.agents);
     roundScrub?.setIndex(Math.floor(sim.t / TICK_MS));
     if (sim.finished && sim.result) {
       if (simInterval) clearInterval(simInterval);
@@ -424,11 +470,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     killFeed.clear();
     renderer.clearTransient();
 
-    // Fresh state for the entire match.
-    ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
-    tSide = buildTeam("t", opts.tName, opts.tPlayers, "T");
-    ctSide = ct;
-    tSideRef = tSide;
+    // Reset the match in-place so the bound TeamPanels keep working.
+    resetMatchState();
     roundNumber = 1;
     lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
     masterRng = mulberry32(opts.seed);
@@ -471,6 +514,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     while (sim && !sim.finished && sim.t < targetMs && safety-- > 0) sim.tick();
     drainEvents();
     renderer.syncAgents(sim);
+    if (sim) {
+      leftPanel.setAgents(sim.agents);
+      rightPanel.setAgents(sim.agents);
+    }
     roundScrub?.setIndex(Math.floor(sim.t / TICK_MS));
     // Resume live ticking only if the user was already playing — scrubbing
     // shouldn't unpause.

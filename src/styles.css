@@ -1081,6 +1081,17 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-match-hud .ct { color: var(--ct); font-weight: 600; }
 .universe-match-hud .t { color: var(--t); font-weight: 600; }
 .universe-match-hud .sep { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.universe-match-stage {
+  display: flex; flex-direction: row; flex: 1; width: 100%;
+  min-height: 0; gap: 8px; align-items: stretch;
+}
+.universe-match-stage .ums-side {
+  width: 260px; flex-shrink: 0; display: flex; flex-direction: column;
+}
+.universe-match-stage .ums-side .panel {
+  flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 4px;
+  padding: 12px; background: var(--panel);
+}
 .universe-canvas-host { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; width: 100%; }
 .universe-canvas-host canvas { display: block; max-width: 100%; max-height: 100%; }
 .universe-match-controls { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
