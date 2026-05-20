@@ -11,7 +11,7 @@ import {
 } from "./storage.ts";
 import {
   MATCHUPS_PER_DAY, PLAYER_COUNT, STARTING_ELO, TEAM_SIZE,
-  type Matchup, type Universe,
+  type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
 
 type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
@@ -343,6 +343,13 @@ export class UniverseMode {
     const playerById = new Map(this.universe.players.map(p => [p.id, p] as const));
     const elos = this.universe.elos;
 
+    // Top performers across all completed matches today. Updates as more
+    // matches finish, so even a single sim'd match shows the top of the day.
+    const completed = day.matchups.filter(m => m.status === "completed" && m.playerStats);
+    if (completed.length > 0) {
+      body.appendChild(this.topPerformersGrid(completed, playerById));
+    }
+
     const grid = document.createElement("div");
     grid.className = "universe-matchup-grid";
 
@@ -383,6 +390,50 @@ export class UniverseMode {
     });
 
     body.appendChild(grid);
+  }
+
+  // Top 4 players by HLTV rating across completed matches in the current day.
+  private topPerformersGrid(matchups: Matchup[], byId: Map<string, Player>): HTMLElement {
+    interface Row {
+      pid: string; side: "CT" | "T"; stats: PlayerMatchStats; rating: number;
+    }
+    const rows: Row[] = [];
+    for (const m of matchups) {
+      if (!m.playerStats) continue;
+      for (const [pid, stats] of Object.entries(m.playerStats)) {
+        const side: "CT" | "T" = m.ctPlayerIds.includes(pid) ? "CT" : "T";
+        rows.push({ pid, side, stats, rating: hltvRating1(stats) });
+      }
+    }
+    rows.sort((a, b) => b.rating - a.rating);
+    const top = rows.slice(0, 4);
+
+    const wrap = document.createElement("div");
+    wrap.className = "universe-top-performers";
+    top.forEach((r, i) => {
+      const p = byId.get(r.pid);
+      if (!p) return;
+      const card = document.createElement("div");
+      card.className = `utp-card ${r.side === "CT" ? "ct" : "t"}`;
+      card.onclick = () => this.openPlayer(r.pid);
+      const adr = r.stats.roundsPlayed > 0 ? r.stats.damage / r.stats.roundsPlayed : 0;
+      const ratingColorCss = r.rating >= 1 ? "var(--good)" : "var(--bad)";
+      card.innerHTML = `
+        <div class="utp-head">
+          <span class="utp-rank">#${i + 1}</span>
+          <span class="utp-rating" style="color:${ratingColorCss}">${r.rating.toFixed(2)}</span>
+        </div>
+        <div class="utp-name">${escapeHtml(shortName(p))}</div>
+        <div class="utp-stats">
+          <span><b>${r.stats.kills}</b>K</span>
+          <span><b>${r.stats.deaths}</b>D</span>
+          <span><b>${r.stats.assists}</b>A</span>
+          <span><b>${Math.round(adr)}</b>ADR</span>
+        </div>
+      `;
+      wrap.appendChild(card);
+    });
+    return wrap;
   }
 
   private findMatchup(id: string): Matchup | null {

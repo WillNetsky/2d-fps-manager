@@ -1049,6 +1049,31 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--text); border-bottom-color: var(--accent);
 }
 
+/* Top performers (day MVP cards above the matchup grid) */
+.universe-top-performers {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+  margin-bottom: 16px;
+}
+.utp-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px;
+  border-left-width: 4px;
+}
+.utp-card.ct { border-left-color: var(--ct); }
+.utp-card.t  { border-left-color: var(--t); }
+.utp-card:hover { border-color: var(--accent); }
+.utp-head { display: flex; justify-content: space-between; align-items: baseline; }
+.utp-rank { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.utp-rating { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.utp-name { font-size: 14px; font-weight: 600; }
+.utp-stats {
+  display: flex; gap: 12px; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.utp-stats b { color: var(--text); font-weight: 600; margin-right: 2px; }
+
+@media (max-width: 900px) { .universe-top-performers { grid-template-columns: repeat(2, 1fr); } }
+
 /* Matchup grid */
 .universe-matchup-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px;
