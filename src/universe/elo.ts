@@ -20,12 +20,12 @@ export function applyMatchElo(
   winnerIds: string[],
   loserIds: string[],
   elos: Record<string, number>,
-): void {
+): number {
   const wT = teamElo(winnerIds, elos);
   const lT = teamElo(loserIds, elos);
   const wExp = expectedScore(wT, lT);
-  const wDelta = K * (1 - wExp);
-  const lDelta = K * (0 - (1 - wExp));
-  for (const id of winnerIds) elos[id] = (elos[id] ?? STARTING_ELO) + wDelta;
-  for (const id of loserIds)  elos[id] = (elos[id] ?? STARTING_ELO) + lDelta;
+  const delta = K * (1 - wExp);
+  for (const id of winnerIds) elos[id] = (elos[id] ?? STARTING_ELO) + delta;
+  for (const id of loserIds)  elos[id] = (elos[id] ?? STARTING_ELO) - delta;
+  return delta;
 }

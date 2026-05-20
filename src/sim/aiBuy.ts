@@ -10,7 +10,12 @@ const isPistolRoundDefault: (n: number) => boolean = (n) => n === 1 || n === 13;
 // Stat-weighted auto-buy for every player on the team. Mutates team.loadouts
 // and player money. Extracted from game.ts so observe-mode matches (universe
 // mode, balance sims) can reuse the same buy logic.
-export function aiBuyFor(team: Team, roundNumber: number, isPistolRound = isPistolRoundDefault) {
+export function aiBuyFor(
+  team: Team,
+  roundNumber: number,
+  isPistolRound = isPistolRoundDefault,
+  rng: () => number = Math.random,
+) {
   const rifle: WeaponId = team.side === "T" ? "ak" : "m4";
   const smg: WeaponId   = team.side === "T" ? "mac10" : "mp9";
   const W = (id: WeaponId) => WEAPONS[id];
@@ -32,13 +37,13 @@ export function aiBuyFor(team: Team, roundNumber: number, isPistolRound = isPist
     const util: UtilityId[] = [...keptUtil];
     const smokeW = Math.max(1, p.stats.smokeLineups);
     const flashW = Math.max(1, p.stats.flashTiming);
-    const want: UtilityId = Math.random() * (smokeW + flashW) < smokeW ? "smoke" : "flash";
+    const want: UtilityId = rng() * (smokeW + flashW) < smokeW ? "smoke" : "flash";
 
     if (isPistolRound(roundNumber)) {
       weapon = defaultPistol(team.side);
       helmet = false;
       const vestChance = 0.25 + (p.stats.composure + p.stats.discipline) / 400;
-      const wantsVest = Math.random() < vestChance;
+      const wantsVest = rng() < vestChance;
       if (wantsVest && share >= VEST) {
         armor = true;
         spent += VEST;
@@ -49,7 +54,7 @@ export function aiBuyFor(team: Team, roundNumber: number, isPistolRound = isPist
     } else {
       const isRifle = (w: WeaponId) => W(w).slot === "rifle";
       const awpChance = Math.max(0, (p.stats.awpPref - 50) / 50);
-      const wantsAwp = Math.random() < awpChance;
+      const wantsAwp = rng() < awpChance;
       if (wantsAwp && weapon !== "awp" && share >= wCost("awp")) weapon = "awp";
       else if (!isRifle(weapon) && weapon !== "awp" && share >= wCost(rifle)) weapon = rifle;
       else if (W(weapon).slot === "pistol" && share >= wCost(smg)) weapon = smg;

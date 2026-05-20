@@ -5,7 +5,7 @@ import { aiBuyFor } from "../sim/aiBuy.ts";
 import { defaultPistol } from "../domain/weapons.ts";
 import { Renderer } from "../render/renderer.ts";
 import { KillFeed } from "../ui/killFeed.ts";
-import { buildTeam, buildPlayerStats, detectClutch, tallyMultiKills, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
+import { buildTeam, buildPlayerStats, detectClutch, mulberry32, simulateMatchInstant, tallyMultiKills, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
 import type { Clutch } from "./types.ts";
 
 const { STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS, isPistolRound } = MATCH_CONSTANTS;
@@ -16,6 +16,15 @@ export interface ObserveMatchOptions {
   ctPlayers: Player[];
   tPlayers: Player[];
   map: GameMap;
+  // Master RNG seed — same seed reproduces the same match.
+  seed: number;
+  // If >1, fast-forward (headless) up to but not including this round, then
+  // start live observation from there. Used to jump straight to a clutch.
+  startAtRound?: number;
+  // True when watching a replay of a saved match — enables the round timeline,
+  // round scrubber, and prev/next jumping. Hidden during live first-play so
+  // future round outcomes aren't spoiled.
+  isReplay?: boolean;
   onDone: (result: MatchResult) => void;
   onCancel: () => void;
 }
@@ -31,9 +40,28 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   hud.className = "universe-match-hud";
   host.appendChild(hud);
 
+  // Replay-only: the round timeline (1..N circles colored by winner side).
+  const timelineEl = document.createElement("div");
+  timelineEl.className = "universe-match-timeline";
+  if (opts.isReplay) host.appendChild(timelineEl);
+
   const canvasHost = document.createElement("div");
   canvasHost.className = "canvas-host universe-canvas-host";
   host.appendChild(canvasHost);
+
+  // Replay-only: scrubber bar for the current round.
+  const scrubEl = document.createElement("div");
+  scrubEl.className = "universe-round-scrub";
+  scrubEl.innerHTML = `<div class="urs-fill"></div>`;
+  if (opts.isReplay) host.appendChild(scrubEl);
+  const scrubFill = scrubEl.querySelector(".urs-fill") as HTMLElement;
+  scrubEl.onclick = (ev) => {
+    if (!opts.isReplay || !sim) return;
+    const rect = scrubEl.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+    const dur = prescan.roundOutcomes?.[roundNumber - 1]?.durationMs ?? sim.t;
+    scrubTo(f * dur);
+  };
 
   const controls = document.createElement("div");
   controls.className = "universe-match-controls";
@@ -51,6 +79,34 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     speedBtn.textContent = `${simSpeed}×`;
   };
   controls.appendChild(speedBtn);
+
+  // Replay-only prev / next round buttons.
+  if (opts.isReplay) {
+    const prevBtn = document.createElement("button");
+    prevBtn.className = "speed-btn";
+    prevBtn.textContent = "⏮ Prev round";
+    prevBtn.onclick = () => {
+      paused = false;
+      jumpToRound(roundNumber - 1);
+    };
+    controls.appendChild(prevBtn);
+
+    const nextBtn = document.createElement("button");
+    nextBtn.className = "speed-btn";
+    nextBtn.textContent = "Next round ⏭";
+    nextBtn.onclick = () => {
+      // First click on a fresh paused round → resume that round.
+      // Otherwise advance to the next round.
+      if (sim && !sim.finished && paused) {
+        paused = false;
+        simInterval = window.setInterval(tickRound, 50);
+        return;
+      }
+      paused = false;
+      jumpToRound(roundNumber + 1);
+    };
+    controls.appendChild(nextBtn);
+  }
 
   const skipBtn = document.createElement("button");
   skipBtn.className = "speed-btn";
@@ -73,8 +129,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   // --- Renderer ---
   const renderer = new Renderer();
   await renderer.init(canvasHost, opts.map);
+  // Player lookup stays bound to opts arrays (not the closure team refs) so
+  // that jump-to-round can rebuild ct/tSide without invalidating it.
   const playerLookup = (id: string): Player | undefined =>
-    ct.players.find(p => p.id === id) ?? tSide.players.find(p => p.id === id);
+    opts.ctPlayers.find(p => p.id === id) ?? opts.tPlayers.find(p => p.id === id);
   renderer.setNameFor(id => {
     const p = playerLookup(id);
     if (!p) return "";
@@ -84,9 +142,19 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
   const killFeed = new KillFeed(canvasHost);
 
-  // --- Teams ---
-  const ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
-  const tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T");
+  // Pre-scan the deterministic match to get every round's winner & duration
+  // up front. Cheap (instant-sim of ~24 rounds) and lets the replay UI show
+  // the full timeline immediately without spoiling live first-play.
+  const prescan = simulateMatchInstant(
+    buildTeam("ct-prescan", "CT", opts.ctPlayers, "CT"),
+    buildTeam("t-prescan",  "T",  opts.tPlayers,  "T"),
+    opts.map,
+    opts.seed,
+  );
+
+  // --- Teams (mutable so jumpToRound can rebuild fresh state) ---
+  let ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
+  let tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T");
   // After halftime these references swap (the same Team object plays the other side).
   let ctSide: Team = ct;
   let tSideRef: Team = tSide;
@@ -98,12 +166,32 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   let simRestInstantly = false;
   let lastEventIdx = 0;
   let cleaned = false;
+  // In replay mode we default to paused — the user must click Next (or a
+  // timeline dot) to play each round, and we pause again at round end.
+  let paused = !!opts.isReplay;
+  // Seed actually fed to the current round's RoundSim, captured so the
+  // scrubber can rebuild this round from the round-start snapshot.
+  let currentRoundSeed = 0;
+  // Frozen state at the start of the current round, used for backward scrub.
+  let roundStart: RoundStartSnapshot | null = null;
   const roundMvps: Record<string, number> = {};
   const clutches: Clutch[] = [];
   const multi = new Map<string, [number, number, number, number, number]>();
+  let masterRng = mulberry32(opts.seed);
+  const intFrom = () => Math.floor(masterRng() * 0x100000000);
 
+  renderTimeline();
   paintHud();
-  startRound();
+
+  // Jump straight to the requested round if any (clutch click → auto-play),
+  // otherwise set up round 1. In replay mode, round 1 stays paused so the
+  // user explicitly clicks Next to view it.
+  if (opts.startAtRound && opts.startAtRound > 1) {
+    paused = false;
+    jumpToRound(opts.startAtRound);
+  } else {
+    startRound();
+  }
 
   function paintHud() {
     const half = roundNumber <= HALFTIME_ROUND ? 1 : 2;
@@ -117,12 +205,21 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
 
   function startRound() {
     if (cleaned) return;
-    aiBuyFor(ctSide, roundNumber, isPistolRound);
-    aiBuyFor(tSideRef, roundNumber, isPistolRound);
-    sim = new RoundSim(ctSide, tSideRef, opts.map, Math.floor(Math.random() * 1e9));
+    aiBuyFor(ctSide,   roundNumber, isPistolRound, mulberry32(intFrom()));
+    aiBuyFor(tSideRef, roundNumber, isPistolRound, mulberry32(intFrom()));
+    currentRoundSeed = intFrom();
+    // Snapshot team state AFTER aiBuy so the scrubber can restart the round
+    // from the same conditions the live sim is using.
+    roundStart = snapshotRoundStart();
+    sim = new RoundSim(ctSide, tSideRef, opts.map, currentRoundSeed);
     lastEventIdx = 0;
+    killFeed.clear();
     renderer.clearTransient();
+    renderer.syncAgents(sim);
     paintHud();
+    renderTimeline();
+    paintScrub();
+    if (paused) return;
     if (simRestInstantly) {
       skipRound();
     } else {
@@ -135,6 +232,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     for (let s = 0; s < simSpeed && !sim.finished; s++) sim.tick();
     drainEvents();
     renderer.syncAgents(sim);
+    paintScrub();
     if (sim.finished && sim.result) {
       if (simInterval) clearInterval(simInterval);
       simInterval = null;
@@ -184,36 +282,49 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     return m ? m[1] : p.name.split(" ")[0];
   }
 
-  function finishRound() {
-    if (!sim || !sim.result || cleaned) return;
-    const r = sim.result;
+  function matchIsOver(): boolean {
+    return ct.roundsWon >= WIN_THRESHOLD
+        || tSide.roundsWon >= WIN_THRESHOLD
+        || roundNumber >= MAX_ROUNDS;
+  }
+
+  function applyRoundOutcome(finished: RoundSim) {
+    const r = finished.result!;
     const winner = r.winningSide === "CT" ? ctSide : tSideRef;
     winner.roundsWon++;
     const clutch = detectClutch(r, ctSide.players.map(p => p.id), tSideRef.players.map(p => p.id));
-    if (clutch) clutches.push(clutch);
+    if (clutch) clutches.push({ ...clutch, round: roundNumber });
     tallyMultiKills(r, multi);
     lossStreaks = applyRoundReward(ctSide, tSideRef, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
-    carryOverLoadouts(ctSide, sim);
-    carryOverLoadouts(tSideRef, sim);
-
-    // Round MVP: most kills on the winning team, fallback to plant / defuse.
+    carryOverLoadouts(ctSide, finished);
+    carryOverLoadouts(tSideRef, finished);
     const mvpId = pickRoundMvp(r, winner);
     if (mvpId) roundMvps[mvpId] = (roundMvps[mvpId] ?? 0) + 1;
+  }
 
+  function finishRound() {
+    if (!sim || !sim.result || cleaned) return;
+    applyRoundOutcome(sim);
     paintHud();
+    renderTimeline();
+    paintScrub();
 
-    const matchOver =
-      ct.roundsWon >= WIN_THRESHOLD ||
-      tSide.roundsWon >= WIN_THRESHOLD ||
-      roundNumber >= MAX_ROUNDS;
-
-    if (matchOver) {
+    if (matchIsOver()) {
       const winnerSide: "CT" | "T" = ct.roundsWon > tSide.roundsWon ? "CT" : "T";
       const result: MatchResult = {
         ctScore: ct.roundsWon, tScore: tSide.roundsWon, winnerSide, clutches,
         playerStats: buildPlayerStats(ct, tSide, multi),
       };
-      showPostgame(result);
+      // In replay we leave the UI intact so the user can keep navigating the
+      // timeline; in live first-play we hand off to the postgame screen.
+      if (!opts.isReplay) showPostgame(result);
+      else paused = true;
+      return;
+    }
+
+    // In replay, pause between rounds — user clicks Next to advance.
+    if (opts.isReplay) {
+      paused = true;
       return;
     }
 
@@ -224,6 +335,135 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     // sim-rest mode is on.
     if (simRestInstantly) startRound();
     else setTimeout(() => startRound(), 800);
+  }
+
+  // --- Replay navigation ---
+
+  interface RoundStartSnapshot {
+    ctMoney: Record<string, number>;
+    tMoney: Record<string, number>;
+    ctLoadouts: Team["loadouts"];
+    tLoadouts: Team["loadouts"];
+    ctMatchStats: Team["matchStats"];
+    tMatchStats: Team["matchStats"];
+  }
+
+  function snapshotRoundStart(): RoundStartSnapshot {
+    const moneyOf = (t: Team) => Object.fromEntries(t.players.map(p => [p.id, p.money]));
+    return {
+      ctMoney: moneyOf(ctSide),
+      tMoney: moneyOf(tSideRef),
+      ctLoadouts: JSON.parse(JSON.stringify(ctSide.loadouts)),
+      tLoadouts: JSON.parse(JSON.stringify(tSideRef.loadouts)),
+      ctMatchStats: JSON.parse(JSON.stringify(ctSide.matchStats)),
+      tMatchStats: JSON.parse(JSON.stringify(tSideRef.matchStats)),
+    };
+  }
+
+  function restoreRoundStart(s: RoundStartSnapshot) {
+    for (const p of ctSide.players) p.money = s.ctMoney[p.id] ?? p.money;
+    for (const p of tSideRef.players) p.money = s.tMoney[p.id] ?? p.money;
+    ctSide.loadouts = JSON.parse(JSON.stringify(s.ctLoadouts));
+    tSideRef.loadouts = JSON.parse(JSON.stringify(s.tLoadouts));
+    ctSide.matchStats = JSON.parse(JSON.stringify(s.ctMatchStats));
+    tSideRef.matchStats = JSON.parse(JSON.stringify(s.tMatchStats));
+  }
+
+  // Resimulate from round 1 up to (and starting) the target round. Resets the
+  // live UI state along the way so the timeline stays consistent.
+  function jumpToRound(target: number) {
+    if (cleaned) return;
+    const total = prescan.roundOutcomes?.length ?? MAX_ROUNDS;
+    target = Math.max(1, Math.min(target, total));
+    if (simInterval) { clearInterval(simInterval); simInterval = null; }
+    sim = null;
+    lastEventIdx = 0;
+    killFeed.clear();
+    renderer.clearTransient();
+
+    // Fresh state for the entire match.
+    ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
+    tSide = buildTeam("t", opts.tName, opts.tPlayers, "T");
+    ctSide = ct;
+    tSideRef = tSide;
+    roundNumber = 1;
+    lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
+    masterRng = mulberry32(opts.seed);
+    clutches.length = 0;
+    multi.clear();
+    for (const k of Object.keys(roundMvps)) delete roundMvps[k];
+
+    // Headlessly simulate every round before the target so state lines up.
+    while (roundNumber < target) {
+      aiBuyFor(ctSide,   roundNumber, isPistolRound, mulberry32(intFrom()));
+      aiBuyFor(tSideRef, roundNumber, isPistolRound, mulberry32(intFrom()));
+      const headless = new RoundSim(ctSide, tSideRef, opts.map, intFrom());
+      let safety = 100000;
+      while (!headless.finished && safety-- > 0) headless.tick();
+      if (!headless.result) break;
+      applyRoundOutcome(headless);
+      if (roundNumber === HALFTIME_ROUND) {
+        roundNumber++;
+        halftimeSwap();
+      } else {
+        roundNumber++;
+      }
+    }
+    startRound();
+  }
+
+  // Scrub to a specific millisecond within the current round.
+  function scrubTo(targetMs: number) {
+    if (!sim || !roundStart) return;
+    if (simInterval) { clearInterval(simInterval); simInterval = null; }
+    if (targetMs < sim.t) {
+      // Backward: restore round-start state and rebuild this round's sim.
+      restoreRoundStart(roundStart);
+      sim = new RoundSim(ctSide, tSideRef, opts.map, currentRoundSeed);
+      lastEventIdx = 0;
+      killFeed.clear();
+      renderer.clearTransient();
+    }
+    let safety = 100000;
+    while (sim && !sim.finished && sim.t < targetMs && safety-- > 0) sim.tick();
+    drainEvents();
+    renderer.syncAgents(sim);
+    paintScrub();
+    // Resume live ticking.
+    if (sim && !sim.finished) simInterval = window.setInterval(tickRound, 50);
+    else if (sim && sim.finished) finishRound();
+  }
+
+  // --- Replay UI rendering ---
+
+  function paintScrub() {
+    if (!opts.isReplay) return;
+    const dur = prescan.roundOutcomes?.[roundNumber - 1]?.durationMs ?? 1;
+    const f = sim ? Math.max(0, Math.min(1, sim.t / dur)) : 0;
+    scrubFill.style.width = `${(f * 100).toFixed(1)}%`;
+  }
+
+  function renderTimeline() {
+    if (!opts.isReplay) return;
+    timelineEl.innerHTML = "";
+    const outcomes = prescan.roundOutcomes ?? [];
+    outcomes.forEach((o) => {
+      const dot = document.createElement("button");
+      dot.className = "umt-dot " + (o.winnerSide === "CT" ? "ct-win" : "t-win");
+      if (o.round === roundNumber) dot.classList.add("active");
+      dot.textContent = String(o.round);
+      dot.title = `Round ${o.round} — ${o.winnerSide} (${o.ctScoreAfter}-${o.tScoreAfter})`;
+      dot.onclick = () => {
+        paused = false;
+        jumpToRound(o.round);
+      };
+      timelineEl.appendChild(dot);
+      if (o.round === HALFTIME_ROUND) {
+        const half = document.createElement("span");
+        half.className = "umt-half";
+        timelineEl.appendChild(half);
+      }
+    });
   }
 
   function halftimeSwap() {

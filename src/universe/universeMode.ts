@@ -13,7 +13,10 @@ import {
   type Matchup, type Universe,
 } from "./types.ts";
 
-type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "player";
+type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "player" | "replay";
+
+// Screens that share the day-view tab bar (matchups + two stat tables).
+const DAY_TABS: Screen[] = ["matchups", "standings", "career"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -23,6 +26,9 @@ export class UniverseMode {
   private activePlayerId: string | null = null;
   // Screen to return to from the player page (set when navigating in).
   private playerReturnScreen: Screen = "standings";
+  // Replay state: which historical matchup to play back, and where to return.
+  private replayRef: { day: number; matchIdx: number; startAtRound?: number } | null = null;
+  private replayReturnPlayerId: string | null = null;
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -38,8 +44,8 @@ export class UniverseMode {
     main.className = "universe-main";
     this.root.appendChild(main);
 
-    // Top bar (visible on every screen except the match canvas).
-    if (this.screen !== "match") {
+    // Top bar (visible on every screen except the match canvas / replay).
+    if (this.screen !== "match" && this.screen !== "replay") {
       main.appendChild(this.topBar());
     }
 
@@ -47,14 +53,93 @@ export class UniverseMode {
     body.className = "universe-body";
     main.appendChild(body);
 
+    // Day-view tab bar: lets the user flip between matchups, ratings, and
+    // career stats while a day is active or after it has wrapped up.
+    if (DAY_TABS.includes(this.screen) && this.universe) {
+      body.appendChild(this.dayTabBar());
+    }
+
     switch (this.screen) {
       case "menu":      this.renderMenu(body); break;
       case "players":   this.renderPlayers(body); break;
       case "matchups":  this.renderMatchups(body); break;
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
+      case "career":    this.renderCareer(body); break;
       case "player":    this.renderPlayer(body); break;
+      case "replay":    this.renderReplay(body); break;
     }
+  }
+
+  private openReplay(day: number, matchIdx: number, startAtRound?: number) {
+    if (!this.universe) return;
+    this.replayRef = { day, matchIdx, startAtRound };
+    // If we're already on a player page, return to it after the replay.
+    this.replayReturnPlayerId = this.screen === "player" ? this.activePlayerId : null;
+    this.screen = "replay";
+    this.render();
+  }
+
+  private async renderReplay(body: HTMLElement) {
+    if (!this.universe || !this.replayRef) { this.exitReplay(); return; }
+    const u = this.universe;
+    const ref = this.replayRef;
+    const day = u.history.find(d => d.day === ref.day);
+    const m = day?.matchups[ref.matchIdx];
+    if (!m || m.seed === undefined || !u.map) { this.exitReplay(); return; }
+    const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
+    const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
+    const back = () => this.exitReplay();
+    await observeMatch(body, {
+      ctName: "CT-side",
+      tName: "T-side",
+      ctPlayers, tPlayers,
+      map: u.map,
+      seed: m.seed,
+      startAtRound: ref.startAtRound,
+      isReplay: true,
+      // Replays don't mutate saved results — both endings just exit.
+      onDone: () => back(),
+      onCancel: () => back(),
+    });
+  }
+
+  private exitReplay() {
+    const returnPid = this.replayReturnPlayerId;
+    this.replayRef = null;
+    this.replayReturnPlayerId = null;
+    if (returnPid) {
+      this.activePlayerId = returnPid;
+      this.screen = "player";
+    } else {
+      this.screen = "standings";
+    }
+    this.render();
+  }
+
+  private dayTabBar(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "universe-tabs";
+    const u = this.universe!;
+    const hasPending = !!u.pendingDay;
+    const tabs: { key: Screen; label: string; show: boolean }[] = [
+      { key: "matchups",  label: "Matchups",     show: hasPending },
+      { key: "standings", label: "Player ratings", show: true },
+      { key: "career",    label: "Career stats",   show: true },
+    ];
+    for (const t of tabs) {
+      if (!t.show) continue;
+      const el = document.createElement("button");
+      el.className = "universe-tab" + (this.screen === t.key ? " active" : "");
+      el.textContent = t.label;
+      el.onclick = () => {
+        if (this.screen === t.key) return;
+        this.screen = t.key;
+        this.render();
+      };
+      bar.appendChild(el);
+    }
+    return bar;
   }
 
   private openPlayer(playerId: string) {
@@ -92,14 +177,16 @@ export class UniverseMode {
     if (this.screen === "players" && this.universe) {
       const cont = btn("Continue to matchups →", "primary", () => this.startDay());
       right.appendChild(cont);
-    } else if (this.screen === "matchups" && this.universe) {
-      const allDone = this.universe.pendingDay?.matchups.every(m => m.status === "completed");
-      const label = allDone ? "View standings →" : "Sim all remaining + continue →";
-      const cont = btn(label, "primary", () => this.continueFromMatchups());
-      right.appendChild(cont);
-    } else if (this.screen === "standings" && this.universe) {
-      right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
-      right.appendChild(btn("Next day →", "primary", () => this.nextDay()));
+    } else if (DAY_TABS.includes(this.screen) && this.universe) {
+      const u = this.universe;
+      if (u.pendingDay) {
+        const allDone = u.pendingDay.matchups.every(m => m.status === "completed");
+        const label = allDone ? "Finish day →" : "Sim all remaining + continue →";
+        right.appendChild(btn(label, "primary", () => this.continueFromMatchups()));
+      } else {
+        right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
+        right.appendChild(btn("Next day →", "primary", () => this.nextDay()));
+      }
     } else if (this.screen === "players" && this.universe && this.universe.history.length === 0) {
       // Allow skipping ahead from the initial roster screen too.
       right.insertBefore(btn("Sim X days", "", () => this.simManyDays()), right.firstChild);
@@ -196,6 +283,8 @@ export class UniverseMode {
       elos,
       history: [],
       pendingDay: null,
+      // Lock in one map for the universe so every match (and replay) reuses it.
+      map: loadCustomMap() ?? makeMap(),
     };
     this.persist();
     this.screen = "players";
@@ -205,6 +294,8 @@ export class UniverseMode {
   private loadUniverseById(id: string) {
     const u = loadUniverse(id);
     if (!u) return;
+    // Migrate older saves that predate the universe-level map.
+    if (!u.map) u.map = loadCustomMap() ?? makeMap();
     this.universe = u;
     // Resume on the relevant screen: pending matchups → matchups, otherwise
     // standings if any days have been played, else the initial roster view.
@@ -234,7 +325,7 @@ export class UniverseMode {
     if (!this.universe.pendingDay) {
       this.universe.pendingDay = {
         day: this.universe.day,
-        matchups: generateMatchups(this.universe.players),
+        matchups: generateMatchups(this.universe.players, this.universe.elos),
       };
       this.persist();
     }
@@ -262,7 +353,7 @@ export class UniverseMode {
 
       const teams = document.createElement("div");
       teams.className = "umc-teams";
-      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos));
+      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m));
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
@@ -272,7 +363,7 @@ export class UniverseMode {
         vs.textContent = "vs";
       }
       teams.appendChild(vs);
-      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos));
+      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m));
       card.appendChild(teams);
 
       const actions = document.createElement("div");
@@ -304,12 +395,14 @@ export class UniverseMode {
   private runInstantSim(m: Matchup) {
     if (!this.universe) return;
     const u = this.universe;
-    const map = loadCustomMap() ?? makeMap();
+    const map = u.map ?? (loadCustomMap() ?? makeMap());
+    if (!u.map) u.map = map;
+    if (m.seed === undefined) m.seed = newSeed();
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
     const ctTeam = buildTeam("ct", "CT-side", ctPlayers, "CT");
     const tTeam  = buildTeam("t",  "T-side",  tPlayers,  "T");
-    const result = simulateMatchInstant(ctTeam, tTeam, map);
+    const result = simulateMatchInstant(ctTeam, tTeam, map, m.seed);
     m.status = "completed";
     m.ctScore = result.ctScore;
     m.tScore  = result.tScore;
@@ -318,7 +411,7 @@ export class UniverseMode {
     m.playerStats = result.playerStats;
     const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
-    applyMatchElo(winners, losers, u.elos);
+    m.eloDelta = applyMatchElo(winners, losers, u.elos);
   }
 
   private playMatchup(id: string) {
@@ -338,7 +431,9 @@ export class UniverseMode {
     const m = this.findMatchup(this.activeMatchupId);
     if (!m) { this.screen = "matchups"; this.render(); return; }
     const u = this.universe;
-    const map = loadCustomMap() ?? makeMap();
+    const map = u.map ?? (loadCustomMap() ?? makeMap());
+    if (!u.map) u.map = map;
+    if (m.seed === undefined) m.seed = newSeed();
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
 
@@ -346,6 +441,7 @@ export class UniverseMode {
       ctName: "CT-side",
       tName: "T-side",
       ctPlayers, tPlayers, map,
+      seed: m.seed,
       onDone: (result) => {
         m.status = "completed";
         m.ctScore = result.ctScore;
@@ -355,7 +451,7 @@ export class UniverseMode {
     m.playerStats = result.playerStats;
         const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
-        applyMatchElo(winners, losers, u.elos);
+        m.eloDelta = applyMatchElo(winners, losers, u.elos);
         this.persist();
         this.activeMatchupId = null;
         this.screen = "matchups";
@@ -403,7 +499,7 @@ export class UniverseMode {
 
     for (let i = 0; i < capped; i++) {
       if (!u.pendingDay) {
-        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players) };
+        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
       }
       for (const m of u.pendingDay.matchups) {
         if (m.status !== "completed") this.runInstantSim(m);
@@ -433,13 +529,20 @@ export class UniverseMode {
     this.startDay();
   }
 
-  // ---- Standings screen ----
+  // ---- Standings (player ratings) screen ----
 
   private renderStandings(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
     const table = playerTable(u.players, u.elos, /* showElo */ true, id => this.openPlayer(id));
     body.appendChild(table);
+  }
+
+  // ---- Career stats screen ----
+
+  private renderCareer(body: HTMLElement) {
+    if (!this.universe) return;
+    body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id)));
   }
 
   // ---- Player page ----
@@ -457,30 +560,45 @@ export class UniverseMode {
       this.render();
       return;
     }
-    body.appendChild(playerPage(p, u));
+    body.appendChild(playerPage(p, u, (day, idx, round) => this.openReplay(day, idx, round)));
   }
 }
 
 // ---- Matchup generation (random for MVP — Swiss + chemistry come later) ----
 
-function generateMatchups(players: Player[]): Matchup[] {
-  const shuffled = [...players];
-  // Fisher-Yates
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
+// Snake-draft pattern for splitting 10 elo-sorted players into two balanced
+// teams: A picks 1st, B picks 2nd+3rd, A picks 4th+5th, etc. Pretty close to
+// even by sum of ranks (27 vs 28).
+const SNAKE_DRAFT: Array<"A" | "B"> = ["A", "B", "B", "A", "A", "B", "B", "A", "A", "B"];
+
+function generateMatchups(players: Player[], elos: Record<string, number>): Matchup[] {
+  // Sort by elo desc so every block of 10 is a tight skill band. Stable
+  // tiebreak by id keeps the bracket order deterministic for equal elos.
+  const ranked = [...players].sort((a, b) => {
+    const da = elos[a.id] ?? STARTING_ELO;
+    const db = elos[b.id] ?? STARTING_ELO;
+    if (db !== da) return db - da;
+    return a.id.localeCompare(b.id);
+  });
   const matchups: Matchup[] = [];
   for (let i = 0; i < MATCHUPS_PER_DAY; i++) {
-    const block = shuffled.slice(i * TEAM_SIZE * 2, (i + 1) * TEAM_SIZE * 2);
+    const block = ranked.slice(i * TEAM_SIZE * 2, (i + 1) * TEAM_SIZE * 2);
+    const ct: Player[] = [];
+    const t: Player[] = [];
+    block.forEach((p, idx) => (SNAKE_DRAFT[idx] === "A" ? ct : t).push(p));
     matchups.push({
       id: `m${i}`,
-      ctPlayerIds: block.slice(0, TEAM_SIZE).map(p => p.id),
-      tPlayerIds:  block.slice(TEAM_SIZE, TEAM_SIZE * 2).map(p => p.id),
+      ctPlayerIds: ct.map(p => p.id),
+      tPlayerIds:  t.map(p => p.id),
       status: "pending",
+      seed: newSeed(),
     });
   }
   return matchups;
+}
+
+function newSeed(): number {
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
 }
 
 // ---- UI helpers ----
@@ -490,21 +608,29 @@ function rosterColumn(
   ids: string[],
   byId: Map<string, Player>,
   elos: Record<string, number>,
+  matchup: Matchup,
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
 
-  // Faceit-style team naming: the highest-elo player names the team. Tie-break
-  // deterministically by player id so the display stays stable across renders.
+  // After a match, show each player's elo as it was BEFORE the match plus a
+  // ±delta chip. The absolute delta is shared across the roster; the sign
+  // flips by side. Before the match, just show the current elo.
+  const isDone = matchup.status === "completed" && matchup.eloDelta !== undefined && matchup.winnerSide;
+  const signedDelta = isDone
+    ? (side === matchup.winnerSide ? +matchup.eloDelta! : -matchup.eloDelta!)
+    : 0;
+  const eloFor = (id: string) => (elos[id] ?? STARTING_ELO) - signedDelta;
+
   const players = ids.map(id => byId.get(id)).filter((p): p is Player => !!p);
   const captain = [...players].sort((a, b) => {
-    const da = elos[a.id] ?? STARTING_ELO;
-    const db = elos[b.id] ?? STARTING_ELO;
+    const da = eloFor(a.id);
+    const db = eloFor(b.id);
     if (db !== da) return db - da;
     return a.id.localeCompare(b.id);
   })[0];
   const avgElo = players.length
-    ? players.reduce((s, p) => s + (elos[p.id] ?? STARTING_ELO), 0) / players.length
+    ? players.reduce((s, p) => s + eloFor(p.id), 0) / players.length
     : STARTING_ELO;
 
   const header = document.createElement("div");
@@ -517,7 +643,15 @@ function rosterColumn(
   for (const p of players) {
     const row = document.createElement("div");
     row.className = "umc-roster-row";
-    row.innerHTML = `<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span><span class="umc-elo">${Math.round(elos[p.id] ?? STARTING_ELO)}</span>`;
+    const preElo = Math.round(eloFor(p.id));
+    let eloHtml = `<span class="umc-elo">${preElo}</span>`;
+    if (isDone) {
+      const delta = Math.round(signedDelta);
+      const cls = delta >= 0 ? "umc-elo-delta good" : "umc-elo-delta bad";
+      const sign = delta >= 0 ? "+" : "−";
+      eloHtml += `<span class="${cls}">${sign}${Math.abs(delta)}</span>`;
+    }
+    row.innerHTML = `<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span>${eloHtml}`;
     col.appendChild(row);
   }
   return col;
@@ -615,6 +749,144 @@ function playerTable(
   return wrap;
 }
 
+// Career stats table — aggregates each player's game log into a sortable
+// per-player overview of their performance across the whole universe history.
+function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLElement {
+  interface CareerRow {
+    p: Player;
+    elo: number;
+    matches: number;
+    winPct: number;
+    record: string;
+    kills: number;
+    deaths: number;
+    assists: number;
+    kd: number;
+    adr: number | null;
+    rating: number | null;
+    clutches: number;
+    k2: number; k3: number; k4: number; k5: number;
+    clutchBuckets: ClutchBucketStats[];     // length 5: 1v1..1v5
+  }
+
+  const rows: CareerRow[] = u.players.map(p => {
+    const log = buildGameLog(p.id, u);
+    const c = summarizeCareer(log);
+    const clutches = log.reduce((s, g) => s + g.clutches.length, 0);
+    const clutchBuckets = summarizeClutchBuckets(log);
+    return {
+      p,
+      elo: u.elos[p.id] ?? STARTING_ELO,
+      matches: c.played,
+      winPct: c.played > 0 ? (c.wins / c.played) * 100 : 0,
+      record: `${c.wins}-${c.losses}`,
+      kills: c.kills,
+      deaths: c.deaths,
+      assists: c.assists,
+      kd: c.deaths > 0 ? c.kills / c.deaths : c.kills,
+      adr: c.adr,
+      rating: c.rating,
+      clutches,
+      k2: c.k2, k3: c.k3, k4: c.k4, k5: c.k5,
+      clutchBuckets,
+    };
+  });
+
+  type Col = {
+    label: string;
+    cellHtml: (r: CareerRow) => string;
+    cmp: (a: CareerRow, b: CareerRow) => number;
+    cls?: string;
+  };
+  const numCmp = (sel: (r: CareerRow) => number) => (a: CareerRow, b: CareerRow) => sel(a) - sel(b);
+  const cols: Col[] = [
+    { label: "Name",   cellHtml: r => `<span class="name-cell">${escapeHtml(r.p.name)}</span>`, cmp: (a, b) => a.p.name.localeCompare(b.p.name) },
+    { label: "From",   cellHtml: r => `<span class="flag">${flagEmoji(r.p.country)}</span> ${escapeHtml(r.p.country)}`, cmp: (a, b) => a.p.country.localeCompare(b.p.country), cls: "country-cell" },
+    { label: "Role",   cellHtml: r => escapeHtml(r.p.role), cmp: (a, b) => a.p.role.localeCompare(b.p.role) },
+    { label: "Elo",    cellHtml: r => String(Math.round(r.elo)), cmp: numCmp(r => r.elo) },
+    { label: "M",      cellHtml: r => String(r.matches), cmp: numCmp(r => r.matches) },
+    { label: "Record", cellHtml: r => r.record, cmp: numCmp(r => r.matches > 0 ? r.winPct : -1) },
+    { label: "Win %",  cellHtml: r => r.matches > 0 ? `${Math.round(r.winPct)}%` : "—", cmp: numCmp(r => r.winPct) },
+    { label: "K",      cellHtml: r => String(r.kills), cmp: numCmp(r => r.kills) },
+    { label: "D",      cellHtml: r => String(r.deaths), cmp: numCmp(r => r.deaths) },
+    { label: "A",      cellHtml: r => String(r.assists), cmp: numCmp(r => r.assists) },
+    { label: "K/D",    cellHtml: r => r.deaths + r.kills > 0 ? r.kd.toFixed(2) : "—", cmp: numCmp(r => r.kd) },
+    { label: "ADR",    cellHtml: r => r.adr !== null ? r.adr.toFixed(1) : "—", cmp: numCmp(r => r.adr ?? -1) },
+    { label: "Rating", cellHtml: r => r.rating !== null
+        ? `<span style="color:${r.rating >= 1 ? "var(--good)" : "var(--bad)"};font-weight:700">${r.rating.toFixed(2)}</span>`
+        : "—", cmp: numCmp(r => r.rating ?? -1) },
+    { label: "2K",     cellHtml: r => String(r.k2), cmp: numCmp(r => r.k2) },
+    { label: "3K",     cellHtml: r => String(r.k3), cmp: numCmp(r => r.k3) },
+    { label: "4K",     cellHtml: r => String(r.k4), cmp: numCmp(r => r.k4) },
+    { label: "Ace",    cellHtml: r => r.k5 > 0 ? `<span style="color:var(--accent);font-weight:700">${r.k5}</span>` : "0", cmp: numCmp(r => r.k5) },
+    { label: "Clutch", cellHtml: r => r.clutches > 0 ? `<span style="color:var(--accent);font-weight:600">${r.clutches}</span>` : "0", cmp: numCmp(r => r.clutches) },
+    ...([1, 2, 3, 4, 5] as const).map(bn => ({
+      label: `1v${bn}`,
+      cellHtml: (r: CareerRow) => {
+        const b = r.clutchBuckets[bn - 1];
+        if (b.attempts === 0) return `<span class="upp-gl-missing">—</span>`;
+        const rate = Math.round((b.wins / b.attempts) * 100);
+        return `<span>${b.wins}/${b.attempts}</span> <span class="upp-gl-missing" style="font-size:11px">${rate}%</span>`;
+      },
+      // Sort primarily by conversion rate, then by attempts (more attempts wins ties).
+      cmp: (a: CareerRow, b2: CareerRow) => {
+        const ra = a.clutchBuckets[bn - 1].attempts > 0 ? a.clutchBuckets[bn - 1].wins / a.clutchBuckets[bn - 1].attempts : -1;
+        const rb = b2.clutchBuckets[bn - 1].attempts > 0 ? b2.clutchBuckets[bn - 1].wins / b2.clutchBuckets[bn - 1].attempts : -1;
+        if (ra !== rb) return ra - rb;
+        return a.clutchBuckets[bn - 1].attempts - b2.clutchBuckets[bn - 1].attempts;
+      },
+    })),
+  ];
+
+  let sortIdx = cols.findIndex(c => c.label === "Rating");
+  let sortDir: 1 | -1 = -1;
+
+  const wrap = document.createElement("div");
+  wrap.className = "universe-player-table-wrap";
+
+  const draw = () => {
+    wrap.innerHTML = "";
+    const table = document.createElement("table");
+    table.className = "universe-player-table";
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    cols.forEach((c, i) => {
+      const th = document.createElement("th");
+      th.textContent = c.label + (sortIdx === i ? (sortDir === -1 ? " ▼" : " ▲") : "");
+      th.onclick = () => {
+        if (sortIdx === i) sortDir = (sortDir === 1 ? -1 : 1);
+        else { sortIdx = i; sortDir = -1; }
+        draw();
+      };
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const sorted = [...rows].sort((a, b) => cols[sortIdx].cmp(a, b) * sortDir);
+    const tbody = document.createElement("tbody");
+    for (const r of sorted) {
+      const tr = document.createElement("tr");
+      if (onPick) {
+        tr.classList.add("clickable-row");
+        tr.onclick = () => onPick(r.p.id);
+      }
+      for (const c of cols) {
+        const td = document.createElement("td");
+        td.innerHTML = c.cellHtml(r);
+        if (c.cls) td.className = c.cls;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  };
+
+  draw();
+  return wrap;
+}
+
 // Map a 0-100 rating to a red→yellow→green background. Stats here cluster in
 // roughly 30-90, so anchor the gradient between those for stronger contrast.
 function ratingColor(v: number): string {
@@ -674,15 +946,19 @@ const STAT_GROUPS: { label: string; keys: (keyof import("../domain/types.ts").Pl
   { label: "Weapon prefs", keys: ["pistolPref", "riflePref", "awpPref", "smgPref"] },
 ];
 
-function playerPage(p: Player, u: Universe): HTMLElement {
+function playerPage(
+  p: Player, u: Universe,
+  onReplay: (day: number, matchIdx: number, startAtRound?: number) => void,
+): HTMLElement {
   const root = document.createElement("div");
   root.className = "universe-player-page";
 
   const elo = Math.round(u.elos[p.id] ?? STARTING_ELO);
   const log = buildGameLog(p.id, u);
   const career = summarizeCareer(log);
-  const clutchBuckets = summarizeClutches(log);
-  const totalClutches = clutchBuckets.reduce((s, b) => s + b.count, 0);
+  const clutchBuckets = summarizeClutchBuckets(log);
+  const totalClutchWins = clutchBuckets.reduce((s, b) => s + b.wins, 0);
+  const totalClutchAttempts = clutchBuckets.reduce((s, b) => s + b.attempts, 0);
 
   // ----- Header -----
   const header = document.createElement("div");
@@ -786,30 +1062,58 @@ function playerPage(p: Player, u: Universe): HTMLElement {
     root.appendChild(relsCard);
   }
 
-  // ----- Clutches -----
+  // ----- Clutches (conversion by 1vX bucket) -----
   const clutchCard = document.createElement("div");
   clutchCard.className = "upp-clutches";
   const clutchTitle = document.createElement("div");
   clutchTitle.className = "upp-stat-title";
-  clutchTitle.textContent = `Clutches (${totalClutches})`;
+  const overallRate = totalClutchAttempts > 0
+    ? Math.round((totalClutchWins / totalClutchAttempts) * 100)
+    : 0;
+  clutchTitle.textContent = totalClutchAttempts > 0
+    ? `Clutches (${totalClutchWins} / ${totalClutchAttempts} · ${overallRate}%)`
+    : `Clutches (0)`;
   clutchCard.appendChild(clutchTitle);
-  if (totalClutches === 0) {
-    const empty = document.createElement("div");
-    empty.className = "upp-gamelog-empty";
-    empty.textContent = "No clutches yet.";
-    clutchCard.appendChild(empty);
-  } else {
-    const row = document.createElement("div");
-    row.className = "upp-clutch-row";
-    for (const b of clutchBuckets) {
-      const cell = document.createElement("div");
-      cell.className = "upp-clutch-cell";
-      cell.innerHTML = `<div class="upp-clutch-label">${escapeHtml(b.label)}</div><div class="upp-clutch-val">${b.count}</div>`;
-      row.appendChild(cell);
-    }
-    clutchCard.appendChild(row);
+  const row = document.createElement("div");
+  row.className = "upp-clutch-row";
+  for (const b of clutchBuckets) {
+    const cell = document.createElement("div");
+    cell.className = "upp-clutch-cell";
+    const rate = b.attempts > 0 ? Math.round((b.wins / b.attempts) * 100) : null;
+    const rateStr = rate !== null ? `${rate}%` : "—";
+    cell.innerHTML =
+      `<div class="upp-clutch-label">1v${b.bucket}</div>` +
+      `<div class="upp-clutch-val">${b.wins}<span class="upp-clutch-attempts">/${b.attempts}</span></div>` +
+      `<div class="upp-clutch-rate">${rateStr}</div>`;
+    row.appendChild(cell);
   }
+  clutchCard.appendChild(row);
   root.appendChild(clutchCard);
+
+  // ----- Multi-kill rounds -----
+  const mkCard = document.createElement("div");
+  mkCard.className = "upp-clutches";
+  const mkTitle = document.createElement("div");
+  mkTitle.className = "upp-stat-title";
+  const mkTotal = career.k2 + career.k3 + career.k4 + career.k5;
+  mkTitle.textContent = `Multi-kill rounds (${mkTotal})`;
+  mkCard.appendChild(mkTitle);
+  const mkBuckets: { label: string; count: number }[] = [
+    { label: "2K",  count: career.k2 },
+    { label: "3K",  count: career.k3 },
+    { label: "4K",  count: career.k4 },
+    { label: "Ace", count: career.k5 },
+  ];
+  const mkRow = document.createElement("div");
+  mkRow.className = "upp-clutch-row";
+  for (const b of mkBuckets) {
+    const cell = document.createElement("div");
+    cell.className = "upp-clutch-cell";
+    cell.innerHTML = `<div class="upp-clutch-label">${escapeHtml(b.label)}</div><div class="upp-clutch-val">${b.count}</div>`;
+    mkRow.appendChild(cell);
+  }
+  mkCard.appendChild(mkRow);
+  root.appendChild(mkCard);
 
   // ----- Game log -----
   const logCard = document.createElement("div");
@@ -846,9 +1150,6 @@ function playerPage(p: Player, u: Universe): HTMLElement {
       const oppLabel = oppCaptain ? `Team ${shortName(oppCaptain)}` : "—";
       const sideClass = g.side === "CT" ? "ct" : "t";
       const resultClass = g.won ? "good" : "bad";
-      const clutchLabel = g.clutches.length
-        ? g.clutches.map(k => `1v${k}`).join(", ")
-        : "";
       const s = g.stats;
       const adr = s && s.roundsPlayed > 0 ? s.damage / s.roundsPlayed : null;
       const rating = s ? hltvRating1(s) : null;
@@ -870,8 +1171,34 @@ function playerPage(p: Player, u: Universe): HTMLElement {
         ${numCell(s?.damage ?? null)}
         ${numCell(adr, 1)}
         ${ratingCell}
-        <td class="upp-gl-clutch">${clutchLabel}</td>
       `;
+
+      // Clutch cell: build with per-clutch chips so each can deep-link into
+      // the replay starting at that round.
+      const clutchTd = document.createElement("td");
+      clutchTd.className = "upp-gl-clutch";
+      g.clutches.forEach((c, ci) => {
+        if (ci > 0) clutchTd.appendChild(document.createTextNode(", "));
+        const chip = document.createElement("span");
+        chip.textContent = `1v${c.kills}`;
+        if (g.seed !== undefined && c.round !== undefined) {
+          chip.className = "upp-gl-clutch-chip";
+          chip.title = `Replay round ${c.round}`;
+          chip.onclick = (ev) => {
+            ev.stopPropagation();
+            onReplay(g.day, g.matchIdx, c.round);
+          };
+        }
+        clutchTd.appendChild(chip);
+      });
+      tr.appendChild(clutchTd);
+
+      // Whole-match replay: clickable row, only when seed is recorded.
+      if (g.seed !== undefined) {
+        tr.classList.add("clickable-row");
+        tr.title = "Replay match";
+        tr.onclick = () => onReplay(g.day, g.matchIdx);
+      }
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -895,13 +1222,25 @@ function playerPage(p: Player, u: Universe): HTMLElement {
 
 interface GameLogEntry {
   day: number;
+  matchIdx: number;
+  seed: number | undefined;
   side: "CT" | "T";
   ownScore: number;
   oppScore: number;
   won: boolean;
   opponentIds: string[];
-  clutches: number[];        // per-clutch kill counts (e.g. [2, 3] = 1v2 + 1v3)
+  // Only successful clutches end up here — used for the kills/round chips.
+  clutches: { kills: number; round: number | undefined }[];
+  // Full attempt list (won + lost) for opportunity tracking.
+  clutchAttempts: { bucket: number; won: boolean; round: number | undefined }[];
   stats: import("./types.ts").PlayerMatchStats | null;
+}
+
+// Resolve which 1vX bucket a clutch belongs to. Prefer enemiesAtStart (the
+// standard definition); fall back to kills for legacy saves where only
+// successful clutches were recorded with their kill count.
+function clutchBucket(c: { kills: number; enemiesAtStart?: number; won?: boolean }): number {
+  return c.enemiesAtStart ?? c.kills ?? 0;
 }
 
 // HLTV 1.0 rating from per-match stats. Constants are the league averages used
@@ -918,29 +1257,40 @@ function hltvRating1(s: import("./types.ts").PlayerMatchStats): number {
 function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
   const out: GameLogEntry[] = [];
   for (const day of u.history) {
-    for (const m of day.matchups) {
+    day.matchups.forEach((m, idx) => {
       if (m.status !== "completed" || !m.winnerSide
-          || m.ctScore === undefined || m.tScore === undefined) continue;
+          || m.ctScore === undefined || m.tScore === undefined) return;
       const onCt = m.ctPlayerIds.includes(playerId);
       const onT  = m.tPlayerIds.includes(playerId);
-      if (!onCt && !onT) continue;
+      if (!onCt && !onT) return;
       const side: "CT" | "T" = onCt ? "CT" : "T";
       const ownScore = onCt ? m.ctScore : m.tScore;
       const oppScore = onCt ? m.tScore : m.ctScore;
-      const clutches = (m.clutches ?? [])
-        .filter(c => c.playerId === playerId)
-        .map(c => c.kills);
+      const myClutches = (m.clutches ?? []).filter(c => c.playerId === playerId);
+      // Only successful clutches show in the game log (you can replay them).
+      // Legacy entries (no `won` field) are treated as successful.
+      const clutches = myClutches
+        .filter(c => c.won !== false)
+        .map(c => ({ kills: c.kills, round: c.round }));
+      const clutchAttempts = myClutches.map(c => ({
+        bucket: clutchBucket(c),
+        won: c.won !== false,
+        round: c.round,
+      }));
       out.push({
         day: day.day,
+        matchIdx: idx,
+        seed: m.seed,
         side,
         ownScore,
         oppScore,
         won: (onCt && m.winnerSide === "CT") || (onT && m.winnerSide === "T"),
         opponentIds: onCt ? m.tPlayerIds : m.ctPlayerIds,
         clutches,
+        clutchAttempts,
         stats: m.playerStats?.[playerId] ?? null,
       });
-    }
+    });
   }
   // Most recent first.
   out.sort((a, b) => b.day - a.day);
@@ -950,13 +1300,22 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
 // Group clutches into 1v1..1v5 buckets by the number of kills the player got
 // while last alive. Any clutch with 0 kills (e.g. T-side clutch where the bomb
 // detonates) is bucketed as 1v0 only if present.
-function summarizeClutches(log: GameLogEntry[]): { label: string; count: number }[] {
-  const counts = new Map<number, number>();
+interface ClutchBucketStats { bucket: number; wins: number; attempts: number; }
+
+function summarizeClutchBuckets(log: GameLogEntry[]): ClutchBucketStats[] {
+  // Always show the standard 1v1..1v5 buckets so conversion% has stable
+  // columns even when a bucket has zero attempts.
+  const buckets = new Map<number, ClutchBucketStats>();
+  for (const b of [1, 2, 3, 4, 5]) buckets.set(b, { bucket: b, wins: 0, attempts: 0 });
   for (const g of log) {
-    for (const k of g.clutches) counts.set(k, (counts.get(k) ?? 0) + 1);
+    for (const a of g.clutchAttempts) {
+      const b = Math.max(1, Math.min(5, a.bucket));
+      const s = buckets.get(b)!;
+      s.attempts++;
+      if (a.won) s.wins++;
+    }
   }
-  const keys = [...counts.keys()].sort((a, b) => a - b);
-  return keys.map(k => ({ label: `1v${k}`, count: counts.get(k)! }));
+  return [...buckets.values()];
 }
 
 function summarizeCareer(log: GameLogEntry[]) {
@@ -993,6 +1352,7 @@ function summarizeCareer(log: GameLogEntry[]) {
     adr: rounds > 0 ? damage / rounds : null,
     rating,
     hasStats: matchesWithStats > 0,
+    k2, k3, k4, k5,
   };
 }
 

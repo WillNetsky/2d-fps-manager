@@ -1,4 +1,4 @@
-import type { Player } from "../domain/types.ts";
+import type { GameMap, Player } from "../domain/types.ts";
 
 export interface UniverseSummary {
   id: string;
@@ -16,6 +16,9 @@ export interface Universe {
   elos: Record<string, number>;             // playerId -> elo
   history: CompletedDay[];                  // all past days
   pendingDay: PendingDay | null;            // in-progress day (if any)
+  // Snapshotted at universe creation so every match (and replay) uses the same
+  // arena. Optional because legacy saves predate this field.
+  map?: GameMap;
 }
 
 export interface PendingDay {
@@ -33,11 +36,26 @@ export interface Matchup {
   winnerSide?: "CT" | "T";
   clutches?: Clutch[];                      // clutches won during this match
   playerStats?: Record<string, PlayerMatchStats>;
+  // Master RNG seed used to simulate the match. Lets us deterministically
+  // replay the match (or jump to any round) without storing the event stream.
+  seed?: number;
+  // Absolute elo delta applied to each player at the end of this match.
+  // Sign depends on side: winning side gains, losing side loses by the same
+  // amount. Recorded so the post-match card can show original elo + ±delta.
+  eloDelta?: number;
 }
 
 export interface Clutch {
   playerId: string;
   kills: number;                            // kills the player got while last alive
+  // X in 1vX: enemies remaining at the moment they became the last survivor.
+  // Optional for legacy saves predating opportunity tracking; fall back to
+  // `kills` (which matches won-clutch math when they killed all enemies).
+  enemiesAtStart?: number;
+  // false = clutch opportunity that wasn't converted (player died/round lost).
+  // Legacy saves only stored won clutches → treat undefined as true.
+  won?: boolean;
+  round?: number;                           // round number (1-based) the clutch happened in
 }
 
 export interface PlayerMatchStats {

@@ -11,6 +11,31 @@ export interface MatchResult {
   winnerSide: "CT" | "T";
   clutches: Clutch[];
   playerStats: Record<string, PlayerMatchStats>;
+  // Per-round outcomes (only populated by simulateMatchInstant; replay UI
+  // uses this to render the timeline up front).
+  roundOutcomes?: RoundOutcome[];
+}
+
+export interface RoundOutcome {
+  round: number;
+  winnerSide: "CT" | "T";
+  durationMs: number;
+  ctScoreAfter: number;
+  tScoreAfter: number;
+}
+
+// Tiny, self-contained 32-bit RNG. Two RNGs with the same seed produce the
+// same stream — that's the whole point: a single saved seed reproduces the
+// entire match.
+export function mulberry32(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 // Per-round, increment the appropriate multi-kill bucket (k1..k5) for every
@@ -54,15 +79,16 @@ export function buildPlayerStats(
   return out;
 }
 
-// Inspect a finished round and, if the winning side won with exactly one
-// player alive after some point, return that player and the number of kills
-// they got while they were the last one alive. Returns null otherwise.
+// Inspect a finished round and, if a player ever became their team's last
+// survivor, return the clutch attempt with X = enemies-remaining when the
+// clutch started, kills they got during it, and whether they converted (won
+// the round). Returns null only if neither team dropped to one alive.
 export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): Clutch | null {
   const ctSet = new Set(ctIds);
   const tSet = new Set(tIds);
   const aliveCt = new Set(ctIds);
   const aliveT = new Set(tIds);
-  let clutcher: { id: string; side: Side; kills: number } | null = null;
+  let clutcher: { id: string; side: Side; kills: number; enemiesAtStart: number; died: boolean } | null = null;
 
   for (const ev of r.events) {
     if (ev.kind !== "kill") continue;
@@ -70,32 +96,36 @@ export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): C
     if (aliveCt.has(ev.victim)) aliveCt.delete(ev.victim);
     else if (aliveT.has(ev.victim)) aliveT.delete(ev.victim);
 
-    // First time a side drops to one survivor: that player is the potential clutcher.
+    // First time a side drops to one survivor: that player is the clutcher.
     if (!clutcher) {
       if (aliveCt.size === 1) {
         const last = [...aliveCt][0];
-        clutcher = { id: last, side: "CT", kills: 0 };
+        clutcher = { id: last, side: "CT", kills: 0, enemiesAtStart: aliveT.size, died: false };
       } else if (aliveT.size === 1) {
         const last = [...aliveT][0];
-        clutcher = { id: last, side: "T", kills: 0 };
+        clutcher = { id: last, side: "T", kills: 0, enemiesAtStart: aliveCt.size, died: false };
       }
     }
 
-    // Count opposing-side kills made by the clutcher *after* they became last alive.
-    // (The kill that triggered the clutch came from the other team and is excluded
-    // because clutcher is assigned after this kill is applied.)
+    // Count opposing-side kills made by the clutcher after they became last alive.
     if (clutcher && ev.killer === clutcher.id) {
       const opp = clutcher.side === "CT" ? tSet : ctSet;
       if (opp.has(ev.victim)) clutcher.kills++;
     }
 
-    // If the clutcher dies their team is wiped → no clutch.
-    if (clutcher && ev.victim === clutcher.id) return null;
+    if (clutcher && ev.victim === clutcher.id) clutcher.died = true;
   }
 
   if (!clutcher) return null;
-  if (clutcher.side !== r.winningSide) return null;
-  return { playerId: clutcher.id, kills: clutcher.kills };
+  // Won iff their side won the round AND they didn't die — either path being
+  // false means a missed opportunity (round lost, or died but bomb detonated).
+  const won = !clutcher.died && clutcher.side === r.winningSide;
+  return {
+    playerId: clutcher.id,
+    kills: clutcher.kills,
+    enemiesAtStart: clutcher.enemiesAtStart,
+    won,
+  };
 }
 
 const STARTING_BANK = 800;
@@ -128,19 +158,22 @@ export function buildTeam(id: string, name: string, players: Player[], side: Sid
 // Headless: simulate a full MR12 match instantly. No rendering. Returns the
 // final score. Mutates the team objects but they're already match-scoped
 // (created by buildTeam, which clones the underlying player data).
-export function simulateMatchInstant(ct: Team, t: Team, map: GameMap): MatchResult {
+export function simulateMatchInstant(ct: Team, t: Team, map: GameMap, seed: number): MatchResult {
   let homeCtTeam = ct;     // tracks which roster is currently on CT side
   let homeTteam = t;
   let lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
   let roundNumber = 1;
   const clutches: Clutch[] = [];
   const multi = new Map<string, [number, number, number, number, number]>();
+  const masterRng = mulberry32(seed);
+  const intFrom = () => Math.floor(masterRng() * 0x100000000);
+  const roundOutcomes: RoundOutcome[] = [];
   // SAFETY: bound the loop in case of a misbehaving sim.
   while (roundNumber <= MAX_ROUNDS && ct.roundsWon < WIN_THRESHOLD && t.roundsWon < WIN_THRESHOLD) {
-    aiBuyFor(homeCtTeam, roundNumber, isPistolRound);
-    aiBuyFor(homeTteam, roundNumber, isPistolRound);
+    aiBuyFor(homeCtTeam, roundNumber, isPistolRound, mulberry32(intFrom()));
+    aiBuyFor(homeTteam, roundNumber, isPistolRound, mulberry32(intFrom()));
 
-    const sim = new RoundSim(homeCtTeam, homeTteam, map, Math.floor(Math.random() * 1e9));
+    const sim = new RoundSim(homeCtTeam, homeTteam, map, intFrom());
     let safety = 100000;
     while (!sim.finished && safety-- > 0) sim.tick();
     if (!sim.result) break;
@@ -149,8 +182,15 @@ export function simulateMatchInstant(ct: Team, t: Team, map: GameMap): MatchResu
     const winner = r.winningSide === "CT" ? homeCtTeam : homeTteam;
     winner.roundsWon++;
     const clutch = detectClutch(r, homeCtTeam.players.map(p => p.id), homeTteam.players.map(p => p.id));
-    if (clutch) clutches.push(clutch);
+    if (clutch) clutches.push({ ...clutch, round: roundNumber });
     tallyMultiKills(r, multi);
+    roundOutcomes.push({
+      round: roundNumber,
+      winnerSide: r.winningSide,
+      durationMs: sim.t,
+      ctScoreAfter: ct.roundsWon,
+      tScoreAfter: t.roundsWon,
+    });
     lossStreaks = applyRoundReward(homeCtTeam, homeTteam, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
 
     // Carry over survivor loadout state so next round's AI buy considers kept guns.
@@ -179,6 +219,7 @@ export function simulateMatchInstant(ct: Team, t: Team, map: GameMap): MatchResu
   return {
     ctScore: ct.roundsWon, tScore: t.roundsWon, winnerSide, clutches,
     playerStats: buildPlayerStats(ct, t, multi),
+    roundOutcomes,
   };
 }
 
