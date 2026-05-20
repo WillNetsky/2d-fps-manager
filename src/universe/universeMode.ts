@@ -756,9 +756,15 @@ function generateMatchups(players: Player[], elos: Record<string, number>, mapCo
   const matchups: Matchup[] = [];
   for (let i = 0; i < MATCHUPS_PER_DAY; i++) {
     const block = ranked.slice(i * TEAM_SIZE * 2, (i + 1) * TEAM_SIZE * 2);
-    const ct: Player[] = [];
-    const t: Player[] = [];
-    block.forEach((p, idx) => (SNAKE_DRAFT[idx] === "A" ? ct : t).push(p));
+    const teamA: Player[] = [];
+    const teamB: Player[] = [];
+    block.forEach((p, idx) => (SNAKE_DRAFT[idx] === "A" ? teamA : teamB).push(p));
+    // Randomize which snake-draft bucket starts on CT. Otherwise the snake
+    // pattern would always put the same rank on T (e.g. the lowest-elo
+    // player in each block is always in bucket B and would always start T).
+    const aStartsCt = Math.random() < 0.5;
+    const ct = aStartsCt ? teamA : teamB;
+    const t  = aStartsCt ? teamB : teamA;
     matchups.push({
       id: `m${i}`,
       ctPlayerIds: ct.map(p => p.id),
