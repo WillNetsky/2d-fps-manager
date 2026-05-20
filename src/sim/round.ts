@@ -46,6 +46,13 @@ const ROTATE_LOG_COOLDOWN = 4000;
 
 const HEARING_RANGE = 240;       // pixels — enemy footsteps audible within this
 const SOUND_INTEL_BUMP = 0.5;    // less precise than LOS sighting
+// Comms-gated footstep relay: a hearing agent buffers a call to their team
+// that takes time to land and may name the wrong site. Both quantities scale
+// with the hearer's communication stat.
+const COMMS_DELAY_MIN_MS = 120;
+const COMMS_DELAY_MAX_MS = 1700;
+const COMMS_ACCURACY_FLOOR = 0.55;   // min p(correct site) for a low-comms call
+const COMMS_ACCURACY_CEILING = 0.96; // max p(correct site) for a great communicator
 const WALK_SPEED_FACTOR = 0.55;
 const CONTACT_RADIUS = 220;      // walk when within this of assigned contact zone
 
@@ -158,6 +165,10 @@ export class RoundSim {
   private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private molotovQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private heQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
+  // Pending teammate callouts from heard footsteps. arrivesAt is the sim time
+  // when the call lands and bumps team intel for the chosen (possibly wrong)
+  // site. Strength is the intel bump magnitude.
+  private commsCalls: { side: Side; site: SiteId; arrivesAt: number; strength: number }[] = [];
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -620,17 +631,43 @@ export class RoundSim {
         }
       }
     }
-    // Sound: running agents leak intel to enemies within hearing range (no LOS required).
+    // Sound: a hearing agent doesn't dump intel onto the team board directly.
+    // They make a comms call — delayed and possibly mis-sited — scaled by
+    // their `communication` stat. Higher comms → faster, more accurate calls.
     for (const a of this.agents) {
-      if (!a.alive || a.moveMode !== "run") continue;
+      if (!a.alive) continue;
       for (const e of this.agents) {
-        if (!e.alive || e.side === a.side) continue;
+        if (!e.alive || e.side === a.side || e.moveMode !== "run") continue;
         if (dist(a.pos, e.pos) > HEARING_RANGE) continue;
-        const site = this.nearestSiteId(a.pos);
-        const intel = this.intel[e.side][site];
-        intel.score = Math.min(INTEL_CAP, intel.score + SOUND_INTEL_BUMP);
+        const trueSite = this.nearestSiteId(e.pos);
+        const comm = this.players(a.playerId)?.stats.communication ?? 50;
+        const t01 = clamp((comm - 30) / 55, 0, 1);  // 30 → 0, 85 → 1
+        const accuracy = COMMS_ACCURACY_FLOOR + (COMMS_ACCURACY_CEILING - COMMS_ACCURACY_FLOOR) * t01;
+        const delay = COMMS_DELAY_MAX_MS - (COMMS_DELAY_MAX_MS - COMMS_DELAY_MIN_MS) * t01;
+        const calledSite: SiteId = this.rng() < accuracy
+          ? trueSite
+          : (trueSite === "A" ? "B" : "A");
+        // Strength scales with accuracy too — confident, well-relayed info
+        // moves the needle more than a vague "I think I heard something".
+        const strength = SOUND_INTEL_BUMP * (0.4 + 0.8 * t01);
+        this.commsCalls.push({
+          side: a.side,
+          site: calledSite,
+          arrivesAt: this.t + delay,
+          strength,
+        });
+      }
+    }
+    // Drain calls that have landed: those are what teammates actually act on.
+    if (this.commsCalls.length > 0) {
+      const stillPending: typeof this.commsCalls = [];
+      for (const c of this.commsCalls) {
+        if (c.arrivesAt > this.t) { stillPending.push(c); continue; }
+        const intel = this.intel[c.side][c.site];
+        intel.score = Math.min(INTEL_CAP, intel.score + c.strength);
         intel.updatedAt = this.t;
       }
+      this.commsCalls = stillPending;
     }
   }
 
