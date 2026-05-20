@@ -117,6 +117,24 @@ export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): C
   }
 
   if (!clutcher) return null;
+
+  // Sanity guards against false positives. A real clutch requires that the
+  // clutcher's team genuinely had only the clutcher alive at some point. If
+  // either of these checks fails, treat it as not a clutch — most likely the
+  // input roster was truncated (e.g. a lookup dropped players) so the alive
+  // set hit "size 1" without actually being last alive.
+  const sideSize = (clutcher.side === "CT" ? ctIds : tIds).length;
+  // At least N-1 teammate deaths must have shown up on the kill stream for
+  // someone on that side to actually be last alive.
+  const teammateDeaths = r.events.filter(e =>
+    e.kind === "kill" &&
+    (clutcher!.side === "CT" ? ctSet.has(e.victim) : tSet.has(e.victim))
+  ).length;
+  if (teammateDeaths < sideSize - 1) return null;
+  // And at end-of-events the side's tracked alive count should be ≤ 1.
+  const teamAliveAtEnd = clutcher.side === "CT" ? aliveCt.size : aliveT.size;
+  if (teamAliveAtEnd > 1) return null;
+
   // Won iff their side won the round AND they didn't die — either path being
   // false means a missed opportunity (round lost, or died but bomb detonated).
   const won = !clutcher.died && clutcher.side === r.winningSide;

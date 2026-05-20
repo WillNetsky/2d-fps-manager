@@ -16,8 +16,12 @@ export interface Universe {
   elos: Record<string, number>;             // playerId -> elo
   history: CompletedDay[];                  // all past days
   pendingDay: PendingDay | null;            // in-progress day (if any)
-  // Snapshotted at universe creation so every match (and replay) uses the same
-  // arena. Optional because legacy saves predate this field.
+  // Rotation pool of map snapshots. Every match picks one (currently at
+  // random); the index is stored on the matchup so replays land on the same
+  // map deterministically. Always has length ≥ 1 while a universe is live.
+  maps?: GameMap[];
+  // Legacy single-map field — kept for back-compat with universes saved
+  // before the rotation pool existed. On load it's migrated into maps[0].
   map?: GameMap;
 }
 
@@ -43,6 +47,9 @@ export interface Matchup {
   // Sign depends on side: winning side gains, losing side loses by the same
   // amount. Recorded so the post-match card can show original elo + ±delta.
   eloDelta?: number;
+  // Index into Universe.maps for the map this matchup is played on. Defaults
+  // to 0 for legacy matchups generated before the rotation pool existed.
+  mapIndex?: number;
 }
 
 export interface Clutch {

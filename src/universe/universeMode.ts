@@ -13,10 +13,10 @@ import {
   type Matchup, type Universe,
 } from "./types.ts";
 
-type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "player" | "replay";
+type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
 
-// Screens that share the day-view tab bar (matchups + two stat tables).
-const DAY_TABS: Screen[] = ["matchups", "standings", "career"];
+// Screens that share the day-view tab bar.
+const DAY_TABS: Screen[] = ["matchups", "standings", "career", "settings"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -66,6 +66,7 @@ export class UniverseMode {
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
       case "career":    this.renderCareer(body); break;
+      case "settings":  this.renderSettings(body); break;
       case "player":    this.renderPlayer(body); break;
       case "replay":    this.renderReplay(body); break;
     }
@@ -86,7 +87,8 @@ export class UniverseMode {
     const ref = this.replayRef;
     const day = u.history.find(d => d.day === ref.day);
     const m = day?.matchups[ref.matchIdx];
-    if (!m || m.seed === undefined || !u.map) { this.exitReplay(); return; }
+    if (!m || m.seed === undefined || !u.maps || u.maps.length === 0) { this.exitReplay(); return; }
+    const map = u.maps[m.mapIndex ?? 0] ?? u.maps[0];
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
     const back = () => this.exitReplay();
@@ -94,7 +96,7 @@ export class UniverseMode {
       ctName: "CT-side",
       tName: "T-side",
       ctPlayers, tPlayers,
-      map: u.map,
+      map,
       seed: m.seed,
       startAtRound: ref.startAtRound,
       isReplay: true,
@@ -123,9 +125,10 @@ export class UniverseMode {
     const u = this.universe!;
     const hasPending = !!u.pendingDay;
     const tabs: { key: Screen; label: string; show: boolean }[] = [
-      { key: "matchups",  label: "Matchups",     show: hasPending },
+      { key: "matchups",  label: "Matchups",       show: hasPending },
       { key: "standings", label: "Player ratings", show: true },
       { key: "career",    label: "Career stats",   show: true },
+      { key: "settings",  label: "Settings",       show: true },
     ];
     for (const t of tabs) {
       if (!t.show) continue;
@@ -176,7 +179,8 @@ export class UniverseMode {
 
     if (this.screen === "players" && this.universe) {
       right.appendChild(btn("Continue to universe →", "primary", () => this.startDay()));
-    } else if (DAY_TABS.includes(this.screen) && this.universe && this.universe.pendingDay) {
+    } else if (DAY_TABS.includes(this.screen) && this.screen !== "settings"
+               && this.universe && this.universe.pendingDay) {
       right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
       const allDone = this.universe.pendingDay.matchups.every(m => m.status === "completed");
       if (allDone) {
@@ -277,8 +281,8 @@ export class UniverseMode {
       elos,
       history: [],
       pendingDay: null,
-      // Lock in one map for the universe so every match (and replay) reuses it.
-      map: loadCustomMap() ?? makeMap(),
+      // Start with one map in rotation — settings tab lets the user add more.
+      maps: [loadCustomMap() ?? makeMap()],
     };
     this.persist();
     this.screen = "players";
@@ -288,13 +292,16 @@ export class UniverseMode {
   private loadUniverseById(id: string) {
     const u = loadUniverse(id);
     if (!u) return;
-    // Migrate older saves that predate the universe-level map.
-    if (!u.map) u.map = loadCustomMap() ?? makeMap();
+    // Migrate older saves that predate the universe-level map / map rotation.
+    if (!u.maps || u.maps.length === 0) {
+      u.maps = [u.map ?? loadCustomMap() ?? makeMap()];
+    }
+    delete u.map;
     // Older saves may have rolled a day into history without generating the
     // next day's matchups. The day view now always expects a pendingDay, so
     // backfill one before rendering.
     if (!u.pendingDay && u.history.length > 0) {
-      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
     }
     this.universe = u;
     this.screen = u.pendingDay ? "matchups" : "players";
@@ -321,7 +328,7 @@ export class UniverseMode {
     if (!this.universe.pendingDay) {
       this.universe.pendingDay = {
         day: this.universe.day,
-        matchups: generateMatchups(this.universe.players, this.universe.elos),
+        matchups: generateMatchups(this.universe.players, this.universe.elos, this.universe.maps?.length ?? 1),
       };
       this.persist();
     }
@@ -393,8 +400,11 @@ export class UniverseMode {
   private runInstantSim(m: Matchup) {
     if (!this.universe) return;
     const u = this.universe;
-    const map = u.map ?? (loadCustomMap() ?? makeMap());
-    if (!u.map) u.map = map;
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+    if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
+      m.mapIndex = Math.floor(Math.random() * u.maps.length);
+    }
+    const map = u.maps[m.mapIndex];
     if (m.seed === undefined) m.seed = newSeed();
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
@@ -429,8 +439,11 @@ export class UniverseMode {
     const m = this.findMatchup(this.activeMatchupId);
     if (!m) { this.screen = "matchups"; this.render(); return; }
     const u = this.universe;
-    const map = u.map ?? (loadCustomMap() ?? makeMap());
-    if (!u.map) u.map = map;
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+    if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
+      m.mapIndex = Math.floor(Math.random() * u.maps.length);
+    }
+    const map = u.maps[m.mapIndex];
     if (m.seed === undefined) m.seed = newSeed();
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
@@ -484,7 +497,7 @@ export class UniverseMode {
     const done = u.pendingDay!;
     u.history.push({ day: done.day, matchups: done.matchups });
     u.day++;
-    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
     this.persist();
     this.screen = "matchups";
     this.render();
@@ -506,7 +519,7 @@ export class UniverseMode {
 
     for (let i = 0; i < capped; i++) {
       if (!u.pendingDay) {
-        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
       }
       for (const m of u.pendingDay.matchups) {
         if (m.status !== "completed") this.runInstantSim(m);
@@ -523,7 +536,7 @@ export class UniverseMode {
     // Drop the user into the next day's pending matchups so the day view
     // always has something to act on.
     if (!u.pendingDay) {
-      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos) };
+      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
     }
     this.persist();
     overlay.el.remove();
@@ -545,6 +558,79 @@ export class UniverseMode {
   private renderCareer(body: HTMLElement) {
     if (!this.universe) return;
     body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id)));
+  }
+
+  // ---- Settings screen ----
+
+  private renderSettings(body: HTMLElement) {
+    if (!this.universe) return;
+    const u = this.universe;
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? makeMap()];
+
+    const wrap = document.createElement("div");
+    wrap.className = "universe-settings";
+
+    const card = document.createElement("div");
+    card.className = "universe-settings-card";
+    wrap.appendChild(card);
+
+    const h = document.createElement("h2");
+    h.textContent = "Map rotation";
+    card.appendChild(h);
+
+    const sub = document.createElement("p");
+    sub.className = "universe-settings-sub";
+    sub.textContent = "Each match picks one map from this pool at random. Adding more variety here changes future matchups only — already-generated games keep their assigned map.";
+    card.appendChild(sub);
+
+    const list = document.createElement("div");
+    list.className = "universe-map-list";
+    u.maps.forEach((map, idx) => {
+      const row = document.createElement("div");
+      row.className = "universe-map-row";
+      const left = document.createElement("div");
+      left.className = "umr-info";
+      left.innerHTML = `<div class="umr-name">${escapeHtml(map.name || `Map ${idx + 1}`)}</div>` +
+                       `<div class="umr-meta">${map.width}×${map.height} tiles · ${map.bombsites.length} sites</div>`;
+      row.appendChild(left);
+      const actions = document.createElement("div");
+      // Removing must keep at least one map in the pool, otherwise future
+      // matchup generation has nothing to assign.
+      if (u.maps!.length > 1) {
+        actions.appendChild(btn("Remove", "danger", () => {
+          u.maps!.splice(idx, 1);
+          this.persist();
+          this.render();
+        }));
+      }
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+
+    const addRow = document.createElement("div");
+    addRow.className = "universe-map-add";
+    addRow.appendChild(btn("+ Add default map", "", () => {
+      u.maps!.push(makeMap());
+      this.persist();
+      this.render();
+    }));
+    const custom = loadCustomMap();
+    if (custom) {
+      addRow.appendChild(btn("+ Add current custom map", "", () => {
+        u.maps!.push(loadCustomMap()!);
+        this.persist();
+        this.render();
+      }));
+    } else {
+      const hint = document.createElement("span");
+      hint.className = "universe-settings-hint";
+      hint.textContent = "(No custom map saved — open the map editor to make one)";
+      addRow.appendChild(hint);
+    }
+    card.appendChild(addRow);
+
+    body.appendChild(wrap);
   }
 
   // ---- Player page ----
@@ -573,7 +659,7 @@ export class UniverseMode {
 // even by sum of ranks (27 vs 28).
 const SNAKE_DRAFT: Array<"A" | "B"> = ["A", "B", "B", "A", "A", "B", "B", "A", "A", "B"];
 
-function generateMatchups(players: Player[], elos: Record<string, number>): Matchup[] {
+function generateMatchups(players: Player[], elos: Record<string, number>, mapCount: number): Matchup[] {
   // Sort by elo desc so every block of 10 is a tight skill band. Stable
   // tiebreak by id keeps the bracket order deterministic for equal elos.
   const ranked = [...players].sort((a, b) => {
@@ -582,6 +668,7 @@ function generateMatchups(players: Player[], elos: Record<string, number>): Matc
     if (db !== da) return db - da;
     return a.id.localeCompare(b.id);
   });
+  const pool = Math.max(1, mapCount);
   const matchups: Matchup[] = [];
   for (let i = 0; i < MATCHUPS_PER_DAY; i++) {
     const block = ranked.slice(i * TEAM_SIZE * 2, (i + 1) * TEAM_SIZE * 2);
@@ -594,6 +681,7 @@ function generateMatchups(players: Player[], elos: Record<string, number>): Matc
       tPlayerIds:  t.map(p => p.id),
       status: "pending",
       seed: newSeed(),
+      mapIndex: Math.floor(Math.random() * pool),
     });
   }
   return matchups;

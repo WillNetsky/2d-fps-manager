@@ -1005,6 +1005,28 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .ustats-teams { grid-template-columns: 1fr; }
 }
 
+/* Settings tab */
+.universe-settings { max-width: 720px; margin: 0 auto; }
+.universe-settings-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 18px 20px;
+}
+.universe-settings-card h2 {
+  font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin: 0 0 6px 0;
+}
+.universe-settings-sub { color: var(--muted); font-size: 12px; margin: 0 0 16px 0; }
+.universe-map-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.universe-map-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 10px 14px;
+}
+.umr-name { font-weight: 600; font-size: 14px; }
+.umr-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.universe-map-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.universe-settings-hint { color: var(--muted); font-size: 11px; font-style: italic; }
+
 /* Day-view tab bar */
 .universe-tabs {
   display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line);
