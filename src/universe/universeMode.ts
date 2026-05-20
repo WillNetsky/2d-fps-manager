@@ -1,7 +1,8 @@
-import type { Player } from "../domain/types.ts";
+import type { GameMap, Player } from "../domain/types.ts";
 import { makeMap, makePlayer, setSeed } from "../domain/factory.ts";
 import { flagEmoji } from "../domain/countries.ts";
-import { loadCustomMap } from "../editor/mapEditor.ts";
+import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
+import { builtinMaps } from "../domain/builtinMaps.ts";
 import { applyMatchElo } from "./elo.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { observeMatch } from "./observeMatch.ts";
@@ -608,26 +609,70 @@ export class UniverseMode {
     });
     card.appendChild(list);
 
+    // Collect everything available across the four storage sources so the
+    // user can add any of them to this universe's rotation.
+    interface Source { key: string; label: string; map: () => GameMap; }
+    const sources: { group: string; items: Source[] }[] = [];
+    sources.push({
+      group: "Built-in",
+      items: builtinMaps().map(m => ({
+        key: `b:${m.name}`,
+        label: m.name,
+        map: () => deepCloneMap(m),
+      })),
+    });
+    sources.push({
+      group: "Default",
+      items: [{ key: "default", label: "de_dust2_legally_distinct", map: () => makeMap() }],
+    });
+    const saved = loadSavedMapsAll();
+    const savedNames = Object.keys(saved).sort();
+    if (savedNames.length > 0) {
+      sources.push({
+        group: "Saved (editor)",
+        items: savedNames.map(name => ({
+          key: `s:${name}`,
+          label: name,
+          map: () => deepCloneMap(saved[name]),
+        })),
+      });
+    }
+    const draft = loadCustomMap();
+    if (draft) {
+      sources.push({
+        group: "Editor draft",
+        items: [{ key: "draft", label: draft.name || "Current draft", map: () => deepCloneMap(draft) }],
+      });
+    }
+
     const addRow = document.createElement("div");
     addRow.className = "universe-map-add";
-    addRow.appendChild(btn("+ Add default map", "", () => {
-      u.maps!.push(makeMap());
-      this.persist();
-      this.render();
-    }));
-    const custom = loadCustomMap();
-    if (custom) {
-      addRow.appendChild(btn("+ Add current custom map", "", () => {
-        u.maps!.push(loadCustomMap()!);
-        this.persist();
-        this.render();
-      }));
-    } else {
-      const hint = document.createElement("span");
-      hint.className = "universe-settings-hint";
-      hint.textContent = "(No custom map saved — open the map editor to make one)";
-      addRow.appendChild(hint);
+    const select = document.createElement("select");
+    select.className = "universe-map-select";
+    for (const group of sources) {
+      const og = document.createElement("optgroup");
+      og.label = group.group;
+      for (const item of group.items) {
+        const opt = document.createElement("option");
+        opt.value = item.key;
+        opt.textContent = item.label;
+        og.appendChild(opt);
+      }
+      select.appendChild(og);
     }
+    addRow.appendChild(select);
+    addRow.appendChild(btn("+ Add to rotation", "primary", () => {
+      const key = select.value;
+      for (const group of sources) {
+        const found = group.items.find(it => it.key === key);
+        if (found) {
+          u.maps!.push(found.map());
+          this.persist();
+          this.render();
+          return;
+        }
+      }
+    }));
     card.appendChild(addRow);
 
     body.appendChild(wrap);
@@ -689,6 +734,23 @@ function generateMatchups(players: Player[], elos: Record<string, number>, mapCo
 
 function newSeed(): number {
   return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+// Deep-clone a map so adding the same source twice doesn't share mutable
+// arrays between rotation entries.
+function deepCloneMap(m: GameMap): GameMap {
+  return {
+    name: m.name,
+    width: m.width,
+    height: m.height,
+    tileSize: m.tileSize,
+    walls: [...m.walls],
+    ctSpawns: m.ctSpawns.map(s => ({ x: s.x, y: s.y })),
+    tSpawns: m.tSpawns.map(s => ({ x: s.x, y: s.y })),
+    bombsites: m.bombsites.map(b => ({ id: b.id, center: { x: b.center.x, y: b.center.y }, radius: b.radius })),
+    wallColor: m.wallColor,
+    floorColor: m.floorColor,
+  };
 }
 
 // ---- UI helpers ----
