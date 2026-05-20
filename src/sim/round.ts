@@ -46,13 +46,17 @@ const ROTATE_LOG_COOLDOWN = 4000;
 
 const HEARING_RANGE = 240;       // pixels — enemy footsteps audible within this
 const SOUND_INTEL_BUMP = 0.5;    // less precise than LOS sighting
-// Comms-gated footstep relay: a hearing agent buffers a call to their team
-// that takes time to land and may name the wrong site. Both quantities scale
-// with the hearer's communication stat.
+// Comms-gated callouts: a hearing agent broadcasts a perceived enemy POSITION
+// to their team. Lower communication → longer delay and a larger random
+// offset on the called position.
 const COMMS_DELAY_MIN_MS = 120;
 const COMMS_DELAY_MAX_MS = 1700;
-const COMMS_ACCURACY_FLOOR = 0.55;   // min p(correct site) for a low-comms call
-const COMMS_ACCURACY_CEILING = 0.96; // max p(correct site) for a great communicator
+const COMMS_NOISE_MIN_PX = 30;
+const COMMS_NOISE_MAX_PX = 360;
+// How long radar pings persist before they fall off the shared map. Sound
+// entries linger a bit longer because the team has nothing fresher to go on.
+const RADAR_TTL_LOS_MS = 1200;
+const RADAR_TTL_SOUND_MS = 2500;
 const WALK_SPEED_FACTOR = 0.55;
 const CONTACT_RADIUS = 220;      // walk when within this of assigned contact zone
 
@@ -165,10 +169,18 @@ export class RoundSim {
   private flashQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private molotovQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
   private heQueue: { thrower: string; spot: Vec2; throwAt: number }[] = [];
-  // Pending teammate callouts from heard footsteps. arrivesAt is the sim time
-  // when the call lands and bumps team intel for the chosen (possibly wrong)
-  // site. Strength is the intel bump magnitude.
-  private commsCalls: { side: Side; site: SiteId; arrivesAt: number; strength: number }[] = [];
+  // Pending teammate callouts from heard footsteps. The call carries a
+  // perceived enemy *position* (noisy for low-comms callers) and lands on the
+  // team radar at arrivesAt — until then the team doesn't know about it.
+  private commsCalls: { side: Side; enemyId: string; pos: Vec2; arrivesAt: number }[] = [];
+  // Shared team radar — what each side "knows" about enemy positions right
+  // now. LOS sightings populate it instantly with true positions; comms
+  // callouts populate it after a delay with possibly-wrong positions. Both
+  // sources expire if nothing refreshes them.
+  perceived: Record<Side, Map<string, { pos: Vec2; at: number; source: "los" | "sound" }>> = {
+    CT: new Map(),
+    T: new Map(),
+  };
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -608,66 +620,90 @@ export class RoundSim {
     });
   }
 
-  // ---- Intel ----
+  // ---- Intel / shared radar ----
   private updateIntel() {
-    // Decay
+    // Decay site scores (kept around as a derived rotation signal).
     for (const side of ["CT", "T"] as const) {
       this.intel[side].A.score *= INTEL_DECAY;
       this.intel[side].B.score *= INTEL_DECAY;
+      // Expire radar pings whose source TTL has elapsed.
+      for (const [id, entry] of this.perceived[side]) {
+        const ttl = entry.source === "los" ? RADAR_TTL_LOS_MS : RADAR_TTL_SOUND_MS;
+        if (this.t - entry.at > ttl) this.perceived[side].delete(id);
+      }
     }
-    // Each living agent bumps their team's intel for each visible enemy.
+
+    // LOS sightings: any teammate seeing an enemy publishes the actual enemy
+    // position to the shared radar (CS2-style — everyone reads from the same
+    // map). Overwrites any prior sound entry for that enemy since LOS is
+    // always more authoritative than a relayed callout.
     for (const a of this.agents) {
       if (!a.alive) continue;
       for (const e of this.agents) {
         if (!e.alive || e.side === a.side) continue;
         if (!this.hasLineOfSight(a.pos, e.pos)) continue;
-        const site = this.nearestSiteId(e.pos);
-        const intel = this.intel[a.side][site];
-        intel.score = Math.min(INTEL_CAP, intel.score + INTEL_BUMP);
-        intel.updatedAt = this.t;
-        // Spotting the bomb carrier is a much stronger signal than any other sighting.
+        this.perceived[a.side].set(e.playerId, {
+          pos: { x: e.pos.x, y: e.pos.y },
+          at: this.t,
+          source: "los",
+        });
         if (e.playerId === this.bombCarrier) {
-          intel.bombSeenAt = this.t;
+          // Bomb-carrier sighting still gets the dedicated bombSeenAt flag
+          // that the rotation logic checks separately.
+          this.intel[a.side][this.nearestSiteId(e.pos)].bombSeenAt = this.t;
         }
       }
     }
-    // Sound: a hearing agent doesn't dump intel onto the team board directly.
-    // They make a comms call — delayed and possibly mis-sited — scaled by
-    // their `communication` stat. Higher comms → faster, more accurate calls.
+
+    // Sound: any agent who hears a running enemy queues a delayed callout
+    // carrying their *guess* at the enemy's position. Higher communication
+    // → smaller guess offset and shorter delay.
     for (const a of this.agents) {
       if (!a.alive) continue;
       for (const e of this.agents) {
         if (!e.alive || e.side === a.side || e.moveMode !== "run") continue;
         if (dist(a.pos, e.pos) > HEARING_RANGE) continue;
-        const trueSite = this.nearestSiteId(e.pos);
         const comm = this.players(a.playerId)?.stats.communication ?? 50;
-        const t01 = clamp((comm - 30) / 55, 0, 1);  // 30 → 0, 85 → 1
-        const accuracy = COMMS_ACCURACY_FLOOR + (COMMS_ACCURACY_CEILING - COMMS_ACCURACY_FLOOR) * t01;
+        const t01 = clamp((comm - 30) / 55, 0, 1);
         const delay = COMMS_DELAY_MAX_MS - (COMMS_DELAY_MAX_MS - COMMS_DELAY_MIN_MS) * t01;
-        const calledSite: SiteId = this.rng() < accuracy
-          ? trueSite
-          : (trueSite === "A" ? "B" : "A");
-        // Strength scales with accuracy too — confident, well-relayed info
-        // moves the needle more than a vague "I think I heard something".
-        const strength = SOUND_INTEL_BUMP * (0.4 + 0.8 * t01);
+        const noiseR = COMMS_NOISE_MAX_PX - (COMMS_NOISE_MAX_PX - COMMS_NOISE_MIN_PX) * t01;
+        const r = Math.sqrt(this.rng()) * noiseR;     // uniform disc
+        const theta = this.rng() * Math.PI * 2;
         this.commsCalls.push({
           side: a.side,
-          site: calledSite,
+          enemyId: e.playerId,
+          pos: { x: e.pos.x + Math.cos(theta) * r, y: e.pos.y + Math.sin(theta) * r },
           arrivesAt: this.t + delay,
-          strength,
         });
       }
     }
-    // Drain calls that have landed: those are what teammates actually act on.
+
+    // Drain landed callouts onto the radar. Don't clobber a fresh LOS ping
+    // with a stale sound guess — what the team actually saw beats a guess.
     if (this.commsCalls.length > 0) {
       const stillPending: typeof this.commsCalls = [];
       for (const c of this.commsCalls) {
         if (c.arrivesAt > this.t) { stillPending.push(c); continue; }
-        const intel = this.intel[c.side][c.site];
-        intel.score = Math.min(INTEL_CAP, intel.score + c.strength);
-        intel.updatedAt = this.t;
+        const existing = this.perceived[c.side].get(c.enemyId);
+        if (existing && existing.source === "los" && this.t - existing.at < RADAR_TTL_LOS_MS) continue;
+        this.perceived[c.side].set(c.enemyId, {
+          pos: c.pos, at: c.arrivesAt, source: "sound",
+        });
       }
       this.commsCalls = stillPending;
+    }
+
+    // Derive per-site intel scores from the radar so existing rotation logic
+    // (which reads intel[side][site].score) keeps working but is now driven
+    // by perceived positions rather than direct LOS bumps. An LOS ping is
+    // worth a full INTEL_BUMP; a sound ping the smaller SOUND bump.
+    for (const side of ["CT", "T"] as const) {
+      for (const entry of this.perceived[side].values()) {
+        const site = this.nearestSiteId(entry.pos);
+        const bump = entry.source === "los" ? INTEL_BUMP : SOUND_INTEL_BUMP;
+        this.intel[side][site].score = Math.min(INTEL_CAP, this.intel[side][site].score + bump);
+        this.intel[side][site].updatedAt = this.t;
+      }
     }
   }
 
