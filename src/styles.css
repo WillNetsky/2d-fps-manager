@@ -949,17 +949,6 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--line); margin: 0 4px;
 }
 
-/* Match replay: round scrubber */
-.universe-round-scrub {
-  height: 10px; background: var(--panel-2); cursor: pointer;
-  border: 1px solid var(--line); border-radius: 4px;
-  position: relative; width: 100%; align-self: stretch;
-}
-.urs-fill {
-  height: 100%; background: var(--accent); width: 0%; border-radius: 3px;
-  transition: width 80ms linear;
-}
-.universe-round-scrub:hover { border-color: var(--accent); }
 
 /* Box-score modal */
 .universe-modal-backdrop {
@@ -1095,6 +1084,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-canvas-host { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; width: 100%; }
 .universe-canvas-host canvas { display: block; max-width: 100%; max-height: 100%; }
 .universe-match-controls { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.universe-match .replay { width: 100%; align-self: stretch; border-radius: 4px; border: 1px solid var(--line); }
 .universe-match-controls .speed-btn {
   background: var(--panel); border: 1px solid var(--line); color: var(--text);
   border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px;

@@ -7,6 +7,9 @@ import { Renderer } from "../render/renderer.ts";
 import { KillFeed } from "../ui/killFeed.ts";
 import { buildTeam, buildPlayerStats, detectClutch, mulberry32, simulateMatchInstant, tallyMultiKills, MATCH_CONSTANTS, type MatchResult } from "./matchSim.ts";
 import type { Clutch } from "./types.ts";
+import { Timeline } from "../ui/timeline.ts";
+
+const TICK_MS = 50;
 
 const { STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS, isPistolRound } = MATCH_CONSTANTS;
 
@@ -49,19 +52,15 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   canvasHost.className = "canvas-host universe-canvas-host";
   host.appendChild(canvasHost);
 
-  // Replay-only: scrubber bar for the current round.
-  const scrubEl = document.createElement("div");
-  scrubEl.className = "universe-round-scrub";
-  scrubEl.innerHTML = `<div class="urs-fill"></div>`;
-  if (opts.isReplay) host.appendChild(scrubEl);
-  const scrubFill = scrubEl.querySelector(".urs-fill") as HTMLElement;
-  scrubEl.onclick = (ev) => {
-    if (!opts.isReplay || !sim) return;
-    const rect = scrubEl.getBoundingClientRect();
-    const f = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-    const dur = prescan.roundOutcomes?.[roundNumber - 1]?.durationMs ?? sim.t;
-    scrubTo(f * dur);
-  };
+  // Replay-only: full timeline scrubber with kill markers (reuses the same
+  // widget the live-play replay uses).
+  let roundScrub: Timeline | null = null;
+  if (opts.isReplay) {
+    roundScrub = new Timeline(host, {
+      onSeek: (idx) => scrubTo(idx * TICK_MS),
+      onPlayPauseToggle: () => togglePlayPause(),
+    });
+  }
 
   const controls = document.createElement("div");
   controls.className = "universe-match-controls";
@@ -211,6 +210,22 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     // Snapshot team state AFTER aiBuy so the scrubber can restart the round
     // from the same conditions the live sim is using.
     roundStart = snapshotRoundStart();
+
+    // For the scrubber's kill markers we need this round's event stream up
+    // front. Run a headless sub-sim with the same seed, capture events, then
+    // restore state before kicking off the live sim. The sub-sim mutates
+    // team.matchStats — restoreRoundStart undoes that.
+    let roundEvents: import("../domain/types.ts").SimEvent[] = [];
+    let roundDurationMs = 0;
+    if (opts.isReplay) {
+      const headless = new RoundSim(ctSide, tSideRef, opts.map, currentRoundSeed);
+      let safety = 100000;
+      while (!headless.finished && safety-- > 0) headless.tick();
+      roundEvents = [...headless.events];
+      roundDurationMs = headless.t;
+      restoreRoundStart(roundStart);
+    }
+
     sim = new RoundSim(ctSide, tSideRef, opts.map, currentRoundSeed);
     lastEventIdx = 0;
     killFeed.clear();
@@ -218,7 +233,12 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     renderer.syncAgents(sim);
     paintHud();
     renderTimeline();
-    paintScrub();
+    if (roundScrub) {
+      const totalTicks = Math.max(1, Math.ceil(roundDurationMs / TICK_MS) + 1);
+      roundScrub.setReplay(totalTicks, roundEvents, TICK_MS, `Round ${roundNumber}`, sideOfPlayer);
+      roundScrub.setIndex(0);
+      roundScrub.setPlaying(!paused);
+    }
     if (paused) return;
     if (simRestInstantly) {
       skipRound();
@@ -227,12 +247,34 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     }
   }
 
+  function togglePlayPause() {
+    if (!sim || cleaned) return;
+    if (sim.finished) {
+      // Replay this round from the start.
+      if (roundStart) {
+        restoreRoundStart(roundStart);
+        sim = new RoundSim(ctSide, tSideRef, opts.map, currentRoundSeed);
+        lastEventIdx = 0;
+        killFeed.clear();
+        renderer.clearTransient();
+        renderer.syncAgents(sim);
+      }
+    }
+    paused = !paused;
+    if (paused) {
+      if (simInterval) { clearInterval(simInterval); simInterval = null; }
+    } else if (!simInterval) {
+      simInterval = window.setInterval(tickRound, 50);
+    }
+    roundScrub?.setPlaying(!paused);
+  }
+
   function tickRound() {
     if (!sim || cleaned) return;
     for (let s = 0; s < simSpeed && !sim.finished; s++) sim.tick();
     drainEvents();
     renderer.syncAgents(sim);
-    paintScrub();
+    roundScrub?.setIndex(Math.floor(sim.t / TICK_MS));
     if (sim.finished && sim.result) {
       if (simInterval) clearInterval(simInterval);
       simInterval = null;
@@ -307,7 +349,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     applyRoundOutcome(sim);
     paintHud();
     renderTimeline();
-    paintScrub();
+    if (roundScrub && sim) roundScrub.setIndex(Math.floor(sim.t / TICK_MS));
+    roundScrub?.setPlaying(false);
 
     if (matchIsOver()) {
       const winnerSide: "CT" | "T" = ct.roundsWon > tSide.roundsWon ? "CT" : "T";
@@ -428,20 +471,14 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     while (sim && !sim.finished && sim.t < targetMs && safety-- > 0) sim.tick();
     drainEvents();
     renderer.syncAgents(sim);
-    paintScrub();
-    // Resume live ticking.
-    if (sim && !sim.finished) simInterval = window.setInterval(tickRound, 50);
+    roundScrub?.setIndex(Math.floor(sim.t / TICK_MS));
+    // Resume live ticking only if the user was already playing — scrubbing
+    // shouldn't unpause.
+    if (sim && !sim.finished && !paused) simInterval = window.setInterval(tickRound, 50);
     else if (sim && sim.finished) finishRound();
   }
 
   // --- Replay UI rendering ---
-
-  function paintScrub() {
-    if (!opts.isReplay) return;
-    const dur = prescan.roundOutcomes?.[roundNumber - 1]?.durationMs ?? 1;
-    const f = sim ? Math.max(0, Math.min(1, sim.t / dur)) : 0;
-    scrubFill.style.width = `${(f * 100).toFixed(1)}%`;
-  }
 
   function renderTimeline() {
     if (!opts.isReplay) return;
