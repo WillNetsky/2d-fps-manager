@@ -1625,10 +1625,12 @@ function playerPage(
       g.clutches.forEach((c, ci) => {
         if (ci > 0) clutchTd.appendChild(document.createTextNode(", "));
         const chip = document.createElement("span");
-        chip.textContent = `1v${c.kills}`;
+        // Label by enemies faced (1vX) so it matches the career clutch table;
+        // kills won is shown in the tooltip.
+        chip.textContent = `1v${Math.max(1, c.bucket)}`;
         if (g.seed !== undefined && c.round !== undefined) {
           chip.className = "upp-gl-clutch-chip";
-          chip.title = `Replay round ${c.round}`;
+          chip.title = `${c.kills} kill${c.kills === 1 ? "" : "s"} · replay round ${c.round}`;
           chip.onclick = (ev) => {
             ev.stopPropagation();
             onReplay(g.day, g.matchIdx, c.round);
@@ -1674,8 +1676,10 @@ interface GameLogEntry {
   oppScore: number;
   won: boolean;
   opponentIds: string[];
-  // Only successful clutches end up here — used for the kills/round chips.
-  clutches: { kills: number; round: number | undefined }[];
+  // Only successful clutches end up here — used for the 1vX/round chips.
+  // `bucket` is the number of enemies faced (matches the career table); kills
+  // is how many the clutcher actually got.
+  clutches: { bucket: number; kills: number; round: number | undefined }[];
   // Full attempt list (won + lost) for opportunity tracking.
   clutchAttempts: { bucket: number; won: boolean; round: number | undefined }[];
   stats: import("./types.ts").PlayerMatchStats | null;
@@ -1829,7 +1833,7 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
       const playerSide: "CT" | "T" = onCt ? "CT" : "T";
       const won = playerSide === m.winnerSide;
       const clutches = won
-        ? myClutches.map(c => ({ kills: c.kills, round: c.round }))
+        ? myClutches.map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round }))
         : [];
       const clutchAttempts = myClutches.map(c => ({
         bucket: clutchBucket(c),
