@@ -65,7 +65,10 @@ export type Trait =
 
 export interface Player {
   id: string;
-  name: string;
+  name: string;        // full real name, e.g. "Aleksandr Volkov"
+  handle: string;      // in-game l33t handle, e.g. "v0idK1ng"
+  country: string;     // ISO-3166 alpha-2
+  age: number;
   role: Role;
   stats: PlayerStats;
   traits: Trait[];

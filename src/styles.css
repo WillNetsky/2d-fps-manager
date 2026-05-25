@@ -805,6 +805,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-player-table tr:last-child td { border-bottom: none; }
 .universe-player-table tr:hover td { background: var(--panel-2); }
 .universe-player-table td.name-cell { font-weight: 500; }
+.pt-handle { display: block; }
+.pt-realname { display: block; font-weight: 400; font-size: 11px; color: var(--muted); }
 .universe-player-table tr.clickable-row { cursor: pointer; }
 .universe-player-table tr.clickable-row:hover td.name-cell { color: var(--accent); }
 
@@ -1075,6 +1077,12 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 900px) { .universe-top-performers { grid-template-columns: repeat(2, 1fr); } }
 
 /* Matchup grid */
+.universe-region-header {
+  font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text); margin: 18px 0 10px; padding-bottom: 6px;
+  border-bottom: 2px solid var(--line);
+}
+.universe-region-header:first-child { margin-top: 0; }
 .universe-matchup-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px;
 }

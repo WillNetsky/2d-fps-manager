@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@faker-js/faker": "^10.4.0",
     "pixi.js": "^8.6.6"
   },
   "devDependencies": {

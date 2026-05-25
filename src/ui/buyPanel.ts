@@ -175,7 +175,7 @@ export class BuyPanel {
       const pCost = this.playerCost(p);
       const pRemaining = p.money - pCost;
       const pOver = pRemaining < 0;
-      row.innerHTML = `<div class="name">${p.name} <span class="role">${p.role}</span>
+      row.innerHTML = `<div class="name">${p.handle} <span class="role">${p.role}</span>
         <span class="player-bank" style="float:right;color:${pOver ? "var(--bad)" : "var(--text)"}">$${pRemaining} / $${p.money}</span>
       </div>
         ${topBlock}`;
@@ -289,8 +289,7 @@ export class BuyPanel {
           const classes = ["buy-btn"];
           if (recipientHasBetter) classes.push("locked");
           b.className = classes.join(" ");
-          const short = t.name.match(/"([^"]+)"/)?.[1] ?? t.name.split(" ")[0];
-          b.innerHTML = `<span class="b-name">→ ${short}</span><span class="b-cost">${WEAPONS[keptW].name}</span>`;
+          b.innerHTML = `<span class="b-name">→ ${t.handle}</span><span class="b-cost">${WEAPONS[keptW].name}</span>`;
           b.disabled = recipientHasBetter;
           if (!recipientHasBetter) b.onclick = () => this.giveWeapon(p, t);
           btns.appendChild(b);

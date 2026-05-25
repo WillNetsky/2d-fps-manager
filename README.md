@@ -28,9 +28,18 @@ A 2D top-down team-management game inspired by Counter-Strike (legally distinct)
 ### UI / UX
 - Live round view with CS-style overlays: kill feed in the top-right of the map, centered MVP card on round end (winner, outcome, duration, MVP + what they did)
 - Verbose round log: kills, pickups (weapon swaps), util throws, save/re-engage toggles, bomb pickups, plant/defuse/detonate
-- Round timeline scrubber with per-tick replay and event markers
+- Round timeline scrubber with per-tick replay and event markers; kill feed entries persist during replay playback
 - "Sim round" button autobuys for both sides and fast-forwards the round
 - Built-in map editor at `#editor` with localStorage persistence, validation, "Copy JSON" export, color customization, multiple built-in maps
+
+### Universe mode (MVP)
+- Persistent ecosystem: 400 procedurally generated players — each with a real name (locale-flavored), an in-game handle, nationality/flag, and age — drawn from a shared pool and saved to localStorage across multiple universes
+- Region-based matchmaking: players are partitioned into competitive regions (Europe, CIS, NA, SA, Asia, Oceania) and only matchmake within their own scene; the matchup board groups lobbies by region
+- Daily matchups: each day generates region-grouped 5v5 matchups (skill-banded by Elo within each region); play them out live or sim instantly
+- Elo ratings per player, updated from match results; standings screen ranks the pool
+- Pre-match matchup screen shows both rosters with team name + average Elo above each
+- Postgame results screen with final score, round-by-round breakdown, per-player kills/deaths/**assists**, and per-round MVPs
+- Multiple saved universes via menu (create / load / delete)
 
 ### Balance lab
 - Map balance tester runs N rounds per cell in a Web Worker (off the main thread) using neutralized stats by default
@@ -72,6 +81,7 @@ src/
   ui/          buy panel, team panel, timeline scrubber, kill feed
   editor/      hash-routed map editor
   balance/     balance mode UI + Web Worker
+  universe/    universe mode: player pool, daily matchups, Elo, storage
   game.ts      glue between sim, UI, renderer
   main.ts      dispatcher: editor vs game
 scripts/       Node-side helpers (damage tables, matrix runs) via esbuild

@@ -1,16 +1,19 @@
 import type { GameMap, Player } from "../domain/types.ts";
 import { makePlayer, setSeed } from "../domain/factory.ts";
-import { flagEmoji } from "../domain/countries.ts";
+import {
+  flagEmoji, regionOf, REGION_ORDER, REGION_LABELS, type Region,
+} from "../domain/countries.ts";
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
 import { applyMatchElo } from "./elo.ts";
+import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   deleteUniverse, listUniverses, loadUniverse, newUniverseId, saveUniverse,
 } from "./storage.ts";
 import {
-  MATCHUPS_PER_DAY, PLAYER_COUNT, STARTING_ELO, TEAM_SIZE,
+  PLAYER_COUNT, STARTING_ELO, TEAM_SIZE,
   type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
 
@@ -350,10 +353,27 @@ export class UniverseMode {
       body.appendChild(this.topPerformersGrid(completed, playerById));
     }
 
-    const grid = document.createElement("div");
-    grid.className = "universe-matchup-grid";
+    // Group the board by region. Matchups are generated in region order, but
+    // group explicitly so legacy (region-less) saves still render in one block.
+    const groups = new Map<string, Matchup[]>();
+    for (const m of day.matchups) {
+      const key = m.region ?? "—";
+      (groups.get(key) ?? groups.set(key, []).get(key)!).push(m);
+    }
 
-    day.matchups.forEach((m, i) => {
+    for (const [regionKey, regionMatchups] of groups) {
+      const label = regionKey in REGION_LABELS
+        ? REGION_LABELS[regionKey as Region]
+        : "All regions";
+      const section = document.createElement("div");
+      section.className = "universe-region-header";
+      section.textContent = `${label} · ${regionMatchups.length} match${regionMatchups.length === 1 ? "" : "es"}`;
+      body.appendChild(section);
+
+      const grid = document.createElement("div");
+      grid.className = "universe-matchup-grid";
+
+    regionMatchups.forEach((m, i) => {
       const card = document.createElement("div");
       card.className = "universe-matchup-card " + (m.status === "completed" ? "completed" : "");
 
@@ -389,7 +409,8 @@ export class UniverseMode {
       grid.appendChild(card);
     });
 
-    body.appendChild(grid);
+      body.appendChild(grid);
+    }
   }
 
   // Top 4 players by HLTV rating across completed matches in the current day.
@@ -472,6 +493,7 @@ export class UniverseMode {
     const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
     m.eloDelta = applyMatchElo(winners, losers, u.elos);
+    applyMatchChemistry(u.players, winners, losers);
   }
 
   private playMatchup(id: string) {
@@ -515,6 +537,7 @@ export class UniverseMode {
         const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
         m.eloDelta = applyMatchElo(winners, losers, u.elos);
+        applyMatchChemistry(u.players, winners, losers);
         this.persist();
         this.activeMatchupId = null;
         this.screen = "matchups";
@@ -736,45 +759,127 @@ export class UniverseMode {
   }
 }
 
-// ---- Matchup generation (random for MVP — Swiss + chemistry come later) ----
-
-// Snake-draft pattern for splitting 10 elo-sorted players into two balanced
-// teams: A picks 1st, B picks 2nd+3rd, A picks 4th+5th, etc. Pretty close to
-// even by sum of ranks (27 vs 28).
-const SNAKE_DRAFT: Array<"A" | "B"> = ["A", "B", "B", "A", "A", "B", "B", "A", "A", "B"];
+// ---- Matchup generation: region-locked, friendship-aware ----------------
+//
+// Players matchmake only within their own region. Within a region we let
+// friends group up: strongly-bonded players ([[chemistry]] >= FRIEND_THRESHOLD)
+// form a party that stays on one team, the rest of the slots are filled with
+// the nearest-Elo solo players, and full 5-stacks are paired off by team Elo.
+// Because teammates bond every time they play, the same parties tend to re-form
+// day after day — emergent, self-reinforcing rosters.
 
 function generateMatchups(players: Player[], elos: Record<string, number>, mapCount: number): Matchup[] {
-  // Sort by elo desc so every block of 10 is a tight skill band. Stable
-  // tiebreak by id keeps the bracket order deterministic for equal elos.
-  const ranked = [...players].sort((a, b) => {
-    const da = elos[a.id] ?? STARTING_ELO;
-    const db = elos[b.id] ?? STARTING_ELO;
-    if (db !== da) return db - da;
-    return a.id.localeCompare(b.id);
-  });
   const pool = Math.max(1, mapCount);
+  const eloOf = (p: Player) => elos[p.id] ?? STARTING_ELO;
+  const avgElo = (team: Player[]) => team.reduce((s, p) => s + eloOf(p), 0) / team.length;
+
+  // Partition the pool by competitive region — players only see their own scene.
+  const byRegion = new Map<Region, Player[]>();
+  for (const p of players) {
+    const r = regionOf(p.country);
+    (byRegion.get(r) ?? byRegion.set(r, []).get(r)!).push(p);
+  }
+
   const matchups: Matchup[] = [];
-  for (let i = 0; i < MATCHUPS_PER_DAY; i++) {
-    const block = ranked.slice(i * TEAM_SIZE * 2, (i + 1) * TEAM_SIZE * 2);
-    const teamA: Player[] = [];
-    const teamB: Player[] = [];
-    block.forEach((p, idx) => (SNAKE_DRAFT[idx] === "A" ? teamA : teamB).push(p));
-    // Randomize which snake-draft bucket starts on CT. Otherwise the snake
-    // pattern would always put the same rank on T (e.g. the lowest-elo
-    // player in each block is always in bucket B and would always start T).
-    const aStartsCt = Math.random() < 0.5;
-    const ct = aStartsCt ? teamA : teamB;
-    const t  = aStartsCt ? teamB : teamA;
-    matchups.push({
-      id: `m${i}`,
-      ctPlayerIds: ct.map(p => p.id),
-      tPlayerIds:  t.map(p => p.id),
-      status: "pending",
-      seed: newSeed(),
-      mapIndex: Math.floor(Math.random() * pool),
-    });
+  let idx = 0;
+  // Walk regions in canonical order so the matchup board groups consistently.
+  for (const region of REGION_ORDER) {
+    const inRegion = byRegion.get(region);
+    if (!inRegion || inRegion.length < TEAM_SIZE * 2) continue; // can't field a lobby
+
+    const teams = formTeams(inRegion, eloOf);
+    // Pair adjacent teams by Elo so each matchup is between similar-strength
+    // 5-stacks. An odd team out sits the day.
+    teams.sort((a, b) => avgElo(b) - avgElo(a));
+    for (let i = 0; i + 1 < teams.length; i += 2) {
+      const aStartsCt = Math.random() < 0.5;
+      const ct = aStartsCt ? teams[i] : teams[i + 1];
+      const t  = aStartsCt ? teams[i + 1] : teams[i];
+      matchups.push({
+        id: `m${idx++}`,
+        ctPlayerIds: ct.map(p => p.id),
+        tPlayerIds:  t.map(p => p.id),
+        status: "pending",
+        seed: newSeed(),
+        mapIndex: Math.floor(Math.random() * pool),
+        region,
+      });
+    }
   }
   return matchups;
+}
+
+// Build full 5-player teams out of a region's players, keeping friends together.
+//  1. Grow friendship cliques: anchor on the highest-Elo unassigned player and
+//     repeatedly pull in their strongest available friend (bond >= threshold).
+//  2. Fill each multi-player party up to 5 with the nearest-Elo solo players.
+//  3. Chunk any leftover solos into Elo-banded teams of 5.
+// Players who don't fit a full team sit out the day.
+function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): Player[][] {
+  const byEloDesc = [...regionPlayers].sort(
+    (a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id),
+  );
+  const used = new Set<string>();
+
+  // 1. Friendship cliques.
+  const parties: Player[][] = [];
+  for (const anchor of byEloDesc) {
+    if (used.has(anchor.id)) continue;
+    used.add(anchor.id);
+    const party = [anchor];
+    while (party.length < TEAM_SIZE) {
+      let best: Player | null = null;
+      let bestRel = FRIEND_THRESHOLD - 1; // must clear the friendship bar
+      for (const cand of byEloDesc) {
+        if (used.has(cand.id)) continue;
+        // Strongest bond between the candidate and anyone already in the party.
+        let rel = -Infinity;
+        for (const m of party) rel = Math.max(rel, cand.relationships[m.id] ?? 0);
+        if (rel > bestRel) { bestRel = rel; best = cand; }
+      }
+      if (!best) break;
+      used.add(best.id);
+      party.push(best);
+    }
+    parties.push(party);
+  }
+
+  const solos = parties
+    .filter(p => p.length === 1)
+    .map(p => p[0])
+    .sort((a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id));
+  const groups = parties
+    .filter(p => p.length >= 2)
+    .sort((a, b) => avgOf(b, eloOf) - avgOf(a, eloOf));
+
+  const teams: Player[][] = [];
+
+  // 2. Fill each real party up to 5 with the nearest-Elo solos.
+  for (const g of groups) {
+    const team = [...g];
+    const target = avgOf(g, eloOf);
+    while (team.length < TEAM_SIZE && solos.length > 0) {
+      let bi = 0, bd = Infinity;
+      for (let i = 0; i < solos.length; i++) {
+        const d = Math.abs(eloOf(solos[i]) - target);
+        if (d < bd) { bd = d; bi = i; }
+      }
+      team.push(solos.splice(bi, 1)[0]);
+    }
+    if (team.length === TEAM_SIZE) teams.push(team);
+    // Under-filled (ran out of solos): party sits the day.
+  }
+
+  // 3. Elo-banded teams from the remaining solos.
+  for (let i = 0; i + TEAM_SIZE <= solos.length; i += TEAM_SIZE) {
+    teams.push(solos.slice(i, i + TEAM_SIZE));
+  }
+
+  return teams;
+}
+
+function avgOf(team: Player[], eloOf: (p: Player) => number): number {
+  return team.reduce((s, p) => s + eloOf(p), 0) / team.length;
 }
 
 function newSeed(): number {
@@ -878,7 +983,7 @@ function rosterColumn(
 type SortKey = "name" | "country" | "age" | "role" | "elo" | "aim" | "mechanical" | "cognitive" | "mental" | "utility" | "leader" | "overall";
 
 const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Player, elo: number) => number | string }[] = [
-  { key: "name",       label: "Name",      getter: (p) => p.name },
+  { key: "name",       label: "Name",      getter: (p) => p.handle },
   { key: "country",    label: "From",      getter: (p) => p.country },
   { key: "age",        label: "Age",       getter: (p) => p.age },
   { key: "role",       label: "Role",      getter: (p) => p.role },
@@ -946,10 +1051,14 @@ function playerTable(
         if (col.key === "country") {
           td.innerHTML = `<span class="flag">${flagEmoji(p.country)}</span> ${escapeHtml(p.country)}`;
           td.className = "country-cell";
+        } else if (col.key === "name") {
+          // Handle is the primary identifier; real name rides along underneath.
+          td.innerHTML = `<span class="pt-handle">${escapeHtml(p.handle)}</span>` +
+            `<span class="pt-realname">${escapeHtml(p.name)}</span>`;
+          td.className = "name-cell";
         } else {
           td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
         }
-        if (col.key === "name") td.className = "name-cell";
         // Color-code stat ratings on a red→yellow→green gradient. Elo, age,
         // country, name, and role stay uncolored — they aren't 0-100 ratings.
         if (typeof v === "number" && col.key !== "elo" && col.key !== "age") {
@@ -1018,7 +1127,7 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
   };
   const numCmp = (sel: (r: CareerRow) => number) => (a: CareerRow, b: CareerRow) => sel(a) - sel(b);
   const cols: Col[] = [
-    { label: "Name",   cellHtml: r => `<span class="name-cell">${escapeHtml(r.p.name)}</span>`, cmp: (a, b) => a.p.name.localeCompare(b.p.name) },
+    { label: "Name",   cellHtml: r => `<span class="pt-handle">${escapeHtml(r.p.handle)}</span><span class="pt-realname">${escapeHtml(r.p.name)}</span>`, cmp: (a, b) => a.p.handle.localeCompare(b.p.handle), cls: "name-cell" },
     { label: "From",   cellHtml: r => `<span class="flag">${flagEmoji(r.p.country)}</span> ${escapeHtml(r.p.country)}`, cmp: (a, b) => a.p.country.localeCompare(b.p.country), cls: "country-cell" },
     { label: "Role",   cellHtml: r => escapeHtml(r.p.role), cmp: (a, b) => a.p.role.localeCompare(b.p.role) },
     { label: "Elo",    cellHtml: r => String(Math.round(r.elo)), cmp: numCmp(r => r.elo) },
@@ -1218,8 +1327,7 @@ function boxScoreTable(side: "CT" | "T", ids: string[], m: Matchup, u: Universe)
 }
 
 function shortName(p: Player): string {
-  const m = p.name.match(/"([^"]+)"/);
-  return m ? m[1] : p.name.split(" ")[0];
+  return p.handle;
 }
 
 function escapeHtml(s: string): string {

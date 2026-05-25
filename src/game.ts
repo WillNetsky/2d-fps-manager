@@ -63,9 +63,7 @@ export async function initGame(app: HTMLElement) {
   await renderer.init(canvasHost, map);
   renderer.setNameFor((id) => {
     const p = playerLookup(id);
-    if (!p) return "";
-    const m = p.name.match(/"([^"]+)"/);
-    return m ? m[1] : p.name.split(" ")[0];
+    return p ? p.handle : "";
   });
 
   // --- Panels ---
@@ -485,9 +483,7 @@ export async function initGame(app: HTMLElement) {
   }
 
   function shortName(p: Player | undefined): string {
-    if (!p) return "?";
-    const m = p.name.match(/"([^"]+)"/);
-    return m ? m[1] : p.name.split(" ")[0];
+    return p ? p.handle : "?";
   }
 
   function nearestSiteLetter(sim: RoundSim): "A" | "B" {

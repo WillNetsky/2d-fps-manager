@@ -1,4 +1,5 @@
 import type { GameMap, Player } from "../domain/types.ts";
+import type { Region } from "../domain/countries.ts";
 
 export interface UniverseSummary {
   id: string;
@@ -50,6 +51,9 @@ export interface Matchup {
   // Index into Universe.maps for the map this matchup is played on. Defaults
   // to 0 for legacy matchups generated before the rotation pool existed.
   mapIndex?: number;
+  // Competitive region this lobby was drawn from (e.g. "EU"). Optional for
+  // legacy matchups generated before region-based matchmaking existed.
+  region?: Region;
 }
 
 export interface Clutch {
@@ -81,6 +85,7 @@ export interface CompletedDay {
 }
 
 export const STARTING_ELO = 1000;
-export const PLAYER_COUNT = 100;
+// A larger pool so each competitive region can field several full lobbies a
+// day. Matchmaking partitions by region, so most of these are EU/CIS players.
+export const PLAYER_COUNT = 400;
 export const TEAM_SIZE = 5;
-export const MATCHUPS_PER_DAY = PLAYER_COUNT / (TEAM_SIZE * 2);

@@ -117,7 +117,7 @@ export class TeamPanel {
       }
 
       card.innerHTML = `
-        <div class="name">${p.name} <span class="role">${p.role}</span></div>
+        <div class="name">${p.handle} <span class="role">${p.role}</span></div>
         ${body}
       `;
       this.bodyEl.appendChild(card);

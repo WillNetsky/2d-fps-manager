@@ -148,9 +148,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     opts.ctPlayers.find(p => p.id === id) ?? opts.tPlayers.find(p => p.id === id);
   renderer.setNameFor(id => {
     const p = playerLookup(id);
-    if (!p) return "";
-    const m = p.name.match(/"([^"]+)"/);
-    return m ? m[1] : p.name.split(" ")[0];
+    return p ? p.handle : "";
   });
 
   const killFeed = new KillFeed(canvasHost);
@@ -367,9 +365,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   }
 
   function shortName(p: Player | undefined): string {
-    if (!p) return "?";
-    const m = p.name.match(/"([^"]+)"/);
-    return m ? m[1] : p.name.split(" ")[0];
+    return p ? p.handle : "?";
   }
 
   function matchIsOver(): boolean {
@@ -701,7 +697,7 @@ function renderPostgame(host: HTMLElement, opts: PostgameOptions): void {
     mvpCard.className = "postgame-mvp";
     mvpCard.innerHTML =
       `<div class="pg-mvp-label">Match MVP${onWinner ? "" : " <span class='pg-mvp-sub'>(losing side)</span>"}</div>` +
-      `<div class="pg-mvp-name">${escapePg(mvpPlayer.name)}</div>` +
+      `<div class="pg-mvp-name">${escapePg(shortNamePg(mvpPlayer))}</div>` +
       `<div class="pg-mvp-line">${s.kills} K · ${s.deaths} D · ${s.assists} A · ${roundMvps[mvpId] ?? 0} round MVP${(roundMvps[mvpId] ?? 0) === 1 ? "" : "s"} · ${Math.round(s.damage)} dmg</div>`;
     wrap.appendChild(mvpCard);
   }
@@ -763,8 +759,7 @@ function teamStatsTable(team: Team, roundMvps: Record<string, number>, mvpId: st
 }
 
 function shortNamePg(p: Player): string {
-  const m = p.name.match(/"([^"]+)"/);
-  return m ? m[1] : p.name.split(" ")[0];
+  return p.handle;
 }
 
 function escapePg(s: string): string {

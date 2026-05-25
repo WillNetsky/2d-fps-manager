@@ -1,12 +1,16 @@
 import type { GameMap, Player, PlayerStats, Role, Team, Trait, Vec2 } from "./types.ts";
 import { defaultPistol } from "./weapons.ts";
-
-const FIRST_NAMES = ["Aleks","Niko","Kai","Jin","Theo","Luc","Mateo","Ezra","Otto","Ravi","Sasha","Yuri","Bram","Cy","Dax","Finn"];
-const LAST_NAMES = ["Vale","Reyes","Park","Okafor","Lindholm","Costa","Becker","Marek","Singh","Hass","Doyle","Brandt","Voss","Ahn","Renn","Kazan"];
+import { pickCountry } from "./countries.ts";
+import { generateUsername, resetUsernames } from "./usernames.ts";
 
 // Deterministic-ish RNG so we can seed runs later.
 let rngState = 0xC0FFEE;
-export function setSeed(seed: number) { rngState = seed >>> 0; }
+export function setSeed(seed: number) {
+  rngState = seed >>> 0;
+  // A fresh seed implies a fresh batch of players — clear the handle ledger so
+  // we don't carry collisions over from a prior universe.
+  resetUsernames();
+}
 function rand(): number {
   rngState = (rngState * 1664525 + 1013904223) >>> 0;
   return rngState / 0x1_0000_0000;
@@ -121,11 +125,23 @@ function rollTraits(role: Role): Trait[] {
 let playerCounter = 0;
 export function makePlayer(): Player {
   const id = `p${++playerCounter}`;
-  const name = `${pick(FIRST_NAMES)} "${pick(["zen","fox","ace","ghost","king","ice","null","drift","pulse","raze"])}" ${pick(LAST_NAMES)}`;
+  const country = pickCountry(rand);
+  // Locale-flavored first/last names via faker. Faker has its own RNG, so the
+  // result isn't tied to our seed — acceptable for now; we can wire seeded
+  // faker later if we need fully deterministic universes.
+  const firstName = country.faker.person.firstName();
+  const lastName = country.faker.person.lastName();
+  const handle = generateUsername(rand);
+  // Most pros are 18-28; allow a long tail of prospects and veterans.
+  const age = rollAge();
+  const name = `${firstName} ${lastName}`;
   const stats = rollStats();
   const role = inferRole(stats);
   return {
-    id, name, role,
+    id, name, handle,
+    country: country.code,
+    age,
+    role,
     stats,
     traits: rollTraits(role),
     money: STARTING_PER_PLAYER,
@@ -134,6 +150,16 @@ export function makePlayer(): Player {
     relationships: {},
     ctAssignment: "auto",
   };
+}
+
+// Roughly bell-shaped around 22, with long tails down to 15 and up to 45 so
+// you occasionally get a teen prospect or a journeyman veteran.
+function rollAge(): number {
+  // Sum of two uniforms gives a triangular distribution; scale to 15..45.
+  const r = (rand() + rand()) / 2; // 0..1, peaked at 0.5
+  const skewed = Math.pow(r, 1.4); // pull mode a bit younger
+  const age = Math.round(15 + skewed * 30);
+  return Math.max(15, Math.min(45, age));
 }
 
 export const STARTING_PER_PLAYER = 800;
