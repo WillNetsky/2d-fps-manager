@@ -202,6 +202,10 @@ export interface Agent {
   path: Vec2[];         // remaining waypoints to target (world coords)
   // Per-enemy first-spotted timestamps for reaction-delay gating.
   spotted: Record<string, number>;
+  // Per-enemy most-recent sighting timestamp. Lets a brief loss of line of
+  // sight (e.g. while jiggle-peeking) keep the reaction timer running instead
+  // of resetting it, so two peeking agents actually trade shots.
+  lastSeen: Record<string, number>;
   holdAngle: number | null;
   // Tactical assignment for the round.
   assignedSite: SiteAssignment;

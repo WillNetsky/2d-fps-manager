@@ -37,6 +37,11 @@ const GRENADE_NOISE_PER_SKILL_GAP = 1.5; // px per (100 - skill)
 const TRADE_WINDOW_MS = 2000;
 const TRADE_AIM_BONUS = 0.15;
 
+// How long an enemy stays "spotted" after leaving line of sight. Short LOS
+// breaks (jiggle-peeking, doorways) within this window keep the reaction timer
+// running so re-peeking lets an agent fire instead of resetting every flicker.
+const SPOT_MEMORY_MS = 500;
+
 const INTEL_DOMINANCE = 1.0;     // radar-pressure diff to trigger rotation
 const ROTATE_MIN_T = 6000;       // don't rotate in first N ms of round
 const ROTATE_LOG_COOLDOWN = 4000;
@@ -413,6 +418,7 @@ export class RoundSim {
         target: null,
         path: [],
         spotted: {},
+        lastSeen: {},
         holdAngle: null,
         assignedSite: "A",
         holdPoint: null,
@@ -2075,17 +2081,17 @@ export class RoundSim {
     if (this.t < a.blindedUntil) {
       // Blinded — can't see anything, forget all prior sightings.
       for (const id of Object.keys(a.spotted)) delete a.spotted[id];
+      for (const id of Object.keys(a.lastSeen)) delete a.lastSeen[id];
       return null;
     }
     const visibleEnemies: { e: Agent; d: number }[] = [];
-    const stillSeen = new Set<string>();
 
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
       if (!this.hasLineOfSight(a.pos, e.pos)) continue;
       const d = dist(a.pos, e.pos);
       visibleEnemies.push({ e, d });
-      stillSeen.add(e.playerId);
+      a.lastSeen[e.playerId] = this.t;
       if (a.spotted[e.playerId] === undefined) {
         a.spotted[e.playerId] = this.t;
         // First sight of this enemy this contact — try to take nearby cover
@@ -2095,9 +2101,15 @@ export class RoundSim {
       }
     }
 
-    // Forget enemies we no longer see (so re-spotting requires re-acquiring).
+    // Forget enemies only after they've been out of sight for a short grace
+    // window. A momentary LOS break (a jiggle-peek, a doorway) keeps the
+    // reaction timer running, so re-peeking at someone you just saw lets you
+    // fire instead of restarting the whole reaction every time LOS flickers.
     for (const id of Object.keys(a.spotted)) {
-      if (!stillSeen.has(id)) delete a.spotted[id];
+      if (this.t - (a.lastSeen[id] ?? 0) > SPOT_MEMORY_MS) {
+        delete a.spotted[id];
+        delete a.lastSeen[id];
+      }
     }
 
     // Among acquired enemies (spotted long enough), pick the closest.
