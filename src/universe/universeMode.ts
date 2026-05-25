@@ -592,31 +592,37 @@ export class UniverseMode {
     // Let the browser paint the overlay before we start chewing through days.
     await nextFrame();
 
-    for (let i = 0; i < capped; i++) {
+    // try/finally so the full-screen overlay is ALWAYS removed and the screen
+    // re-renders — otherwise a throw (e.g. storage quota) leaves the blocking
+    // overlay up and the app appears frozen after the last day.
+    try {
+      for (let i = 0; i < capped; i++) {
+        if (!u.pendingDay) {
+          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+        }
+        for (const m of u.pendingDay.matchups) {
+          if (m.status !== "completed") this.runInstantSim(m);
+        }
+        u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
+        u.pendingDay = null;
+        u.day++;
+
+        // Yield to the browser every day so the progress bar updates smoothly.
+        overlay.update(i + 1);
+        await nextFrame();
+      }
+
+      // Drop the user into the next day's pending matchups so the day view
+      // always has something to act on.
       if (!u.pendingDay) {
         u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
       }
-      for (const m of u.pendingDay.matchups) {
-        if (m.status !== "completed") this.runInstantSim(m);
-      }
-      u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
-      u.pendingDay = null;
-      u.day++;
-
-      // Yield to the browser every day so the progress bar updates smoothly.
-      overlay.update(i + 1);
-      await nextFrame();
+      this.persist();
+    } finally {
+      overlay.el.remove();
+      this.screen = "matchups";
+      this.render();
     }
-
-    // Drop the user into the next day's pending matchups so the day view
-    // always has something to act on.
-    if (!u.pendingDay) {
-      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
-    }
-    this.persist();
-    overlay.el.remove();
-    this.screen = "matchups";
-    this.render();
   }
 
   // ---- Standings (player ratings) screen ----
