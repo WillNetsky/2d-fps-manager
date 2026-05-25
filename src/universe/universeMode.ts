@@ -307,9 +307,14 @@ export class UniverseMode {
       u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     }
     delete u.map;
-    // Migrate pre-aggregate saves: build career totals from the full history
-    // once, then trim history down to the recent window going forward.
-    if (!u.careers) rebuildCareers(u);
+    // Career aggregates. Rebuild from history whenever it's still complete
+    // (oldest retained day is day 1 → nothing trimmed yet). This both seeds
+    // pre-aggregate saves and lets corrections to the folding logic — e.g. how
+    // clutch wins are counted — take effect on existing universes. Once history
+    // has been trimmed we can no longer rebuild without undercounting, so we
+    // keep the running totals and only fold new matches in going forward.
+    const historyComplete = u.history.length === 0 || u.history[0].day === 1;
+    if (!u.careers || historyComplete) rebuildCareers(u);
     trimHistory(u);
     // Older saves may have rolled a day into history without generating the
     // next day's matchups. The day view now always expects a pendingDay, so
@@ -1732,13 +1737,15 @@ function recordMatchupCareers(careers: Record<string, CareerStats>, m: Matchup) 
         c.damage += s.damage; c.rounds += s.roundsPlayed;
         c.k1 += s.k1; c.k2 += s.k2; c.k3 += s.k3; c.k4 += s.k4; c.k5 += s.k5;
       }
-      // Clutch attempts/wins. `won` is derived from the match result, matching
-      // how buildGameLog treats the advisory per-clutch `won` flag.
+      // Clutch attempts/wins use the PER-CLUTCH outcome (survived + won that
+      // round), not the match result — losing a 1v5 in a won match is still a
+      // failed attempt. Legacy saves only stored successful clutches, so a
+      // missing flag counts as a win.
       for (const cl of m.clutches ?? []) {
         if (cl.playerId !== id) continue;
         const b = Math.max(1, Math.min(5, clutchBucket(cl)));
         c.clutchAttempts[b - 1]++;
-        if (won) c.clutchWins[b - 1]++;
+        if (cl.won ?? true) c.clutchWins[b - 1]++;
       }
     }
   }
@@ -1825,19 +1832,19 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
       const ownScore = onCt ? m.ctScore : m.tScore;
       const oppScore = onCt ? m.tScore : m.ctScore;
       const myClutches = (m.clutches ?? []).filter(c => c.playerId === playerId);
-      // Re-derive whether each clutch attempt was actually converted from
-      // data we always have: the player's side this match and the match
-      // winner. The saved `won` field is treated as advisory only — legacy
-      // entries don't have it, and we've seen cases where the algorithm
-      // recorded `won: true` despite the player dying / their side losing.
-      const playerSide: "CT" | "T" = onCt ? "CT" : "T";
-      const won = playerSide === m.winnerSide;
-      const clutches = won
-        ? myClutches.map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round }))
-        : [];
+      // Whether each clutch was CONVERTED is a per-round fact (the clutcher
+      // survived and their side won that round) — detectClutch records it on
+      // each clutch. It is independent of the match result: you can win a
+      // clutch in a match you lose, and lose a 1v5 in a match you win. Legacy
+      // saves only stored successful clutches, so treat a missing flag as won.
+      const clutchWonOf = (c: { won?: boolean }) => c.won ?? true;
+      // Only successful clutches get a replayable chip.
+      const clutches = myClutches
+        .filter(clutchWonOf)
+        .map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round }));
       const clutchAttempts = myClutches.map(c => ({
         bucket: clutchBucket(c),
-        won,
+        won: clutchWonOf(c),
         round: c.round,
       }));
       out.push({
