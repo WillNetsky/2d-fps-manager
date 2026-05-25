@@ -147,6 +147,8 @@ export function makePlayer(region?: Region): Player {
     role,
     stats,
     traits: rollTraits(role),
+    // Broad spread so the pool mixes social/fun players with ambitious ones.
+    ambition: Math.round(15 + rand() * 80),
     money: STARTING_PER_PLAYER,
     mood: 65,
     morale: 65,

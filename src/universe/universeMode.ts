@@ -6,7 +6,7 @@ import {
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
 import { applyMatchElo } from "./elo.ts";
-import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
+import { applyMatchChemistry, decayRelationships, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
@@ -310,6 +310,10 @@ export class UniverseMode {
       u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     }
     delete u.map;
+    // Backfill the ambition personality axis on pre-existing players.
+    for (const p of u.players) {
+      if (typeof p.ambition !== "number") p.ambition = Math.round(15 + Math.random() * 80);
+    }
     // Career aggregates. Rebuild from history whenever it's still complete
     // (oldest retained day is day 1 → nothing trimmed yet). This both seeds
     // pre-aggregate saves and lets corrections to the folding logic — e.g. how
@@ -511,7 +515,7 @@ export class UniverseMode {
     const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
     m.eloDelta = applyMatchElo(winners, losers, u.elos);
-    applyMatchChemistry(u.players, winners, losers);
+    applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
     recordMatchupCareers(u.careers ??= {}, m);
   }
 
@@ -556,7 +560,7 @@ export class UniverseMode {
         const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
         m.eloDelta = applyMatchElo(winners, losers, u.elos);
-        applyMatchChemistry(u.players, winners, losers);
+        applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
         recordMatchupCareers(u.careers ??= {}, m);
         this.persist();
         this.activeMatchupId = null;
@@ -592,6 +596,7 @@ export class UniverseMode {
     const done = u.pendingDay!;
     u.history.push({ day: done.day, matchups: done.matchups });
     trimHistory(u);
+    decayRelationships(u.players); // bonds fade day-to-day without upkeep
     u.day++;
     u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
     this.persist();
@@ -626,6 +631,7 @@ export class UniverseMode {
         }
         u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
         trimHistory(u);
+        decayRelationships(u.players); // bonds fade day-to-day without upkeep
         u.pendingDay = null;
         u.day++;
 
@@ -1484,6 +1490,7 @@ function playerPage(
     <div class="upp-dyn-item"><span>Money</span><b>$${p.money}</b></div>
     <div class="upp-dyn-item"><span>Mood</span><b style="color:${ratingColor(p.mood)}">${Math.round(p.mood)}</b></div>
     <div class="upp-dyn-item"><span>Morale</span><b style="color:${ratingColor(p.morale)}">${Math.round(p.morale)}</b></div>
+    <div class="upp-dyn-item"><span>Values</span><b title="${p.ambition ?? 50}/100 ambition">${valuesLabel(p.ambition ?? 50)}</b></div>
     <div class="upp-dyn-item"><span>CT assignment</span><b>${p.ctAssignment}</b></div>
   `;
   root.appendChild(dyn);
@@ -1898,6 +1905,15 @@ interface ClutchBucketStats { bucket: number; wins: number; attempts: number; }
 
 function prettifyKey(k: string): string {
   return k.replace(/([A-Z])/g, " $1").replace(/^./, c => c.toUpperCase());
+}
+
+// Describe a player's ambition (0..100) as a fun↔ambitious temperament label.
+function valuesLabel(ambition: number): string {
+  if (ambition >= 75) return "Ambitious";
+  if (ambition >= 55) return "Driven";
+  if (ambition >= 40) return "Balanced";
+  if (ambition >= 25) return "Social";
+  return "Just for fun";
 }
 
 function btn(label: string, cls: string, onClick: () => void): HTMLButtonElement {

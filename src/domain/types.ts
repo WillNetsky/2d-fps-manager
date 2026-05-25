@@ -73,6 +73,12 @@ export interface Player {
   stats: PlayerStats;
   traits: Trait[];
 
+  // Personality axis that shapes chemistry (not skill). 0 = values fun/social
+  // (bonds with whoever they play, shrugs off losses), 100 = ambitious (bonds
+  // driven by winning and strong performances; soured by losses and teammates
+  // who underperform). Most players sit somewhere in between.
+  ambition: number;
+
   // Dynamic state — updated round to round.
   money: number;       // per-player bank
   mood: number;        // 0-100, drifts based on outcomes
