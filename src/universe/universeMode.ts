@@ -13,7 +13,7 @@ import {
   deleteUniverse, listUniverses, loadUniverse, newUniverseId, saveUniverse,
 } from "./storage.ts";
 import {
-  PLAYER_COUNT, STARTING_ELO, TEAM_SIZE,
+  PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
   type CareerStats, type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
 
@@ -277,7 +277,10 @@ export class UniverseMode {
   private createUniverse() {
     setSeed(Date.now());
     const players: Player[] = [];
-    for (let i = 0; i < PLAYER_COUNT; i++) players.push(makePlayer());
+    // Seed a fixed headcount per region so every scene can field full lobbies.
+    for (const region of REGION_ORDER) {
+      for (let i = 0; i < PLAYERS_PER_REGION; i++) players.push(makePlayer(region));
+    }
     const elos: Record<string, number> = {};
     for (const p of players) elos[p.id] = STARTING_ELO;
     const name = prompt("Name this universe:", `Universe ${new Date().toLocaleDateString()}`) ?? "Universe";
@@ -815,24 +818,31 @@ function generateMatchups(players: Player[], elos: Record<string, number>, mapCo
     const teams = formTeams(inRegion, eloOf);
     // Pair adjacent teams by Elo so each matchup is between similar-strength
     // 5-stacks. An odd team out sits the day.
-    teams.sort((a, b) => avgElo(b) - avgElo(a));
+    teams.sort((a, b) => avgElo(b.players) - avgElo(a.players));
     for (let i = 0; i + 1 < teams.length; i += 2) {
       const aStartsCt = Math.random() < 0.5;
       const ct = aStartsCt ? teams[i] : teams[i + 1];
       const t  = aStartsCt ? teams[i + 1] : teams[i];
+      // Surface the friend-stacks (2+ that queued together) in this lobby.
+      const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
       matchups.push({
         id: `m${idx++}`,
-        ctPlayerIds: ct.map(p => p.id),
-        tPlayerIds:  t.map(p => p.id),
+        ctPlayerIds: ct.players.map(p => p.id),
+        tPlayerIds:  t.players.map(p => p.id),
         status: "pending",
         seed: newSeed(),
         mapIndex: Math.floor(Math.random() * pool),
         region,
+        ...(parties.length > 0 ? { parties } : {}),
       });
     }
   }
   return matchups;
 }
+
+// A formed 5-player team plus the friend-stack that seeded it (player ids of
+// the 2+ clique that queued together; empty for teams built purely from solos).
+interface FormedTeam { players: Player[]; partyIds: string[]; }
 
 // Build full 5-player teams out of a region's players, keeping friends together.
 //  1. Grow friendship cliques: anchor on the highest-Elo unassigned player and
@@ -840,7 +850,7 @@ function generateMatchups(players: Player[], elos: Record<string, number>, mapCo
 //  2. Fill each multi-player party up to 5 with the nearest-Elo solo players.
 //  3. Chunk any leftover solos into Elo-banded teams of 5.
 // Players who don't fit a full team sit out the day.
-function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): Player[][] {
+function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): FormedTeam[] {
   const byEloDesc = [...regionPlayers].sort(
     (a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id),
   );
@@ -877,9 +887,10 @@ function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): Playe
     .filter(p => p.length >= 2)
     .sort((a, b) => avgOf(b, eloOf) - avgOf(a, eloOf));
 
-  const teams: Player[][] = [];
+  const teams: FormedTeam[] = [];
 
-  // 2. Fill each real party up to 5 with the nearest-Elo solos.
+  // 2. Fill each real party up to 5 with the nearest-Elo solos. The original
+  //    clique members are the team's friend-stack.
   for (const g of groups) {
     const team = [...g];
     const target = avgOf(g, eloOf);
@@ -891,13 +902,13 @@ function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): Playe
       }
       team.push(solos.splice(bi, 1)[0]);
     }
-    if (team.length === TEAM_SIZE) teams.push(team);
+    if (team.length === TEAM_SIZE) teams.push({ players: team, partyIds: g.map(p => p.id) });
     // Under-filled (ran out of solos): party sits the day.
   }
 
-  // 3. Elo-banded teams from the remaining solos.
+  // 3. Elo-banded teams from the remaining solos — no friend-stack.
   for (let i = 0; i + TEAM_SIZE <= solos.length; i += TEAM_SIZE) {
-    teams.push(solos.slice(i, i + TEAM_SIZE));
+    teams.push({ players: solos.slice(i, i + TEAM_SIZE), partyIds: [] });
   }
 
   return teams;
@@ -975,16 +986,26 @@ function rosterColumn(
     ? players.reduce((s, p) => s + eloFor(p.id), 0) / players.length
     : STARTING_ELO;
 
+  // Friend-stack in this lineup (at most one). Members get a marker so you can
+  // see who queued together vs. who was filled in around them.
+  const idSet = new Set(ids);
+  const stack = (matchup.parties ?? []).find(grp => grp.some(id => idSet.has(id)));
+  const stackSet = new Set(stack ?? []);
+
   const header = document.createElement("div");
   header.className = "umc-team-header";
+  const stackBadge = stackSet.size >= 2
+    ? `<span class="umc-stack-badge" title="${stackSet.size} players queued together">🔗${stackSet.size}</span>`
+    : "";
   header.innerHTML =
-    `<div class="umc-team-name">Team ${escapeHtml(shortName(captain))}</div>` +
+    `<div class="umc-team-name">Team ${escapeHtml(shortName(captain))}${stackBadge}</div>` +
     `<div class="umc-team-elo">Avg ${Math.round(avgElo)}</div>`;
   col.appendChild(header);
 
   for (const p of players) {
     const row = document.createElement("div");
-    row.className = "umc-roster-row";
+    const inStack = stackSet.has(p.id);
+    row.className = "umc-roster-row" + (inStack ? " stacked" : "");
     const preElo = Math.round(eloFor(p.id));
     let eloHtml = `<span class="umc-elo">${preElo}</span>`;
     if (isDone) {
@@ -993,12 +1014,15 @@ function rosterColumn(
       const sign = delta >= 0 ? "+" : "−";
       eloHtml += `<span class="${cls}">${sign}${Math.abs(delta)}</span>`;
     }
-    row.innerHTML = `<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span>${eloHtml}`;
+    const stackDot = inStack ? `<span class="umc-stack-dot">🔗</span>` : "";
+    row.innerHTML = `${stackDot}<span class="umc-flag">${flagEmoji(p.country)}</span><span class="umc-name">${escapeHtml(shortName(p))}</span>${eloHtml}`;
     if (onPick) {
       row.classList.add("clickable");
-      row.title = "View player";
+      row.title = inStack ? `Queued as a ${stackSet.size}-stack · view player` : "View player";
       const pid = p.id;
       row.onclick = () => onPick(pid);
+    } else if (inStack) {
+      row.title = `Queued as a ${stackSet.size}-stack`;
     }
     col.appendChild(row);
   }

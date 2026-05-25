@@ -1,5 +1,5 @@
 import type { GameMap, Player } from "../domain/types.ts";
-import type { Region } from "../domain/countries.ts";
+import { REGION_ORDER, type Region } from "../domain/countries.ts";
 
 export interface UniverseSummary {
   id: string;
@@ -62,6 +62,9 @@ export interface Matchup {
   // Competitive region this lobby was drawn from (e.g. "EU"). Optional for
   // legacy matchups generated before region-based matchmaking existed.
   region?: Region;
+  // Friend-stacks (player-id groups of 2+ that queued together) present in this
+  // lobby — one per team at most. Used to mark grouped players on the board.
+  parties?: string[][];
 }
 
 export interface Clutch {
@@ -114,7 +117,8 @@ export interface CareerStats {
 }
 
 export const STARTING_ELO = 1000;
-// A larger pool so each competitive region can field several full lobbies a
-// day. Matchmaking partitions by region, so most of these are EU/CIS players.
-export const PLAYER_COUNT = 400;
+// Players are generated per region so every competitive scene can field many
+// full lobbies a day. Each region gets exactly PLAYERS_PER_REGION players.
+export const PLAYERS_PER_REGION = 100;
+export const PLAYER_COUNT = PLAYERS_PER_REGION * REGION_ORDER.length;
 export const TEAM_SIZE = 5;

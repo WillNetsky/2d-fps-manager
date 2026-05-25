@@ -80,14 +80,30 @@ export function regionOf(code: string): Region {
   return REGION_BY_CODE[code] ?? "EU";
 }
 
-export function pickCountry(rand: () => number): Country {
-  const total = COUNTRIES.reduce((s, c) => s + c.weight, 0);
+function pickWeighted(pool: Country[], rand: () => number): Country {
+  const total = pool.reduce((s, c) => s + c.weight, 0);
   let r = rand() * total;
-  for (const c of COUNTRIES) {
+  for (const c of pool) {
     r -= c.weight;
     if (r <= 0) return c;
   }
-  return COUNTRIES[0];
+  return pool[0];
+}
+
+export function pickCountry(rand: () => number): Country {
+  return pickWeighted(COUNTRIES, rand);
+}
+
+// Weighted country pick restricted to one region — used to seed a fixed number
+// of players per region so every competitive scene can field full lobbies.
+const COUNTRIES_BY_REGION: Record<Region, Country[]> = REGION_ORDER.reduce(
+  (acc, r) => { acc[r] = COUNTRIES.filter(c => c.region === r); return acc; },
+  {} as Record<Region, Country[]>,
+);
+
+export function pickCountryInRegion(rand: () => number, region: Region): Country {
+  const pool = COUNTRIES_BY_REGION[region];
+  return pool && pool.length > 0 ? pickWeighted(pool, rand) : pickCountry(rand);
 }
 
 // Regional-indicator flag emoji from a 2-letter ISO code. Renders as a flag

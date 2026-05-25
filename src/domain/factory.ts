@@ -1,6 +1,6 @@
 import type { GameMap, Player, PlayerStats, Role, Team, Trait, Vec2 } from "./types.ts";
 import { defaultPistol } from "./weapons.ts";
-import { pickCountry } from "./countries.ts";
+import { pickCountry, pickCountryInRegion, type Region } from "./countries.ts";
 import { generateUsername, resetUsernames } from "./usernames.ts";
 
 // Deterministic-ish RNG so we can seed runs later.
@@ -123,9 +123,12 @@ function rollTraits(role: Role): Trait[] {
 }
 
 let playerCounter = 0;
-export function makePlayer(): Player {
+// Pass `region` to draw the player's nationality from that region only — used
+// to seed a guaranteed headcount per competitive region. Omit for a globally
+// weighted pick.
+export function makePlayer(region?: Region): Player {
   const id = `p${++playerCounter}`;
-  const country = pickCountry(rand);
+  const country = region ? pickCountryInRegion(rand, region) : pickCountry(rand);
   // Locale-flavored first/last names via faker. Faker has its own RNG, so the
   // result isn't tied to our seed — acceptable for now; we can wire seeded
   // faker later if we need fully deterministic universes.

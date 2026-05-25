@@ -1116,6 +1116,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .umc-elo-delta.good { color: var(--good); }
 .umc-elo-delta.bad  { color: var(--bad); }
+/* Friend-stack markers: highlight players who queued together. */
+.umc-stack-badge { margin-left: 5px; font-size: 10px; font-weight: 600; color: var(--muted); }
+.umc-roster-row.stacked { background: color-mix(in srgb, var(--accent, #e0b341) 14%, var(--panel-2)); }
+.umc-stack-dot { margin-right: 3px; font-size: 9px; opacity: 0.85; }
 .country-cell .flag { margin-right: 4px; }
 .umc-vs {
   text-align: center; font-size: 11px; color: var(--muted);

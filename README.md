@@ -33,9 +33,9 @@ A 2D top-down team-management game inspired by Counter-Strike (legally distinct)
 - Built-in map editor at `#editor` with localStorage persistence, validation, "Copy JSON" export, color customization, multiple built-in maps
 
 ### Universe mode (MVP)
-- Persistent ecosystem: 400 procedurally generated players — each with a real name (locale-flavored), an in-game handle, nationality/flag, and age — drawn from a shared pool and saved to localStorage across multiple universes
+- Persistent ecosystem: 100 procedurally generated players **per region** (600 total) — each with a real name (locale-flavored), an in-game handle, nationality/flag, and age — drawn from a shared pool and saved to localStorage across multiple universes
 - Region-based matchmaking: players are partitioned into competitive regions (Europe, CIS, NA, SA, Asia, Oceania) and only matchmake within their own scene; the matchup board groups lobbies by region
-- Daily matchups: each day generates region-grouped 5v5 matchups (skill-banded by Elo within each region); play them out live or sim instantly
+- Daily matchups: each day generates region-grouped 5v5 matchups (skill-banded by Elo within each region); friends who queue together are kept on one team and marked with a 🔗 stack badge on the board; play them out live or sim instantly
 - Elo ratings per player, updated from match results; standings screen ranks the pool
 - Pre-match matchup screen shows both rosters with team name + average Elo above each
 - Postgame results screen with final score, round-by-round breakdown, per-player kills/deaths/**assists**, and per-round MVPs
