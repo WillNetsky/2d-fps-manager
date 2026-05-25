@@ -14,8 +14,13 @@ import {
 } from "./storage.ts";
 import {
   PLAYER_COUNT, STARTING_ELO, TEAM_SIZE,
-  type Matchup, type PlayerMatchStats, type Universe,
+  type CareerStats, type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
+
+// How many recent completed days to keep for replay + per-player game logs.
+// Lifetime stats live in `Universe.careers`, so trimming here only limits how
+// far back individual matches stay replayable — not the career totals.
+const HISTORY_DAYS = 60;
 
 type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
 
@@ -285,6 +290,7 @@ export class UniverseMode {
       elos,
       history: [],
       pendingDay: null,
+      careers: {},
       // Start with one map in rotation — settings tab lets the user add more.
       maps: [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])],
     };
@@ -301,6 +307,10 @@ export class UniverseMode {
       u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
     }
     delete u.map;
+    // Migrate pre-aggregate saves: build career totals from the full history
+    // once, then trim history down to the recent window going forward.
+    if (!u.careers) rebuildCareers(u);
+    trimHistory(u);
     // Older saves may have rolled a day into history without generating the
     // next day's matchups. The day view now always expects a pendingDay, so
     // backfill one before rendering.
@@ -494,6 +504,7 @@ export class UniverseMode {
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
     m.eloDelta = applyMatchElo(winners, losers, u.elos);
     applyMatchChemistry(u.players, winners, losers);
+    recordMatchupCareers(u.careers ??= {}, m);
   }
 
   private playMatchup(id: string) {
@@ -538,6 +549,7 @@ export class UniverseMode {
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
         m.eloDelta = applyMatchElo(winners, losers, u.elos);
         applyMatchChemistry(u.players, winners, losers);
+        recordMatchupCareers(u.careers ??= {}, m);
         this.persist();
         this.activeMatchupId = null;
         this.screen = "matchups";
@@ -571,6 +583,7 @@ export class UniverseMode {
     const u = this.universe;
     const done = u.pendingDay!;
     u.history.push({ day: done.day, matchups: done.matchups });
+    trimHistory(u);
     u.day++;
     u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
     this.persist();
@@ -604,6 +617,7 @@ export class UniverseMode {
           if (m.status !== "completed") this.runInstantSim(m);
         }
         u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
+        trimHistory(u);
         u.pendingDay = null;
         u.day++;
 
@@ -1103,10 +1117,9 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
   }
 
   const rows: CareerRow[] = u.players.map(p => {
-    const log = buildGameLog(p.id, u);
-    const c = summarizeCareer(log);
-    const clutches = log.reduce((s, g) => s + g.clutches.length, 0);
-    const clutchBuckets = summarizeClutchBuckets(log);
+    const c = careerView(careerOf(u, p.id));
+    const clutchBuckets = careerClutchBuckets(careerOf(u, p.id));
+    const clutches = clutchBuckets.reduce((s, b) => s + b.wins, 0);
     return {
       p,
       elo: u.elos[p.id] ?? STARTING_ELO,
@@ -1384,9 +1397,11 @@ function playerPage(
   root.className = "universe-player-page";
 
   const elo = Math.round(u.elos[p.id] ?? STARTING_ELO);
+  // Career totals + clutch breakdown come from the running aggregate (lifetime).
+  // The game-log list below uses the bounded recent history for replay detail.
   const log = buildGameLog(p.id, u);
-  const career = summarizeCareer(log);
-  const clutchBuckets = summarizeClutchBuckets(log);
+  const career = careerView(careerOf(u, p.id));
+  const clutchBuckets = careerClutchBuckets(careerOf(u, p.id));
   const totalClutchWins = clutchBuckets.reduce((s, b) => s + b.wins, 0);
   const totalClutchAttempts = clutchBuckets.reduce((s, b) => s + b.attempts, 0);
 
@@ -1673,6 +1688,115 @@ function clutchBucket(c: { kills: number; enemiesAtStart?: number; won?: boolean
   return c.enemiesAtStart ?? c.kills ?? 0;
 }
 
+// ---- Career aggregates ---------------------------------------------------
+// Lifetime totals are accumulated incrementally so we never have to replay the
+// entire history to show a player's career. Each completed matchup is folded
+// in exactly once (when it's simmed/played out), which lets us trim old days
+// from `history` without losing any career figures.
+
+function emptyCareer(): CareerStats {
+  return {
+    played: 0, wins: 0, losses: 0, roundsWon: 0, roundsLost: 0,
+    matchesWithStats: 0, kills: 0, deaths: 0, assists: 0, damage: 0, rounds: 0,
+    k1: 0, k2: 0, k3: 0, k4: 0, k5: 0,
+    clutchWins: [0, 0, 0, 0, 0], clutchAttempts: [0, 0, 0, 0, 0],
+  };
+}
+
+// Fold one completed matchup into the running career totals for everyone who
+// played in it. Mirrors the per-match logic the old history scan used so the
+// numbers are identical. Must be called exactly once per matchup.
+function recordMatchupCareers(careers: Record<string, CareerStats>, m: Matchup) {
+  if (m.status !== "completed" || !m.winnerSide
+      || m.ctScore === undefined || m.tScore === undefined) return;
+  const sides = [
+    { ids: m.ctPlayerIds, side: "CT" as const, own: m.ctScore, opp: m.tScore },
+    { ids: m.tPlayerIds,  side: "T"  as const, own: m.tScore,  opp: m.ctScore },
+  ];
+  for (const { ids, side, own, opp } of sides) {
+    const won = side === m.winnerSide;
+    for (const id of ids) {
+      const c = careers[id] ?? (careers[id] = emptyCareer());
+      c.played++;
+      if (won) c.wins++; else c.losses++;
+      c.roundsWon += own;
+      c.roundsLost += opp;
+      const s = m.playerStats?.[id];
+      if (s) {
+        c.matchesWithStats++;
+        c.kills += s.kills; c.deaths += s.deaths; c.assists += s.assists;
+        c.damage += s.damage; c.rounds += s.roundsPlayed;
+        c.k1 += s.k1; c.k2 += s.k2; c.k3 += s.k3; c.k4 += s.k4; c.k5 += s.k5;
+      }
+      // Clutch attempts/wins. `won` is derived from the match result, matching
+      // how buildGameLog treats the advisory per-clutch `won` flag.
+      for (const cl of m.clutches ?? []) {
+        if (cl.playerId !== id) continue;
+        const b = Math.max(1, Math.min(5, clutchBucket(cl)));
+        c.clutchAttempts[b - 1]++;
+        if (won) c.clutchWins[b - 1]++;
+      }
+    }
+  }
+}
+
+// Rebuild every career total from scratch by replaying all known completed
+// matchups — both retained history and any already-finished games still in the
+// pending day. Used to migrate pre-aggregate saves (one-time) before history
+// gets trimmed, so no past result is lost.
+function rebuildCareers(u: Universe): void {
+  const careers: Record<string, CareerStats> = {};
+  for (const day of u.history) {
+    for (const m of day.matchups) recordMatchupCareers(careers, m);
+  }
+  for (const m of u.pendingDay?.matchups ?? []) recordMatchupCareers(careers, m);
+  u.careers = careers;
+}
+
+// Keep only the most recent HISTORY_DAYS of completed days. Career totals are
+// already folded in, so dropped days only lose per-match replay/log detail.
+function trimHistory(u: Universe): void {
+  if (u.history.length > HISTORY_DAYS) {
+    u.history.splice(0, u.history.length - HISTORY_DAYS);
+  }
+}
+
+// Display view over a career aggregate — same shape the old summarizeCareer
+// returned from a game-log scan, so the table/player-page code is unchanged.
+function careerView(c: CareerStats) {
+  const rating = c.matchesWithStats > 0
+    ? hltvRating1({
+        kills: c.kills, deaths: c.deaths, assists: c.assists, damage: c.damage,
+        roundsPlayed: c.rounds, k1: c.k1, k2: c.k2, k3: c.k3, k4: c.k4, k5: c.k5,
+      })
+    : null;
+  return {
+    played: c.played,
+    wins: c.wins,
+    losses: c.losses,
+    roundsWon: c.roundsWon,
+    roundsLost: c.roundsLost,
+    roundDiff: c.roundsWon - c.roundsLost,
+    kills: c.kills, deaths: c.deaths, assists: c.assists, damage: c.damage, rounds: c.rounds,
+    adr: c.rounds > 0 ? c.damage / c.rounds : null,
+    rating,
+    hasStats: c.matchesWithStats > 0,
+    k2: c.k2, k3: c.k3, k4: c.k4, k5: c.k5,
+  };
+}
+
+function careerClutchBuckets(c: CareerStats): ClutchBucketStats[] {
+  return [1, 2, 3, 4, 5].map(b => ({
+    bucket: b,
+    wins: c.clutchWins[b - 1] ?? 0,
+    attempts: c.clutchAttempts[b - 1] ?? 0,
+  }));
+}
+
+function careerOf(u: Universe, id: string): CareerStats {
+  return u.careers?.[id] ?? emptyCareer();
+}
+
 // HLTV 1.0 rating from per-match stats. Constants are the league averages used
 // in the original formula. Returns 0 if the player did not play any rounds.
 function hltvRating1(s: import("./types.ts").PlayerMatchStats): number {
@@ -1736,60 +1860,6 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
 // while last alive. Any clutch with 0 kills (e.g. T-side clutch where the bomb
 // detonates) is bucketed as 1v0 only if present.
 interface ClutchBucketStats { bucket: number; wins: number; attempts: number; }
-
-function summarizeClutchBuckets(log: GameLogEntry[]): ClutchBucketStats[] {
-  // Always show the standard 1v1..1v5 buckets so conversion% has stable
-  // columns even when a bucket has zero attempts.
-  const buckets = new Map<number, ClutchBucketStats>();
-  for (const b of [1, 2, 3, 4, 5]) buckets.set(b, { bucket: b, wins: 0, attempts: 0 });
-  for (const g of log) {
-    for (const a of g.clutchAttempts) {
-      const b = Math.max(1, Math.min(5, a.bucket));
-      const s = buckets.get(b)!;
-      s.attempts++;
-      if (a.won) s.wins++;
-    }
-  }
-  return [...buckets.values()];
-}
-
-function summarizeCareer(log: GameLogEntry[]) {
-  let wins = 0, losses = 0, roundsWon = 0, roundsLost = 0;
-  let kills = 0, deaths = 0, assists = 0, damage = 0, rounds = 0;
-  let k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;
-  let matchesWithStats = 0;
-  for (const g of log) {
-    if (g.won) wins++; else losses++;
-    roundsWon += g.ownScore;
-    roundsLost += g.oppScore;
-    if (g.stats) {
-      matchesWithStats++;
-      kills += g.stats.kills;
-      deaths += g.stats.deaths;
-      assists += g.stats.assists;
-      damage += g.stats.damage;
-      rounds += g.stats.roundsPlayed;
-      k1 += g.stats.k1; k2 += g.stats.k2; k3 += g.stats.k3;
-      k4 += g.stats.k4; k5 += g.stats.k5;
-    }
-  }
-  const rating = matchesWithStats > 0
-    ? hltvRating1({ kills, deaths, assists, damage, roundsPlayed: rounds, k1, k2, k3, k4, k5 })
-    : null;
-  return {
-    played: log.length,
-    wins,
-    losses,
-    roundsWon,
-    roundsLost,
-    roundDiff: roundsWon - roundsLost,
-    kills, deaths, assists, damage, rounds,
-    adr: rounds > 0 ? damage / rounds : null,
-    rating,
-    hasStats: matchesWithStats > 0,
-    k2, k3, k4, k5,
-  };
-}
 
 function prettifyKey(k: string): string {
   return k.replace(/([A-Z])/g, " $1").replace(/^./, c => c.toUpperCase());

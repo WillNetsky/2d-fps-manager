@@ -15,8 +15,16 @@ export interface Universe {
   day: number;                              // current day index (1-based)
   players: Player[];                        // pool of players
   elos: Record<string, number>;             // playerId -> elo
-  history: CompletedDay[];                  // all past days
+  // Recent completed days, kept for replay + the per-player game log. Bounded
+  // to the last HISTORY_DAYS so storage doesn't grow without limit; older days
+  // are folded into `careers` before being dropped.
+  history: CompletedDay[];
   pendingDay: PendingDay | null;            // in-progress day (if any)
+  // Running per-player career totals (playerId -> aggregate). The source of
+  // truth for lifetime stats — every completed matchup is folded in exactly
+  // once, so career figures survive history trimming. Absent on pre-aggregate
+  // saves; rebuilt from history on load.
+  careers?: Record<string, CareerStats>;
   // Rotation pool of map snapshots. Every match picks one (currently at
   // random); the index is stored on the matchup so replays land on the same
   // map deterministically. Always has length ≥ 1 while a universe is live.
@@ -82,6 +90,27 @@ export interface PlayerMatchStats {
 export interface CompletedDay {
   day: number;
   matchups: Matchup[];                      // all status: "completed"
+}
+
+// Lifetime per-player totals, accumulated one completed matchup at a time.
+// Mirrors what the old full-history scan produced, so display code reads the
+// same numbers without replaying every match ever played.
+export interface CareerStats {
+  played: number;
+  wins: number;
+  losses: number;
+  roundsWon: number;
+  roundsLost: number;
+  matchesWithStats: number;                 // matches that carried playerStats
+  kills: number;
+  deaths: number;
+  assists: number;
+  damage: number;
+  rounds: number;
+  k1: number; k2: number; k3: number; k4: number; k5: number;
+  // Clutch tallies bucketed by 1vX; index i corresponds to 1v(i+1).
+  clutchWins: number[];                     // length 5
+  clutchAttempts: number[];                 // length 5
 }
 
 export const STARTING_ELO = 1000;
