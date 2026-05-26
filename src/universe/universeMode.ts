@@ -7,6 +7,7 @@ import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
 import { applyMatchElo } from "./elo.ts";
 import { applyMatchChemistry, decayRelationships, FRIEND_THRESHOLD } from "./chemistry.ts";
+import { applyMatchForm } from "./form.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
@@ -658,6 +659,7 @@ export class UniverseMode {
     const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
     m.eloDelta = applyMatchElo(winners, losers, u.elos);
     applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
+    applyMatchForm(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
     recordMatchupCareers(u.careers ??= {}, m);
   }
 
@@ -703,6 +705,7 @@ export class UniverseMode {
         const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
         m.eloDelta = applyMatchElo(winners, losers, u.elos);
         applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
+        applyMatchForm(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
         recordMatchupCareers(u.careers ??= {}, m);
         this.persist();
         this.activeMatchupId = null;
@@ -1638,8 +1641,7 @@ function playerPage(
   dyn.className = "upp-dyn";
   dyn.innerHTML = `
     <div class="upp-dyn-item"><span>Money</span><b>$${p.money}</b></div>
-    <div class="upp-dyn-item"><span>Mood</span><b style="color:${ratingColor(p.mood)}">${Math.round(p.mood)}</b></div>
-    <div class="upp-dyn-item"><span>Morale</span><b style="color:${ratingColor(p.morale)}">${Math.round(p.morale)}</b></div>
+    <div class="upp-dyn-item"><span>Form</span><b style="color:${ratingColor(p.morale)}" title="${Math.round(p.morale)}/100 morale">${formLabel(p.morale)}</b></div>
     <div class="upp-dyn-item"><span>Values</span><b title="${p.ambition ?? 50}/100 ambition">${valuesLabel(p.ambition ?? 50)}</b></div>
     <div class="upp-dyn-item"><span>CT assignment</span><b>${p.ctAssignment}</b></div>
   `;
@@ -2055,6 +2057,15 @@ interface ClutchBucketStats { bucket: number; wins: number; attempts: number; }
 
 function prettifyKey(k: string): string {
   return k.replace(/([A-Z])/g, " $1").replace(/^./, c => c.toUpperCase());
+}
+
+// Describe persistent form (morale 0..100) as a streak-flavored label.
+function formLabel(morale: number): string {
+  if (morale >= 80) return "On fire";
+  if (morale >= 65) return "Confident";
+  if (morale >= 50) return "Steady";
+  if (morale >= 35) return "Shaky";
+  return "Tilted";
 }
 
 // Describe a player's ambition (0..100) as a fun↔ambitious temperament label.

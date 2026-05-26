@@ -38,6 +38,7 @@ A 2D top-down team-management game inspired by Counter-Strike (legally distinct)
 - Region-based matchmaking: players are partitioned into competitive regions (Europe, CIS, NA, SA, Asia, Oceania) and only matchmake within their own scene; the matchup board groups lobbies by region
 - Daily matchups: each day generates region-grouped 5v5 matchups (skill-banded by Elo within each region); friends who queue together are kept on one team and marked with a 🔗 stack badge on the board; play them out live or sim instantly
 - Elo ratings per player, updated from match results; standings screen ranks the pool
+- Persistent form: each player's morale carries between matches and seeds their in-game mood (so streaks affect aim). How they react is personality-driven — high-recovery players shake off losses, low-composure/tilt-prone players stay tilted until they win, and low-ambition "fun" players stay cheerful regardless
 - Pre-match matchup screen shows both rosters with team name + average Elo above each
 - Postgame results screen with final score, round-by-round breakdown, per-player kills/deaths/**assists**, and per-round MVPs
 - Multiple saved universes via menu (create / load / delete)

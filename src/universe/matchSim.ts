@@ -160,6 +160,10 @@ export function buildTeam(id: string, name: string, players: Player[], side: Sid
     relationships: { ...p.relationships },
     stats: { ...p.stats },
     money: STARTING_BANK,
+    // Start the match's in-the-moment mood at the player's persistent form
+    // (morale), so a hot streak or a tilt carries into how they shoot. Mood
+    // then swings round-to-round on the clone and is discarded after.
+    mood: p.morale,
   }));
   return {
     id, name, side,

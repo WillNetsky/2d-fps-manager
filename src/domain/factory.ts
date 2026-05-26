@@ -140,6 +140,10 @@ export function makePlayer(region?: Region): Player {
   const name = `${firstName} ${lastName}`;
   const stats = rollStats();
   const role = inferRole(stats);
+  // Broad ambition spread mixes social/fun players with ambitious ones; form
+  // starts at the matching baseline (fun players sit higher/happier).
+  const ambition = Math.round(15 + rand() * 80);
+  const baselineMorale = Math.round(58 + (1 - ambition / 100) * 17);
   return {
     id, name, handle,
     country: country.code,
@@ -148,10 +152,11 @@ export function makePlayer(region?: Region): Player {
     stats,
     traits: rollTraits(role),
     // Broad spread so the pool mixes social/fun players with ambitious ones.
-    ambition: Math.round(15 + rand() * 80),
+    ambition,
     money: STARTING_PER_PLAYER,
-    mood: 65,
-    morale: 65,
+    // Start form at the personality baseline (fun players sit higher/happier).
+    mood: baselineMorale,
+    morale: baselineMorale,
     relationships: {},
     ctAssignment: "auto",
   };
