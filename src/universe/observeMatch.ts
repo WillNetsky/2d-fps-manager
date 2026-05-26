@@ -12,7 +12,7 @@ import { TeamPanel } from "../ui/teamPanel.ts";
 
 const TICK_MS = 50;
 
-const { STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS, isPistolRound } = MATCH_CONSTANTS;
+const { STARTING_BANK, HALFTIME_ROUND, MAX_ROUNDS, isPistolRound, swapBankFor, matchDecided } = MATCH_CONSTANTS;
 
 export interface ObserveMatchOptions {
   ctName: string;
@@ -246,19 +246,26 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   }
 
   function paintHud() {
-    const half = roundNumber <= HALFTIME_ROUND ? 1 : 2;
+    // Phase label: H1/H2 in regulation, OT (with block number) in overtime.
+    const phase = roundNumber <= HALFTIME_ROUND ? "H1"
+      : roundNumber <= MAX_ROUNDS ? "H2"
+      : `OT${Math.floor((roundNumber - MAX_ROUNDS - 1) / 6) + 1}`;
     // Color follows the side each team is *currently* playing: whichever
     // team is on CT this half gets the CT color, etc. Team names stay
     // attached to their team identity so the scoreboard still tracks
     // "Team X has N wins" correctly across the halftime swap.
     hud.innerHTML =
       `<span class="ct">${escapeHtmlObs(ctSide.name)} ${ctSide.roundsWon}</span>` +
-      `<span class="sep">R${roundNumber} · H${half}</span>` +
+      `<span class="sep">R${roundNumber} · ${phase}</span>` +
       `<span class="t">${tSideRef.roundsWon} ${escapeHtmlObs(tSideRef.name)}</span>`;
   }
 
   function startRound() {
     if (cleaned) return;
+    // Side/economy swap at the halftime and each overtime half, before the
+    // round's buy — same schedule the instant sim uses.
+    const bank = swapBankFor(roundNumber);
+    if (bank !== null) swapAndReset(bank);
     aiBuyFor(ctSide,   roundNumber, isPistolRound, mulberry32(intFrom()));
     aiBuyFor(tSideRef, roundNumber, isPistolRound, mulberry32(intFrom()));
     currentRoundSeed = intFrom();
@@ -381,10 +388,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     return p ? p.handle : "?";
   }
 
+  // `roundNumber` is the round that just finished here (matches the instant
+  // sim's "rounds played" check), so regulation + overtime resolve identically.
   function matchIsOver(): boolean {
-    return ct.roundsWon >= WIN_THRESHOLD
-        || tSide.roundsWon >= WIN_THRESHOLD
-        || roundNumber >= MAX_ROUNDS;
+    return matchDecided(ct.roundsWon, tSide.roundsWon, roundNumber);
   }
 
   function applyRoundOutcome(finished: RoundSim) {
@@ -429,7 +436,8 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     }
 
     roundNumber++;
-    if (roundNumber === HALFTIME_ROUND + 1) halftimeSwap();
+    // The side swap now happens in startRound (via swapBankFor), so it's applied
+    // consistently for both live play and replay jumps.
 
     // Brief pause between rounds so the result is visible. Skip the pause when
     // sim-rest mode is on.
@@ -491,7 +499,10 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     for (const k of Object.keys(roundMvps)) delete roundMvps[k];
 
     // Headlessly simulate every round before the target so state lines up.
+    // Swaps follow the same swapBankFor schedule used live and in the instant sim.
     while (roundNumber < target) {
+      const bank = swapBankFor(roundNumber);
+      if (bank !== null) swapAndReset(bank);
       aiBuyFor(ctSide,   roundNumber, isPistolRound, mulberry32(intFrom()));
       aiBuyFor(tSideRef, roundNumber, isPistolRound, mulberry32(intFrom()));
       const headless = new RoundSim(ctSide, tSideRef, opts.map, intFrom());
@@ -502,12 +513,7 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
       // Never resim past match point — guards against a divergent re-sim piling
       // up impossible scores.
       if (matchIsOver()) break;
-      if (roundNumber === HALFTIME_ROUND) {
-        roundNumber++;
-        halftimeSwap();
-      } else {
-        roundNumber++;
-      }
+      roundNumber++;
     }
     startRound();
   }
@@ -564,13 +570,16 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     });
   }
 
-  function halftimeSwap() {
+  // Swap which roster is on which side and reset both economies to `bank` with
+  // fresh pistol loadouts — the halftime and each overtime half. Mirrors the
+  // instant sim's swapAndReset so live/replay stay in lockstep.
+  function swapAndReset(bank: number) {
     [ctSide, tSideRef] = [tSideRef, ctSide];
     ctSide.side = "CT";
     tSideRef.side = "T";
     for (const team of [ctSide, tSideRef]) {
       for (const p of team.players) {
-        p.money = STARTING_BANK;
+        p.money = bank;
         team.loadouts[p.id] = {
           weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
           keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],

@@ -150,7 +150,36 @@ const STARTING_BANK = 800;
 const HALFTIME_ROUND = 12;
 const WIN_THRESHOLD = 13;
 const MAX_ROUNDS = 24;
+// Overtime: MR3 blocks (6 rounds, 3 per side), first to OT_WIN takes the match;
+// a tied (3-3) block goes to another OT. Each OT half is a full-buy reset.
+const OT_HALF_ROUNDS = 3;
+const OT_WIN = 4;
+const OT_BANK = 10000;
+const OT_MAX_BLOCKS = 20; // safety cap against an unending tie
 const isPistolRound = (n: number): boolean => n === 1 || n === HALFTIME_ROUND + 1;
+
+// When ROUND `r` is about to start, does it begin a new side/economy, and with
+// what starting bank? Regulation swaps once at halftime; overtime swaps every
+// OT_HALF_ROUNDS rounds (each OT half is a full-buy reset). Returns null when the
+// round just continues the current side. Shared by the instant sim and the
+// observe/replay loop so they stay perfectly in lockstep.
+function swapBankFor(r: number): number | null {
+  if (r === HALFTIME_ROUND + 1) return STARTING_BANK;
+  if (r > MAX_ROUNDS && (r - (MAX_ROUNDS + 1)) % OT_HALF_ROUNDS === 0) return OT_BANK;
+  return null;
+}
+
+// Is the match decided after `roundsPlayed` rounds at this score? Regulation is
+// first to WIN_THRESHOLD within MAX_ROUNDS; a 12-12 tie goes to overtime, where
+// the bar rises by OT_HALF_ROUNDS each MR3 block (16, then 19, ...) — the first
+// team to OT_WIN rounds in a block wins, and a tied block plays another OT.
+function matchDecided(ctWins: number, tWins: number, roundsPlayed: number): boolean {
+  if (roundsPlayed < MAX_ROUNDS) return ctWins >= WIN_THRESHOLD || tWins >= WIN_THRESHOLD;
+  if (roundsPlayed === MAX_ROUNDS) return ctWins !== tWins; // not 12-12 ⇒ already won; 12-12 ⇒ OT
+  const block = Math.floor((roundsPlayed - MAX_ROUNDS - 1) / (OT_HALF_ROUNDS * 2));
+  const threshold = (WIN_THRESHOLD - 1) + OT_WIN + OT_HALF_ROUNDS * block;
+  return ctWins >= threshold || tWins >= threshold;
+}
 
 export function buildTeam(id: string, name: string, players: Player[], side: Side, moodOverride?: Record<string, number>): Team {
   // Deep-clone the players so the universe's canonical Player objects aren't
@@ -192,16 +221,35 @@ export function simulateMatchInstant(ct: Team, t: Team, map: GameMap, seed: numb
   const masterRng = mulberry32(seed);
   const intFrom = () => Math.floor(masterRng() * 0x100000000);
   const roundOutcomes: RoundOutcome[] = [];
-  // SAFETY: bound the loop in case of a misbehaving sim.
-  while (roundNumber <= MAX_ROUNDS && ct.roundsWon < WIN_THRESHOLD && t.roundsWon < WIN_THRESHOLD) {
+
+  // Swap which roster is on which side, and reset both teams' economy to `bank`
+  // with fresh pistol loadouts (used at the regulation halftime and each OT half).
+  const swapAndReset = (bank: number) => {
+    [homeCtTeam, homeTteam] = [homeTteam, homeCtTeam];
+    homeCtTeam.side = "CT";
+    homeTteam.side = "T";
+    for (const team of [homeCtTeam, homeTteam]) {
+      for (const p of team.players) {
+        p.money = bank;
+        team.loadouts[p.id] = {
+          weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
+          keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
+        };
+      }
+    }
+    lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
+  };
+
+  // Play the current round to completion and fold its result in. Returns false
+  // only if the sim failed to produce a result (defensive). roundNumber is
+  // advanced by the caller.
+  const playRound = (): boolean => {
     aiBuyFor(homeCtTeam, roundNumber, isPistolRound, mulberry32(intFrom()));
     aiBuyFor(homeTteam, roundNumber, isPistolRound, mulberry32(intFrom()));
-
     const sim = new RoundSim(homeCtTeam, homeTteam, map, intFrom());
     let safety = 100000;
     while (!sim.finished && safety-- > 0) sim.tick();
-    if (!sim.result) break;
-
+    if (!sim.result) return false;
     const r = sim.result;
     const winner = r.winningSide === "CT" ? homeCtTeam : homeTteam;
     winner.roundsWon++;
@@ -216,29 +264,21 @@ export function simulateMatchInstant(ct: Team, t: Team, map: GameMap, seed: numb
       tScoreAfter: t.roundsWon,
     });
     lossStreaks = applyRoundReward(homeCtTeam, homeTteam, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
-
-    // Carry over survivor loadout state so next round's AI buy considers kept guns.
     carryOverLoadouts(homeCtTeam, sim);
     carryOverLoadouts(homeTteam, sim);
+    return true;
+  };
 
-    if (roundNumber === HALFTIME_ROUND) {
-      // Halftime: swap sides + reset banks.
-      [homeCtTeam, homeTteam] = [homeTteam, homeCtTeam];
-      homeCtTeam.side = "CT";
-      homeTteam.side = "T";
-      for (const team of [homeCtTeam, homeTteam]) {
-        for (const p of team.players) {
-          p.money = STARTING_BANK;
-          team.loadouts[p.id] = {
-            weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
-            keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
-          };
-        }
-      }
-      lossStreaks = { ctLossStreak: 0, tLossStreak: 0 };
-    }
+  // Play rounds until the match is decided (regulation or overtime). Side/
+  // economy swaps follow the shared schedule so a replay can mirror it exactly.
+  const hardCap = MAX_ROUNDS + OT_MAX_BLOCKS * OT_HALF_ROUNDS * 2;
+  while (!matchDecided(ct.roundsWon, t.roundsWon, roundNumber - 1) && roundNumber <= hardCap) {
+    const bank = swapBankFor(roundNumber);
+    if (bank !== null) swapAndReset(bank);
+    if (!playRound()) break;
     roundNumber++;
   }
+
   const winnerSide: "CT" | "T" = ct.roundsWon >= t.roundsWon ? "CT" : "T";
   return {
     ctScore: ct.roundsWon, tScore: t.roundsWon, winnerSide, clutches,
@@ -272,4 +312,8 @@ function carryOverLoadouts(team: Team, sim: RoundSim) {
   }
 }
 
-export const MATCH_CONSTANTS = { STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS, isPistolRound };
+export const MATCH_CONSTANTS = {
+  STARTING_BANK, HALFTIME_ROUND, WIN_THRESHOLD, MAX_ROUNDS,
+  OT_HALF_ROUNDS, OT_WIN, OT_BANK, OT_MAX_BLOCKS, isPistolRound,
+  swapBankFor, matchDecided,
+};
