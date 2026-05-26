@@ -25,7 +25,7 @@ function writeSavedMaps(maps: Record<string, GameMap>) {
   localStorage.setItem(SAVED_MAPS_KEY, JSON.stringify(maps));
 }
 
-const SEED_FLAG_KEY = "2d-fps-manager-seeded-default-maps";
+const SEED_FLAG_KEY = "2d-fps-manager-seeded-default-maps-v2";
 
 // One-time seed of the default map(s) into the saved-map store, so a fresh
 // install has something to play and the default appears as an ordinary editable

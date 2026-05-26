@@ -5,11 +5,12 @@ import type { GameMap, Vec2 } from "./types.ts";
 // saved maps exist. It is not a privileged "built-in" — once seeded it's an
 // ordinary editable/removable saved map.
 //
-// 33x21 @ 29px. The lesson from the old built-ins: spawning both teams in the
-// same centre columns left them staring straight down the middle at each other.
-// Here a full-width divider with OFFSET lanes breaks every spawn-to-spawn
-// sightline, and both bombsites sit on the north (CT) half so CTs reach them
-// faster than Ts — the CT-favoured travel the maps should have.
+// 33x21 @ 29px. Built in the style of the player-edited maps: an OPEN floor
+// with scattered pillar cover (not a choke), both bombsites pulled to the north
+// (CT) half for CT-favoured travel, and a small central island that blocks the
+// straight spawn-to-spawn sightline while leaving the flanks open to rotate
+// around. The old built-ins left both spawns staring down the middle at each
+// other — this keeps the spawns in place but kills that peek.
 
 const W = 33;
 const H = 21;
@@ -37,41 +38,40 @@ class B {
   }
 }
 
-function junction(): GameMap {
+function crossover(): GameMap {
   const b = new B();
   b.carve(1, 1, 31, 19); // open floor
 
-  // Central divider: a full-width wall band with four OFFSET crossing lanes.
-  // The centre columns (14-18) stay solid, so no spawn column has a straight
-  // line to the opposing spawn.
-  b.fill(1, 9, 31, 11);
-  b.carve(2, 9, 5, 11);    // far-west lane
-  b.carve(11, 9, 13, 11);  // mid-west lane
-  b.carve(19, 9, 21, 11);  // mid-east lane
-  b.carve(27, 9, 30, 11);  // far-east lane
+  // Central island — a small hollow box that blocks the straight spawn-to-spawn
+  // line (centre columns 14-18 are covered at y9-11) but leaves both flanks open
+  // to rotate around. A nook is carved in its middle for cover variety.
+  b.fill(13, 9, 19, 11);
+  b.carve(15, 10, 17, 10);
+  // Pillars flanking the island — mid-fight angles.
+  b.wall(9, 10); b.wall(23, 10);
+  b.wall(11, 8); b.wall(21, 8); b.wall(11, 12); b.wall(21, 12);
 
-  // North half = CT side; bombsites tucked into the corners with cover.
-  // A site (west)
-  b.wall(4, 3); b.wall(7, 6); b.fill(2, 7, 3, 7);
-  // B site (east)
-  b.wall(28, 3); b.wall(25, 6); b.fill(29, 7, 30, 7);
-  // Mid cover just north of the divider so lane exits aren't a straight gauntlet.
-  b.wall(11, 7); b.wall(21, 7); b.fill(15, 6, 17, 6);
+  // North half = CT side; bombsites with surrounding cover.
+  b.wall(7, 6); b.fill(3, 4, 4, 4); b.wall(9, 4);   // A (west, ~5,5)
+  b.wall(25, 6); b.fill(28, 4, 29, 4); b.wall(23, 4); // B (east, ~27,5)
+  b.wall(16, 4);                                      // centre cover below CT spawn
+  b.wall(13, 6); b.wall(19, 6);                       // site-approach angles
 
-  // South half = T side; cover for the approach up to the lanes.
-  b.wall(8, 14); b.wall(24, 14); b.fill(15, 15, 17, 15);
-  b.wall(11, 17); b.wall(21, 17);
+  // South half = T side; cover for the push up to the island and flanks.
+  b.wall(7, 14); b.wall(25, 14);
+  b.wall(11, 16); b.wall(16, 16); b.wall(21, 16);
+  b.wall(5, 16); b.wall(27, 16);
 
   return b.done(
-    "Junction",
+    "Crossover",
     [{ x: 14, y: 2 }, { x: 15, y: 2 }, { x: 16, y: 2 }, { x: 17, y: 2 }, { x: 18, y: 2 }],
     [{ x: 14, y: 18 }, { x: 15, y: 18 }, { x: 16, y: 18 }, { x: 17, y: 18 }, { x: 18, y: 18 }],
     { x: 5, y: 5 }, { x: 27, y: 5 },
-    "#454b56", "#16191f",
+    "#3f4654", "#1b1f27",
   );
 }
 
 // The default map(s). A single map today; an array so the seeder/fallbacks can
 // stay map-count agnostic.
-export function defaultMaps(): GameMap[] { return [junction()]; }
-export function defaultMap(): GameMap { return junction(); }
+export function defaultMaps(): GameMap[] { return [crossover()]; }
+export function defaultMap(): GameMap { return crossover(); }
