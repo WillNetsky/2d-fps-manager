@@ -1440,3 +1440,77 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: width 80ms linear;
 }
 .usim-count { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+
+/* ============================================================================
+   Broadcast Terminal — surface rollout (standings/career, player page, observe
+   HUD). Layered after the base rules so the type roles + treatments win. Keeps
+   the re-skin in one reviewable block.
+   ========================================================================== */
+
+/* ---- Standings & career tables → HLTV stat sheet ---- */
+.universe-player-table-scroll { border-radius: 6px; }
+.universe-player-table th {
+  font-family: var(--font-display); font-size: 12px; letter-spacing: 0.09em;
+  background: linear-gradient(180deg, #23272f, #191c23);
+  border-bottom: 2px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+.universe-player-table td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.universe-player-table td.name-cell, .universe-player-table td.country-cell { font-family: var(--font-body); }
+.pt-handle { font-family: var(--font-display); font-size: 13px; letter-spacing: 0.02em; }
+/* Accent edge on the hovered row — tactical highlight. */
+.universe-player-table tr.clickable-row:hover td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* ---- Box-score modal ---- */
+.ustats-score { font-family: var(--font-score); font-weight: 400; font-variant-numeric: tabular-nums; }
+.ustats-team-title { font-family: var(--font-display); letter-spacing: 0.06em; }
+.ustats-team-table th { font-family: var(--font-display); letter-spacing: 0.06em; }
+.ustats-team-table td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.ustats-team-table td.ustats-name { font-family: var(--font-body); }
+
+/* ---- Top performers ---- */
+.utp-name { font-family: var(--font-display); letter-spacing: 0.02em; }
+.utp-rating { font-family: var(--font-score); font-weight: 400; }
+.utp-stats { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ---- Player page → broadcast player card ---- */
+.upp-header {
+  background: linear-gradient(180deg, #1c212b, #14171d); position: relative; overflow: hidden;
+}
+.upp-header::before {
+  content: ""; position: absolute; top: 0; left: 0;
+  border-top: 16px solid var(--accent); border-right: 16px solid transparent; opacity: .85;
+}
+.upp-name { font-family: var(--font-display); font-size: 30px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.upp-handle, .upp-meta { font-family: var(--font-mono); }
+.upp-hl-label { font-family: var(--font-display); letter-spacing: 0.09em; }
+.upp-hl-val { font-family: var(--font-score); font-weight: 400; font-size: 27px; font-variant-numeric: tabular-nums; }
+.upp-trait { font-family: var(--font-display); letter-spacing: 0.06em; }
+.upp-dyn-item { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.upp-dyn-item span { font-family: var(--font-display); letter-spacing: 0.06em; }
+.upp-stat-title { font-family: var(--font-display); font-size: 12px; letter-spacing: 0.09em; }
+.upp-stat-val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.upp-clutch-label { font-family: var(--font-display); letter-spacing: 0.06em; }
+.upp-clutch-val { font-family: var(--font-score); font-weight: 400; font-size: 24px; font-variant-numeric: tabular-nums; }
+.upp-gl-stat, .upp-gl-rating { font-family: var(--font-mono); }
+
+/* ---- Observe-match HUD → center scorebug ---- */
+.universe-match-hud {
+  font-family: var(--font-display); gap: 0; align-items: stretch; overflow: hidden;
+  background: linear-gradient(180deg, #1c212b, #11141a);
+  border-radius: 6px; font-size: 17px; letter-spacing: 0.03em; padding: 0;
+}
+.universe-match-hud .ct, .universe-match-hud .t { display: flex; align-items: baseline; gap: 8px; padding: 9px 18px; font-weight: 600; }
+.universe-match-hud .ct { box-shadow: inset 3px 0 0 var(--ct); }
+.universe-match-hud .t  { box-shadow: inset -3px 0 0 var(--t); }
+.universe-match-hud b {
+  font-family: var(--font-score); font-weight: 400; font-size: 24px; line-height: 1;
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+.universe-match-hud .sep {
+  font-family: var(--font-mono); align-self: center; padding: 0 16px;
+  color: var(--muted); font-size: 11px; letter-spacing: 0.14em;
+}
+
+/* ---- Round timeline → broadcast tick strip ---- */
+.umt-dot { font-family: var(--font-mono); border-radius: 3px; }
+.umt-dot.active { box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 55%, transparent); }

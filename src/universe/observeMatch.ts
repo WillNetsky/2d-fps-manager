@@ -255,9 +255,9 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     // attached to their team identity so the scoreboard still tracks
     // "Team X has N wins" correctly across the halftime swap.
     hud.innerHTML =
-      `<span class="ct">${escapeHtmlObs(ctSide.name)} ${ctSide.roundsWon}</span>` +
+      `<span class="ct">${escapeHtmlObs(ctSide.name)} <b>${ctSide.roundsWon}</b></span>` +
       `<span class="sep">R${roundNumber} · ${phase}</span>` +
-      `<span class="t">${tSideRef.roundsWon} ${escapeHtmlObs(tSideRef.name)}</span>`;
+      `<span class="t"><b>${tSideRef.roundsWon}</b> ${escapeHtmlObs(tSideRef.name)}</span>`;
   }
 
   function startRound() {
