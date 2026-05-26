@@ -398,8 +398,9 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     const r = finished.result!;
     const winner = r.winningSide === "CT" ? ctSide : tSideRef;
     winner.roundsWon++;
-    const clutch = detectClutch(r, ctSide.players.map(p => p.id), tSideRef.players.map(p => p.id));
-    if (clutch) clutches.push({ ...clutch, round: roundNumber });
+    for (const c of detectClutch(r, ctSide.players.map(p => p.id), tSideRef.players.map(p => p.id))) {
+      clutches.push({ ...c, round: roundNumber });
+    }
     tallyMultiKills(r, multi);
     lossStreaks = applyRoundReward(ctSide, tSideRef, r, lossStreaks.ctLossStreak, lossStreaks.tLossStreak);
     carryOverLoadouts(ctSide, finished);

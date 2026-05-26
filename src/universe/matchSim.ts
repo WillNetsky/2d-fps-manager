@@ -79,16 +79,23 @@ export function buildPlayerStats(
   return out;
 }
 
-// Inspect a finished round and, if a player ever became their team's last
-// survivor, return the clutch attempt with X = enemies-remaining when the
-// clutch started, kills they got during it, and whether they converted (won
-// the round). Returns null only if neither team dropped to one alive.
-export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): Clutch | null {
+// Inspect a finished round and return a clutch attempt for EACH side that was
+// reduced to a lone survivor, with X = enemies remaining the moment that player
+// became last alive, the kills they got during it, and whether they converted.
+//
+// Tracking both sides is what makes 1v1s real: when a round trades down to a
+// 1v1, the FIRST player to be last alive faced 2+ (a 1vX), but the SECOND faced
+// exactly 1 — a genuine 1v1, won by the survivor and lost by the other. The old
+// single-clutcher version only ever saw the first, so the 1v1 bucket could
+// never fill. Returns [] only if neither team dropped to one alive.
+export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): Clutch[] {
   const ctSet = new Set(ctIds);
   const tSet = new Set(tIds);
   const aliveCt = new Set(ctIds);
   const aliveT = new Set(tIds);
-  let clutcher: { id: string; side: Side; kills: number; enemiesAtStart: number; died: boolean } | null = null;
+  type Stand = { id: string; side: Side; kills: number; enemiesAtStart: number; died: boolean };
+  let ct: Stand | null = null;
+  let t: Stand | null = null;
 
   for (const ev of r.events) {
     if (ev.kind !== "kill") continue;
@@ -96,54 +103,33 @@ export function detectClutch(r: RoundResult, ctIds: string[], tIds: string[]): C
     if (aliveCt.has(ev.victim)) aliveCt.delete(ev.victim);
     else if (aliveT.has(ev.victim)) aliveT.delete(ev.victim);
 
-    // First time a side drops to one survivor: that player is the clutcher.
-    if (!clutcher) {
-      if (aliveCt.size === 1) {
-        const last = [...aliveCt][0];
-        clutcher = { id: last, side: "CT", kills: 0, enemiesAtStart: aliveT.size, died: false };
-      } else if (aliveT.size === 1) {
-        const last = [...aliveT][0];
-        clutcher = { id: last, side: "T", kills: 0, enemiesAtStart: aliveCt.size, died: false };
-      }
-    }
+    // First time each side drops to its last survivor, lock in that player and
+    // how many enemies they were facing at that moment.
+    if (!ct && aliveCt.size === 1) ct = { id: [...aliveCt][0], side: "CT", kills: 0, enemiesAtStart: aliveT.size, died: false };
+    if (!t && aliveT.size === 1) t = { id: [...aliveT][0], side: "T", kills: 0, enemiesAtStart: aliveCt.size, died: false };
 
-    // Count opposing-side kills made by the clutcher after they became last alive.
-    if (clutcher && ev.killer === clutcher.id) {
-      const opp = clutcher.side === "CT" ? tSet : ctSet;
-      if (opp.has(ev.victim)) clutcher.kills++;
-    }
-
-    if (clutcher && ev.victim === clutcher.id) clutcher.died = true;
+    // Kills each clutcher landed on the opposing side after becoming last alive.
+    if (ct && ev.killer === ct.id && tSet.has(ev.victim)) ct.kills++;
+    if (t && ev.killer === t.id && ctSet.has(ev.victim)) t.kills++;
+    if (ct && ev.victim === ct.id) ct.died = true;
+    if (t && ev.victim === t.id) t.died = true;
   }
 
-  if (!clutcher) return null;
-
-  // Sanity guards against false positives. A real clutch requires that the
-  // clutcher's team genuinely had only the clutcher alive at some point. If
-  // either of these checks fails, treat it as not a clutch — most likely the
-  // input roster was truncated (e.g. a lookup dropped players) so the alive
-  // set hit "size 1" without actually being last alive.
-  const sideSize = (clutcher.side === "CT" ? ctIds : tIds).length;
-  // At least N-1 teammate deaths must have shown up on the kill stream for
-  // someone on that side to actually be last alive.
-  const teammateDeaths = r.events.filter(e =>
-    e.kind === "kill" &&
-    (clutcher!.side === "CT" ? ctSet.has(e.victim) : tSet.has(e.victim))
-  ).length;
-  if (teammateDeaths < sideSize - 1) return null;
-  // And at end-of-events the side's tracked alive count should be ≤ 1.
-  const teamAliveAtEnd = clutcher.side === "CT" ? aliveCt.size : aliveT.size;
-  if (teamAliveAtEnd > 1) return null;
-
-  // Won iff their side won the round AND they didn't die — either path being
-  // false means a missed opportunity (round lost, or died but bomb detonated).
-  const won = !clutcher.died && clutcher.side === r.winningSide;
-  return {
-    playerId: clutcher.id,
-    kills: clutcher.kills,
-    enemiesAtStart: clutcher.enemiesAtStart,
-    won,
+  const out: Clutch[] = [];
+  const record = (s: Stand | null, ids: string[], aliveSet: Set<string>) => {
+    if (!s || s.enemiesAtStart < 1) return;
+    // Sanity guard against truncated rosters: the side must genuinely have lost
+    // all but one (N-1 teammate deaths on the kill stream).
+    const teammateDeaths = r.events.filter(e =>
+      e.kind === "kill" && (s.side === "CT" ? ctSet : tSet).has(e.victim)).length;
+    if (teammateDeaths < ids.length - 1 || aliveSet.size > 1) return;
+    // Won iff their side won the round and they survived — losing the round or
+    // dying (e.g. bomb detonates) is a missed opportunity.
+    out.push({ playerId: s.id, kills: s.kills, enemiesAtStart: s.enemiesAtStart, won: !s.died && s.side === r.winningSide });
   };
+  record(ct, ctIds, aliveCt);
+  record(t, tIds, aliveT);
+  return out;
 }
 
 const STARTING_BANK = 800;
@@ -253,8 +239,9 @@ export function simulateMatchInstant(ct: Team, t: Team, map: GameMap, seed: numb
     const r = sim.result;
     const winner = r.winningSide === "CT" ? homeCtTeam : homeTteam;
     winner.roundsWon++;
-    const clutch = detectClutch(r, homeCtTeam.players.map(p => p.id), homeTteam.players.map(p => p.id));
-    if (clutch) clutches.push({ ...clutch, round: roundNumber });
+    for (const c of detectClutch(r, homeCtTeam.players.map(p => p.id), homeTteam.players.map(p => p.id))) {
+      clutches.push({ ...c, round: roundNumber });
+    }
     tallyMultiKills(r, multi);
     roundOutcomes.push({
       round: roundNumber,
