@@ -795,6 +795,81 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-load-info .ul-meta { font-size: 11px; color: var(--muted); }
 .universe-load-row > div:last-child { display: flex; gap: 4px; }
 
+/* ===== Title screen (full-bleed broadcast menu) ===== */
+.uni-title {
+  margin: -18px -24px;                 /* bleed past .universe-body padding */
+  min-height: calc(100% + 36px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 48px 28px; position: relative; overflow: hidden;
+  background: radial-gradient(120% 95% at 50% 26%, #171b24 0%, #0b0d11 72%);
+}
+/* Drifting CT/T faction glows for atmosphere. */
+.uni-title::before {
+  content: ""; position: absolute; inset: -25% -15%;
+  background:
+    radial-gradient(38% 42% at 22% 26%, color-mix(in srgb, var(--ct) 32%, transparent), transparent 70%),
+    radial-gradient(40% 44% at 80% 78%, color-mix(in srgb, var(--t) 28%, transparent), transparent 70%);
+  filter: blur(22px); opacity: .5;
+  animation: uni-drift 24s ease-in-out infinite alternate;
+}
+/* Tactical grid, faded toward the edges. */
+.uni-title::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .45;
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 39px, color-mix(in srgb, var(--line) 55%, transparent) 39px 40px),
+    repeating-linear-gradient(90deg, transparent 0 39px, color-mix(in srgb, var(--line) 55%, transparent) 39px 40px);
+  -webkit-mask-image: radial-gradient(115% 90% at 50% 28%, #000 28%, transparent 82%);
+          mask-image: radial-gradient(115% 90% at 50% 28%, #000 28%, transparent 82%);
+}
+@keyframes uni-drift { from { transform: translate3d(-2%,-1%,0) scale(1); } to { transform: translate3d(2%,2%,0) scale(1.06); } }
+
+.uni-title-inner {
+  position: relative; z-index: 1; width: min(560px, 92vw);
+  display: flex; flex-direction: column; gap: 22px;
+}
+/* Staggered entrance. */
+.uni-title-head, .uni-title-actions, .uni-title-load {
+  animation: uni-in .5s cubic-bezier(.2,.7,.3,1) backwards;
+}
+.uni-title-actions { animation-delay: .12s; }
+.uni-title-load { animation-delay: .2s; }
+@keyframes uni-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+.uni-overline {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .42em;
+  text-transform: uppercase; color: var(--muted);
+}
+.uni-wordmark {
+  margin: 14px 0 0; font-family: var(--font-score); font-weight: 400; line-height: .84;
+  font-size: clamp(58px, 12vw, 116px); text-transform: uppercase; letter-spacing: .01em;
+  display: flex; flex-direction: column;
+}
+.uni-wordmark .uw-a { color: var(--text); }
+.uni-wordmark .uw-b { color: var(--accent); text-shadow: 0 0 42px color-mix(in srgb, var(--accent) 40%, transparent); }
+.uni-rule {
+  height: 4px; width: 88px; margin-top: 20px; background: var(--accent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.uni-tagline { margin: 16px 0 0; max-width: 46ch; font-size: 14px; line-height: 1.6; color: var(--muted); }
+.uni-title-actions .universe-btn.big {
+  font-family: var(--font-display); font-size: 16px; letter-spacing: .07em; text-transform: uppercase;
+  padding: 13px 28px;
+}
+.uni-load-label {
+  font-family: var(--font-display); font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.uni-title-load .universe-load-list { max-height: 32vh; overflow-y: auto; padding-right: 2px; }
+.uni-title-load .universe-load-row { transition: border-color .12s, transform .12s; }
+.uni-title-load .universe-load-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); transform: translateX(2px);
+}
+.uni-title-load .ul-name { font-family: var(--font-display); font-size: 14px; letter-spacing: .02em; }
+.uni-title-load .ul-meta { font-family: var(--font-mono); }
+@media (prefers-reduced-motion: reduce) {
+  .uni-title::before, .uni-title-head, .uni-title-actions, .uni-title-load { animation: none; }
+}
+
 /* New Universe setup form */
 .universe-setup-card { width: min(600px, 94vw); max-height: 88vh; overflow-y: auto; }
 .universe-setup-field { display: flex; flex-direction: column; gap: 4px; }

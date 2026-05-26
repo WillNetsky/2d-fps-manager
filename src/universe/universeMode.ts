@@ -72,8 +72,9 @@ export class UniverseMode {
     main.className = "universe-main";
     this.root.appendChild(main);
 
-    // Top bar (visible on every screen except the match canvas / replay).
-    if (this.screen !== "match" && this.screen !== "replay") {
+    // Top bar (visible on every screen except the match canvas / replay and the
+    // full-bleed title screen, which is its own immersive layout).
+    if (this.screen !== "match" && this.screen !== "replay" && this.screen !== "menu") {
       main.appendChild(this.topBar());
     }
 
@@ -248,27 +249,38 @@ export class UniverseMode {
   // ---- Menu screen ----
 
   private renderMenu(body: HTMLElement) {
-    const wrap = document.createElement("div");
-    wrap.className = "universe-menu-wrap";
+    // Full-bleed broadcast title screen.
+    const screen = document.createElement("div");
+    screen.className = "uni-title";
 
-    const card = document.createElement("div");
-    card.className = "universe-menu-card";
+    const inner = document.createElement("div");
+    inner.className = "uni-title-inner";
+    screen.appendChild(inner);
 
-    const h = document.createElement("h2");
-    h.textContent = "Universe Mode";
-    card.appendChild(h);
+    // --- Masthead ---
+    const head = document.createElement("div");
+    head.className = "uni-title-head";
+    head.innerHTML =
+      `<div class="uni-overline">2D&nbsp;FPS&nbsp;Manager</div>` +
+      `<h1 class="uni-wordmark"><span class="uw-a">Universe</span><span class="uw-b">Mode</span></h1>` +
+      `<div class="uni-rule"></div>` +
+      `<p class="uni-tagline">Spin up a living scene — hundreds of players across six regions, ` +
+      `forming teams, building rivalries, and climbing the rankings one match day at a time.</p>`;
+    inner.appendChild(head);
 
-    const sub = document.createElement("p");
-    sub.className = "universe-sub";
-    sub.textContent = "Generate a pool of players and let them play casual matchups day by day. Elo rises and falls with each result.";
-    card.appendChild(sub);
+    // --- Primary action ---
+    const actions = document.createElement("div");
+    actions.className = "uni-title-actions";
+    actions.appendChild(btn("New Universe", "primary big", () => this.openNewUniverse()));
+    inner.appendChild(actions);
 
-    card.appendChild(btn("New Universe", "primary big", () => this.openNewUniverse()));
-
-    const loadHeader = document.createElement("div");
-    loadHeader.className = "universe-section-label";
-    loadHeader.textContent = "Load existing";
-    card.appendChild(loadHeader);
+    // --- Saved universes ---
+    const loadPanel = document.createElement("div");
+    loadPanel.className = "uni-title-load";
+    const loadLabel = document.createElement("div");
+    loadLabel.className = "uni-load-label";
+    loadLabel.textContent = "Saved universes";
+    loadPanel.appendChild(loadLabel);
 
     const list = document.createElement("div");
     list.className = "universe-load-list";
@@ -283,7 +295,7 @@ export class UniverseMode {
       if (slots.length === 0) {
         const empty = document.createElement("div");
         empty.className = "universe-empty";
-        empty.textContent = "No saved universes yet.";
+        empty.textContent = "No saved universes yet — start a New Universe above.";
         list.appendChild(empty);
         return;
       }
@@ -294,20 +306,21 @@ export class UniverseMode {
         info.className = "universe-load-info";
         info.innerHTML = `<div class="ul-name">${escapeHtml(s.name)}</div><div class="ul-meta">Day ${s.day} · ${new Date(s.createdAt).toLocaleDateString()}</div>`;
         row.appendChild(info);
-        const actions = document.createElement("div");
-        actions.appendChild(btn("Load", "", () => { void this.loadUniverseById(s.id); }));
-        actions.appendChild(btn("Delete", "danger", () => {
+        const rowActions = document.createElement("div");
+        rowActions.appendChild(btn("Load", "primary", () => { void this.loadUniverseById(s.id); }));
+        rowActions.appendChild(btn("Delete", "danger", () => {
           if (confirm(`Delete universe "${s.name}"?`)) {
             void deleteUniverse(s.id).then(() => this.render());
           }
         }));
-        row.appendChild(actions);
+        row.appendChild(rowActions);
         list.appendChild(row);
       }
     });
-    card.appendChild(list);
-    wrap.appendChild(card);
-    body.appendChild(wrap);
+    loadPanel.appendChild(list);
+    inner.appendChild(loadPanel);
+
+    body.appendChild(screen);
   }
 
   // ---- Universe lifecycle ----

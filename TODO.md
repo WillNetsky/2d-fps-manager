@@ -30,6 +30,8 @@
 - [x] Kill display in the top right
 - [x] Timeline kill lines color coded by team
 - [x] "Replay" displayed on top when its replaying "Live" when live
+- [ ] Buttons for moving between rounds are stuck behind the main menu button
+- [ ] Highlight the circle of the currently playing round
 
 ## Map Editor
 - [x] Abillity to create new maps, edit saved maps
@@ -37,12 +39,12 @@
 - [x] Save as new map
 
 ## Universe
-- [ ] Pool of players
-- [ ] They play casual games (that are tracked) and skill up from them
+- [x] Pool of players
+- [x] They play casual games (that are tracked) and skill up from them
 
 ## Issues
 - [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
-- [ ] It appears that sometimes CTs try to save by sitting in spawn, but they're found and they dont fight back and just get killed
+- [x] It appears that sometimes CTs try to save by sitting in spawn, but they're found and they dont fight back and just get killed
 
 ## Thoughts
 - [x] Pistol rounds don't feel right, there should be the option to buy kevlar OR util for each player, and util should be more effective in those rounds
