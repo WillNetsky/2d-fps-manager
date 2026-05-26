@@ -12,7 +12,7 @@ import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
   STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
+  type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats, type VetoStep,
 } from "./types.ts";
 
 // The mutable slice of a Universe the simulation reads and writes. Everything
@@ -49,6 +49,7 @@ export interface MatchupOutcome {
   ctScore: number;                                  // Bo1: rounds; series: games won by CT
   tScore: number;
   games?: GameResult[];                             // series only
+  veto?: VetoStep[];                                // series only
   // Bo1 only — series detail lives per game in `games`.
   clutches?: Clutch[];
   playerStats?: Record<string, PlayerMatchStats>;
@@ -77,16 +78,56 @@ function runGame(ctIds: string[], tIds: string[], byId: Map<string, Player>, map
   return { ctScore: r.ctScore, tScore: r.tScore, winnerSide: r.winnerSide, clutches: r.clutches, playerStats: r.playerStats };
 }
 
-// Phase A map selection for a series: distinct maps in random order. (Phase C
-// replaces this with a preference-driven CS pick/ban veto.) The series length
-// is gated to the pool size at matchmaking, so we always have enough.
-function chooseSeriesMaps(maps: GameMap[], bestOf: number): number[] {
-  const idxs = maps.map((_, i) => i);
-  for (let i = idxs.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+// CS-style pick/ban veto driven by each team's emergent map comfort. The two
+// sides alternate (CT seeds first; sides are randomized per matchup, so that's
+// effectively a coin flip): first banning their least-preferred remaining maps
+// down to the series length, then picking their most-preferred — each pick is
+// the next game, and the final leftover is the decider. Deterministic given the
+// players' map records (ties break by map name), so a series is reproducible.
+// Returns the map indices in game order plus the veto sequence for display.
+function runVeto(
+  maps: GameMap[], bestOf: number, ctIds: string[], tIds: string[], byId: Map<string, Player>,
+): { order: number[]; steps: VetoStep[] } {
+  const remaining = maps.map((_, i) => i);
+  const need = Math.min(bestOf, remaining.length); // maps to finish with (games)
+  const bans = Math.max(0, remaining.length - need);
+  const steps: VetoStep[] = [];
+  const order: number[] = [];
+
+  const idsOf = (turn: number) => (turn % 2 === 0 ? ctIds : tIds);
+  const sideOf = (turn: number): "CT" | "T" => (turn % 2 === 0 ? "CT" : "T");
+  const comfort = (turn: number, mi: number) => teamMapComfort(idsOf(turn), byId, maps[mi].name);
+  const take = (mi: number) => remaining.splice(remaining.indexOf(mi), 1);
+
+  let turn = 0;
+  // Bans: each team removes its least-preferred remaining map.
+  for (let b = 0; b < bans; b++) {
+    let pick = remaining[0], best = Infinity;
+    for (const mi of remaining) {
+      const c = comfort(turn, mi);
+      if (c < best || (c === best && maps[mi].name < maps[pick].name)) { best = c; pick = mi; }
+    }
+    take(pick);
+    steps.push({ side: sideOf(turn), action: "ban", mapIndex: pick });
+    turn++;
   }
-  return idxs.slice(0, Math.min(bestOf, idxs.length));
+  // Picks: each team takes its most-preferred remaining map as the next game.
+  for (let p = 0; p < need - 1; p++) {
+    let pick = remaining[0], best = -Infinity;
+    for (const mi of remaining) {
+      const c = comfort(turn, mi);
+      if (c > best || (c === best && maps[mi].name < maps[pick].name)) { best = c; pick = mi; }
+    }
+    take(pick);
+    steps.push({ side: sideOf(turn), action: "pick", mapIndex: pick });
+    order.push(pick);
+    turn++;
+  }
+  // Decider: the last remaining map.
+  const decider = remaining[0];
+  steps.push({ side: sideOf(turn), action: "decider", mapIndex: decider });
+  order.push(decider);
+  return { order, steps };
 }
 
 // Pure: simulate a matchup (Bo1 or full series) and return its outcome. Does not
@@ -101,7 +142,7 @@ export function simulateMatchup(m: Matchup, byId: Map<string, Player>, maps: Gam
     const g = runGame(m.ctPlayerIds, m.tPlayerIds, byId, maps[m.mapIndex], m.seed);
     return { id: m.id, winnerSide: g.winnerSide, ctScore: g.ctScore, tScore: g.tScore, clutches: g.clutches, playerStats: g.playerStats, seed: m.seed, mapIndex: m.mapIndex, moods };
   }
-  const mapOrder = chooseSeriesMaps(maps, bestOf);
+  const { order: mapOrder, steps: veto } = runVeto(maps, bestOf, m.ctPlayerIds, m.tPlayerIds, byId);
   const need = Math.ceil(bestOf / 2);
   const games: GameResult[] = [];
   let ctWon = 0, tWon = 0;
@@ -114,7 +155,7 @@ export function simulateMatchup(m: Matchup, byId: Map<string, Player>, maps: Gam
     games.push({ seed, mapIndex, ...g, moods });
     if (g.winnerSide === "CT") ctWon++; else tWon++;
   }
-  return { id: m.id, winnerSide: ctWon > tWon ? "CT" : "T", ctScore: ctWon, tScore: tWon, games };
+  return { id: m.id, winnerSide: ctWon > tWon ? "CT" : "T", ctScore: ctWon, tScore: tWon, games, veto };
 }
 
 // Update each participating player's per-map win/loss record for the map just
@@ -182,6 +223,7 @@ export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId
 
   if (o.games) {
     m.games = o.games;
+    m.veto = o.veto;
     // Each game adjusts elo; the card shows an approximate symmetric delta — the
     // winning side's average net elo change across the series. Per-game truth
     // lives in the box score.

@@ -72,10 +72,20 @@ export interface Matchup {
   // seed / mapIndex / clutches / playerStats are unused (they live per game).
   bestOf?: 1 | 3 | 5;
   games?: GameResult[];
+  // The pick/ban veto that chose this series' maps, in order. Recorded for the
+  // box-score display; the resulting map order is reflected in `games`.
+  veto?: VetoStep[];
   // For a Bo1: each participating player's morale at sim time, snapshotted so a
   // replay reproduces the exact match (the sim seeds in-match mood from morale,
   // which drifts day to day). Series store this per game instead.
   moods?: Record<string, number>;
+}
+
+// One step of a series map veto. `side` is which side of the matchup acted.
+export interface VetoStep {
+  side: "CT" | "T";
+  action: "ban" | "pick" | "decider";
+  mapIndex: number;
 }
 
 // One game within a series. Carries its own seed and map so it replays

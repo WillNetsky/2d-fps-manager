@@ -1586,6 +1586,24 @@ function showMatchStatsModal(m: Matchup, u: Universe) {
   header.appendChild(closeBtn);
   modal.appendChild(header);
 
+  // Series map veto, in order (ban/pick/decider per side).
+  if (m.veto?.length) {
+    const playersOf = (ids: string[]) => ids.map(id => u.players.find(p => p.id === id)).filter((p): p is Player => !!p);
+    const ctName = teamNameFor(playersOf(m.ctPlayerIds), u.elos);
+    const tName = teamNameFor(playersOf(m.tPlayerIds), u.elos);
+    const veto = document.createElement("div");
+    veto.className = "ustats-veto";
+    veto.innerHTML = m.veto.map(s => {
+      const team = s.side === "CT" ? ctName : tName;
+      const mapName = u.maps?.[s.mapIndex]?.name ?? `Map ${s.mapIndex + 1}`;
+      const cls = s.side === "CT" ? "ct" : "t";
+      if (s.action === "decider") return `<span class="uv-step"><span class="uv-act">decider</span> ${escapeHtml(mapName)}</span>`;
+      const verb = s.action === "ban" ? "removed" : "picked";
+      return `<span class="uv-step"><span class="${cls}">${escapeHtml(team)}</span> <span class="uv-act">${verb}</span> ${escapeHtml(mapName)}</span>`;
+    }).join("");
+    modal.appendChild(veto);
+  }
+
   // Body holds the box score for the selected game (or the single match).
   const body = document.createElement("div");
 
