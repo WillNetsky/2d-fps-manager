@@ -696,6 +696,7 @@ export class UniverseMode {
     regionMatchups.forEach((m, i) => {
       const card = document.createElement("div");
       card.className = "universe-matchup-card " + (m.status === "completed" ? "completed" : "");
+      card.style.setProperty("--card-i", String(i)); // staggered page-load reveal
 
       const isSeries = (m.bestOf ?? 1) > 1;
       const header = document.createElement("div");
