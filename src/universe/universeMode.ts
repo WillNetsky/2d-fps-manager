@@ -1,27 +1,34 @@
 import type { GameMap, Player } from "../domain/types.ts";
 import { makePlayer, setSeed } from "../domain/factory.ts";
 import {
-  flagEmoji, regionOf, REGION_ORDER, REGION_LABELS, type Region,
+  flagEmoji, REGION_ORDER, REGION_LABELS, type Region,
 } from "../domain/countries.ts";
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
 import { applyMatchElo } from "./elo.ts";
-import { applyMatchChemistry, decayRelationships, FRIEND_THRESHOLD } from "./chemistry.ts";
+import { applyMatchChemistry, decayRelationships } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
-import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
-  deleteUniverse, listUniverses, loadUniverse, newUniverseId, saveUniverse,
+  generateMatchups, newSeed, simOneMatchup, recordMatchupCareers,
+  emptyCareer, clutchBucket, type SimState,
+} from "./universeSim.ts";
+import SimWorker from "./universeSimWorker.ts?worker";
+import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
+import {
+  appendDays, deleteUniverse, listUniverses, loadUniverse, newUniverseId,
+  saveUniverse, HISTORY_WINDOW,
 } from "./storage.ts";
 import {
   PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type Matchup, type PlayerMatchStats, type Universe,
+  type CareerStats, type CompletedDay, type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
 
-// How many recent completed days to keep for replay + per-player game logs.
-// Lifetime stats live in `Universe.careers`, so trimming here only limits how
-// far back individual matches stay replayable — not the career totals.
-const HISTORY_DAYS = 60;
+// How many recent completed days to keep in memory for replay + per-player game
+// logs. The full archive lives in IndexedDB; lifetime stats live in
+// `Universe.careers`, so trimming here only limits how far back individual
+// matches stay replayable — not the career totals.
+const HISTORY_DAYS = HISTORY_WINDOW;
 
 type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
 
@@ -49,6 +56,9 @@ export class UniverseMode {
   private replayReturnPlayerId: string | null = null;
   // Config being assembled on the New Universe setup screen.
   private setup: UniverseSetup | null = null;
+  // Which day the matchups board is showing. null = follow the live (current)
+  // day; a number points at a past day held in the in-memory history window.
+  private viewingDay: number | null = null;
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -106,7 +116,10 @@ export class UniverseMode {
     if (!this.universe || !this.replayRef) { this.exitReplay(); return; }
     const u = this.universe;
     const ref = this.replayRef;
-    const day = u.history.find(d => d.day === ref.day);
+    // Resolve from history, or the in-progress day for matches just completed
+    // today (which haven't rolled into history yet).
+    const day = u.history.find(d => d.day === ref.day)
+      ?? (u.pendingDay?.day === ref.day ? u.pendingDay : undefined);
     const m = day?.matchups[ref.matchIdx];
     if (!m || m.seed === undefined || !u.maps || u.maps.length === 0) { this.exitReplay(); return; }
     const map = u.maps[m.mapIndex ?? 0] ?? u.maps[0];
@@ -253,13 +266,21 @@ export class UniverseMode {
 
     const list = document.createElement("div");
     list.className = "universe-load-list";
-    const slots = listUniverses();
-    if (slots.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "universe-empty";
-      empty.textContent = "No saved universes yet.";
-      list.appendChild(empty);
-    } else {
+    // Loading the saved-universe list is async (IndexedDB); render a placeholder
+    // and fill the container once the list resolves.
+    const loading = document.createElement("div");
+    loading.className = "universe-empty";
+    loading.textContent = "Loading…";
+    list.appendChild(loading);
+    listUniverses().then(slots => {
+      list.innerHTML = "";
+      if (slots.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "universe-empty";
+        empty.textContent = "No saved universes yet.";
+        list.appendChild(empty);
+        return;
+      }
       for (const s of slots) {
         const row = document.createElement("div");
         row.className = "universe-load-row";
@@ -268,17 +289,16 @@ export class UniverseMode {
         info.innerHTML = `<div class="ul-name">${escapeHtml(s.name)}</div><div class="ul-meta">Day ${s.day} · ${new Date(s.createdAt).toLocaleDateString()}</div>`;
         row.appendChild(info);
         const actions = document.createElement("div");
-        actions.appendChild(btn("Load", "", () => this.loadUniverseById(s.id)));
+        actions.appendChild(btn("Load", "", () => { void this.loadUniverseById(s.id); }));
         actions.appendChild(btn("Delete", "danger", () => {
           if (confirm(`Delete universe "${s.name}"?`)) {
-            deleteUniverse(s.id);
-            this.render();
+            void deleteUniverse(s.id).then(() => this.render());
           }
         }));
         row.appendChild(actions);
         list.appendChild(row);
       }
-    }
+    });
     card.appendChild(list);
     wrap.appendChild(card);
     body.appendChild(wrap);
@@ -445,8 +465,8 @@ export class UniverseMode {
     body.appendChild(wrap);
   }
 
-  private loadUniverseById(id: string) {
-    const u = loadUniverse(id);
+  private async loadUniverseById(id: string) {
+    const u = await loadUniverse(id);
     if (!u) return;
     // Migrate older saves that predate the universe-level map / map rotation.
     if (!u.maps || u.maps.length === 0) {
@@ -457,14 +477,11 @@ export class UniverseMode {
     for (const p of u.players) {
       if (typeof p.ambition !== "number") p.ambition = Math.round(15 + Math.random() * 80);
     }
-    // Career aggregates. Rebuild from history whenever it's still complete
-    // (oldest retained day is day 1 → nothing trimmed yet). This both seeds
-    // pre-aggregate saves and lets corrections to the folding logic — e.g. how
-    // clutch wins are counted — take effect on existing universes. Once history
-    // has been trimmed we can no longer rebuild without undercounting, so we
-    // keep the running totals and only fold new matches in going forward.
-    const historyComplete = u.history.length === 0 || u.history[0].day === 1;
-    if (!u.careers || historyComplete) rebuildCareers(u);
+    // Career aggregates are maintained incrementally and persisted in core, so
+    // we trust them. The in-memory history is only a recent window now (the full
+    // archive lives in IndexedDB), so rebuilding from it would undercount —
+    // only rebuild when careers are entirely absent, and only from what we have.
+    if (!u.careers) rebuildCareers(u);
     trimHistory(u);
     // Older saves may have rolled a day into history without generating the
     // next day's matchups. The day view now always expects a pendingDay, so
@@ -477,8 +494,73 @@ export class UniverseMode {
     this.render();
   }
 
+  // Saving is async now (IndexedDB). persist() is fire-and-forget but
+  // coalesced: overlapping calls collapse into one in-flight write that re-runs
+  // if more changes arrived while it was saving, so rapid match completions
+  // never stack up writes or race. flush() awaits the queue when a write must
+  // durably land before moving on (e.g. before leaving the universe).
+  private saveQueued = false;
+  private saving: Promise<void> | null = null;
+
   private persist() {
-    if (this.universe) saveUniverse(this.universe);
+    if (!this.universe) return;
+    this.saveQueued = true;
+    if (this.saving) return;
+    this.saving = (async () => {
+      while (this.saveQueued) {
+        this.saveQueued = false;
+        try { await saveUniverse(this.universe!); }
+        catch (e) { console.error("Failed to save universe", e); }
+      }
+      this.saving = null;
+    })();
+  }
+
+  private async flush(): Promise<void> {
+    if (this.saving) await this.saving;
+  }
+
+  // ---- Headless simulation (off-thread) ----
+
+  // The mutable slice of the universe handed to the sim worker. postMessage
+  // structured-clones it, so the worker mutates a copy and we merge its result
+  // back via applyWorkerState — the live universe is untouched until then.
+  private snapshotState(u: Universe): SimState {
+    return {
+      players: u.players,
+      elos: u.elos,
+      careers: u.careers ??= {},
+      maps: u.maps ?? [],
+      pendingDay: u.pendingDay,
+      day: u.day,
+    };
+  }
+
+  private applyWorkerState(u: Universe, state: SimState) {
+    u.players = state.players;
+    u.elos = state.elos;
+    u.careers = state.careers;
+    u.pendingDay = state.pendingDay;
+    u.day = state.day;
+  }
+
+  // Run one sim request in a throwaway worker, forwarding progress and resolving
+  // with the terminal message. Mirrors the per-run worker lifecycle in balanceMode.
+  private runSimWorker(
+    req: SimWorkerRequest,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<Exclude<SimWorkerResponse, { kind: "progress" }>> {
+    return new Promise((resolve, reject) => {
+      const worker = new SimWorker();
+      worker.addEventListener("message", (e: MessageEvent<SimWorkerResponse>) => {
+        const msg = e.data;
+        if (msg.kind === "progress") { onProgress?.(msg.done, msg.total); return; }
+        worker.terminate();
+        resolve(msg);
+      });
+      worker.addEventListener("error", err => { worker.terminate(); reject(err); });
+      worker.postMessage(req);
+    });
   }
 
   // ---- Players (roster) screen ----
@@ -501,15 +583,58 @@ export class UniverseMode {
       };
       this.persist();
     }
+    this.viewingDay = null;
     this.screen = "matchups";
     this.render();
   }
 
+  // Day navigator for the matchups board: step back/forward through the recent
+  // history window, with a center button that jumps back to the live day.
+  private dayNav(viewing: number, currentDay: number): HTMLElement {
+    const u = this.universe!;
+    const earliest = u.history.length ? u.history[0].day : currentDay;
+    const nav = document.createElement("div");
+    nav.className = "umc-day-nav";
+
+    const prev = btn("◀ Prev", "", () => { this.viewingDay = Math.max(earliest, viewing - 1); this.render(); });
+    prev.disabled = viewing <= earliest;
+
+    const isCurrent = viewing === currentDay;
+    const center = btn(
+      isCurrent ? `Day ${viewing} · Current` : `Day ${viewing} · Jump to current →`,
+      isCurrent ? "" : "primary",
+      () => { this.viewingDay = null; this.render(); },
+    );
+    center.disabled = isCurrent;
+    center.classList.add("umc-day-label");
+
+    const next = btn("Next ▶", "", () => {
+      const target = Math.min(currentDay, viewing + 1);
+      this.viewingDay = target === currentDay ? null : target;
+      this.render();
+    });
+    next.disabled = isCurrent;
+
+    nav.append(prev, center, next);
+    return nav;
+  }
+
   private renderMatchups(body: HTMLElement) {
     if (!this.universe || !this.universe.pendingDay) return;
-    const day = this.universe.pendingDay;
-    const playerById = new Map(this.universe.players.map(p => [p.id, p] as const));
-    const elos = this.universe.elos;
+    const u = this.universe;
+    const pending = u.pendingDay!;
+    // Resolve which day to show: the live day, or a past day from the window.
+    const viewing = this.viewingDay ?? pending.day;
+    const isCurrent = viewing === pending.day;
+    const day = isCurrent ? pending : u.history.find(d => d.day === viewing);
+    // The viewed day fell out of the in-memory window (e.g. after trimming);
+    // snap back to the live day.
+    if (!day) { this.viewingDay = null; this.renderMatchups(body); return; }
+
+    body.appendChild(this.dayNav(viewing, pending.day));
+
+    const playerById = new Map(u.players.map(p => [p.id, p] as const));
+    const elos = u.elos;
 
     // Top performers across all completed matches today. Updates as more
     // matches finish, so even a single sim'd match shows the top of the day.
@@ -544,7 +669,10 @@ export class UniverseMode {
 
       const header = document.createElement("div");
       header.className = "umc-header";
-      header.textContent = `Match ${i + 1}`;
+      const mapName = this.universe!.maps?.[m.mapIndex ?? 0]?.name ?? this.universe!.map?.name;
+      header.textContent = m.status === "completed" && mapName
+        ? `Match ${i + 1} · ${mapName}`
+        : `Match ${i + 1}`;
       card.appendChild(header);
 
       const teams = document.createElement("div");
@@ -569,6 +697,11 @@ export class UniverseMode {
       if (m.status === "pending") {
         actions.appendChild(btn("Sim", "", () => this.simMatchup(m.id)));
         actions.appendChild(btn("Play", "primary", () => this.playMatchup(m.id)));
+      } else if (m.seed !== undefined) {
+        // Replay reruns the match deterministically from its seed. matchIdx is
+        // the index into the day's full matchups list (not the per-region slice).
+        const matchIdx = day.matchups.indexOf(m);
+        actions.appendChild(btn("Replay", "", () => this.openReplay(day.day, matchIdx)));
       }
       card.appendChild(actions);
       grid.appendChild(card);
@@ -635,32 +768,14 @@ export class UniverseMode {
     this.render();
   }
 
+  // Single-match instant sim (the per-card "Sim" button). One match is cheap, so
+  // it runs on the main thread; the shared engine keeps the fold logic identical
+  // to the batch worker path.
   private runInstantSim(m: Matchup) {
     if (!this.universe) return;
     const u = this.universe;
     if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
-    if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
-      m.mapIndex = Math.floor(Math.random() * u.maps.length);
-    }
-    const map = u.maps[m.mapIndex];
-    if (m.seed === undefined) m.seed = newSeed();
-    const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
-    const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
-    const ctTeam = buildTeam("ct", "CT-side", ctPlayers, "CT");
-    const tTeam  = buildTeam("t",  "T-side",  tPlayers,  "T");
-    const result = simulateMatchInstant(ctTeam, tTeam, map, m.seed);
-    m.status = "completed";
-    m.ctScore = result.ctScore;
-    m.tScore  = result.tScore;
-    m.winnerSide = result.winnerSide;
-    m.clutches = result.clutches;
-    m.playerStats = result.playerStats;
-    const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
-    const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
-    m.eloDelta = applyMatchElo(winners, losers, u.elos);
-    applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
-    applyMatchForm(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
-    recordMatchupCareers(u.careers ??= {}, m);
+    simOneMatchup(this.snapshotState(u), m);
   }
 
   private playMatchup(id: string) {
@@ -721,13 +836,16 @@ export class UniverseMode {
     });
   }
 
-  // Headless-sim every still-pending matchup of the current day. Leaves the
-  // user on their current tab so they can review the results.
-  private simRemaining() {
+  // Headless-sim every still-pending matchup of the current day in the worker,
+  // so a full day of matches doesn't freeze the UI. Leaves the user on their
+  // current tab so they can review the results.
+  private async simRemaining() {
     if (!this.universe || !this.universe.pendingDay) return;
-    for (const m of this.universe.pendingDay.matchups) {
-      if (m.status !== "completed") this.runInstantSim(m);
-    }
+    const u = this.universe;
+    const res = await this.runSimWorker({ kind: "simPendingDay", state: this.snapshotState(u) });
+    if (res.kind !== "donePending") return;
+    this.applyWorkerState(u, res.state);
+    this.viewingDay = null; // jump back to the live day to show the results
     this.persist();
     this.render();
   }
@@ -738,12 +856,14 @@ export class UniverseMode {
   private continueFromMatchups() {
     if (!this.universe || !this.universe.pendingDay) return;
     const u = this.universe;
-    const done = u.pendingDay!;
-    u.history.push({ day: done.day, matchups: done.matchups });
+    const done: CompletedDay = { day: u.pendingDay!.day, matchups: u.pendingDay!.matchups };
+    u.history.push(done);
     trimHistory(u);
+    void appendDays(u.id, [done]); // archive the completed day (append-only)
     decayRelationships(u.players); // bonds fade day-to-day without upkeep
     u.day++;
     u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+    this.viewingDay = null;
     this.persist();
     this.screen = "matchups";
     this.render();
@@ -760,38 +880,33 @@ export class UniverseMode {
 
     const overlay = makeSimOverlay(capped);
     this.root.appendChild(overlay.el);
-    // Let the browser paint the overlay before we start chewing through days.
+    // Let the browser paint the overlay before we hand off to the worker.
     await nextFrame();
 
     // try/finally so the full-screen overlay is ALWAYS removed and the screen
-    // re-renders — otherwise a throw (e.g. storage quota) leaves the blocking
-    // overlay up and the app appears frozen after the last day.
+    // re-renders — otherwise a throw leaves the blocking overlay up and the app
+    // appears frozen.
     try {
-      for (let i = 0; i < capped; i++) {
-        if (!u.pendingDay) {
-          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
-        }
-        for (const m of u.pendingDay.matchups) {
-          if (m.status !== "completed") this.runInstantSim(m);
-        }
-        u.history.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
+      // The whole fast-forward runs in the worker; we get one progress message
+      // per day and the final mutated state. The big player/elo clone is paid
+      // exactly twice (in and out), not per day.
+      const res = await this.runSimWorker(
+        { kind: "simDays", state: this.snapshotState(u), nDays: capped },
+        done => overlay.update(done),
+      );
+      if (res.kind === "doneDays") {
+        this.applyWorkerState(u, res.state);
+        for (const d of res.completedDays) u.history.push(d);
         trimHistory(u);
-        decayRelationships(u.players); // bonds fade day-to-day without upkeep
-        u.pendingDay = null;
-        u.day++;
-
-        // Yield to the browser every day so the progress bar updates smoothly.
-        overlay.update(i + 1);
-        await nextFrame();
+        // Archive every completed day in one transaction, then save core state
+        // and wait for it to land — a multi-day sim is too much work to risk
+        // losing if the tab closes right after the overlay disappears.
+        await appendDays(u.id, res.completedDays);
+        this.persist();
+        await this.flush();
       }
-
-      // Drop the user into the next day's pending matchups so the day view
-      // always has something to act on.
-      if (!u.pendingDay) {
-        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
-      }
-      this.persist();
     } finally {
+      this.viewingDay = null;
       overlay.el.remove();
       this.screen = "matchups";
       this.render();
@@ -870,141 +985,6 @@ export class UniverseMode {
     }
     body.appendChild(playerPage(p, u, (day, idx, round) => this.openReplay(day, idx, round)));
   }
-}
-
-// ---- Matchup generation: region-locked, friendship-aware ----------------
-//
-// Players matchmake only within their own region. Within a region we let
-// friends group up: strongly-bonded players ([[chemistry]] >= FRIEND_THRESHOLD)
-// form a party that stays on one team, the rest of the slots are filled with
-// the nearest-Elo solo players, and full 5-stacks are paired off by team Elo.
-// Because teammates bond every time they play, the same parties tend to re-form
-// day after day — emergent, self-reinforcing rosters.
-
-function generateMatchups(players: Player[], elos: Record<string, number>, mapCount: number): Matchup[] {
-  const pool = Math.max(1, mapCount);
-  const eloOf = (p: Player) => elos[p.id] ?? STARTING_ELO;
-  const avgElo = (team: Player[]) => team.reduce((s, p) => s + eloOf(p), 0) / team.length;
-
-  // Partition the pool by competitive region — players only see their own scene.
-  const byRegion = new Map<Region, Player[]>();
-  for (const p of players) {
-    const r = regionOf(p.country);
-    (byRegion.get(r) ?? byRegion.set(r, []).get(r)!).push(p);
-  }
-
-  const matchups: Matchup[] = [];
-  let idx = 0;
-  // Walk regions in canonical order so the matchup board groups consistently.
-  for (const region of REGION_ORDER) {
-    const inRegion = byRegion.get(region);
-    if (!inRegion || inRegion.length < TEAM_SIZE * 2) continue; // can't field a lobby
-
-    const teams = formTeams(inRegion, eloOf);
-    // Pair adjacent teams by Elo so each matchup is between similar-strength
-    // 5-stacks. An odd team out sits the day.
-    teams.sort((a, b) => avgElo(b.players) - avgElo(a.players));
-    for (let i = 0; i + 1 < teams.length; i += 2) {
-      const aStartsCt = Math.random() < 0.5;
-      const ct = aStartsCt ? teams[i] : teams[i + 1];
-      const t  = aStartsCt ? teams[i + 1] : teams[i];
-      // Surface the friend-stacks (2+ that queued together) in this lobby.
-      const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
-      matchups.push({
-        id: `m${idx++}`,
-        ctPlayerIds: ct.players.map(p => p.id),
-        tPlayerIds:  t.players.map(p => p.id),
-        status: "pending",
-        seed: newSeed(),
-        mapIndex: Math.floor(Math.random() * pool),
-        region,
-        ...(parties.length > 0 ? { parties } : {}),
-      });
-    }
-  }
-  return matchups;
-}
-
-// A formed 5-player team plus the friend-stack that seeded it (player ids of
-// the 2+ clique that queued together; empty for teams built purely from solos).
-interface FormedTeam { players: Player[]; partyIds: string[]; }
-
-// Build full 5-player teams out of a region's players, keeping friends together.
-//  1. Grow friendship cliques: anchor on the highest-Elo unassigned player and
-//     repeatedly pull in their strongest available friend (bond >= threshold).
-//  2. Fill each multi-player party up to 5 with the nearest-Elo solo players.
-//  3. Chunk any leftover solos into Elo-banded teams of 5.
-// Players who don't fit a full team sit out the day.
-function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): FormedTeam[] {
-  const byEloDesc = [...regionPlayers].sort(
-    (a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id),
-  );
-  const used = new Set<string>();
-
-  // 1. Friendship cliques.
-  const parties: Player[][] = [];
-  for (const anchor of byEloDesc) {
-    if (used.has(anchor.id)) continue;
-    used.add(anchor.id);
-    const party = [anchor];
-    while (party.length < TEAM_SIZE) {
-      let best: Player | null = null;
-      let bestRel = FRIEND_THRESHOLD - 1; // must clear the friendship bar
-      for (const cand of byEloDesc) {
-        if (used.has(cand.id)) continue;
-        // Strongest bond between the candidate and anyone already in the party.
-        let rel = -Infinity;
-        for (const m of party) rel = Math.max(rel, cand.relationships[m.id] ?? 0);
-        if (rel > bestRel) { bestRel = rel; best = cand; }
-      }
-      if (!best) break;
-      used.add(best.id);
-      party.push(best);
-    }
-    parties.push(party);
-  }
-
-  const solos = parties
-    .filter(p => p.length === 1)
-    .map(p => p[0])
-    .sort((a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id));
-  const groups = parties
-    .filter(p => p.length >= 2)
-    .sort((a, b) => avgOf(b, eloOf) - avgOf(a, eloOf));
-
-  const teams: FormedTeam[] = [];
-
-  // 2. Fill each real party up to 5 with the nearest-Elo solos. The original
-  //    clique members are the team's friend-stack.
-  for (const g of groups) {
-    const team = [...g];
-    const target = avgOf(g, eloOf);
-    while (team.length < TEAM_SIZE && solos.length > 0) {
-      let bi = 0, bd = Infinity;
-      for (let i = 0; i < solos.length; i++) {
-        const d = Math.abs(eloOf(solos[i]) - target);
-        if (d < bd) { bd = d; bi = i; }
-      }
-      team.push(solos.splice(bi, 1)[0]);
-    }
-    if (team.length === TEAM_SIZE) teams.push({ players: team, partyIds: g.map(p => p.id) });
-    // Under-filled (ran out of solos): party sits the day.
-  }
-
-  // 3. Elo-banded teams from the remaining solos — no friend-stack.
-  for (let i = 0; i + TEAM_SIZE <= solos.length; i += TEAM_SIZE) {
-    teams.push({ players: solos.slice(i, i + TEAM_SIZE), partyIds: [] });
-  }
-
-  return teams;
-}
-
-function avgOf(team: Player[], eloOf: (p: Player) => number): number {
-  return team.reduce((s, p) => s + eloOf(p), 0) / team.length;
-}
-
-function newSeed(): number {
-  return Math.floor(Math.random() * 0x100000000) >>> 0;
 }
 
 // ---- Shared map-rotation UI (settings + new-universe setup) --------------
@@ -1871,67 +1851,6 @@ interface GameLogEntry {
   // Full attempt list (won + lost) for opportunity tracking.
   clutchAttempts: { bucket: number; won: boolean; round: number | undefined }[];
   stats: import("./types.ts").PlayerMatchStats | null;
-}
-
-// Resolve which 1vX bucket a clutch belongs to. Prefer enemiesAtStart (the
-// standard definition); fall back to kills for legacy saves where only
-// successful clutches were recorded with their kill count.
-function clutchBucket(c: { kills: number; enemiesAtStart?: number; won?: boolean }): number {
-  return c.enemiesAtStart ?? c.kills ?? 0;
-}
-
-// ---- Career aggregates ---------------------------------------------------
-// Lifetime totals are accumulated incrementally so we never have to replay the
-// entire history to show a player's career. Each completed matchup is folded
-// in exactly once (when it's simmed/played out), which lets us trim old days
-// from `history` without losing any career figures.
-
-function emptyCareer(): CareerStats {
-  return {
-    played: 0, wins: 0, losses: 0, roundsWon: 0, roundsLost: 0,
-    matchesWithStats: 0, kills: 0, deaths: 0, assists: 0, damage: 0, rounds: 0,
-    k1: 0, k2: 0, k3: 0, k4: 0, k5: 0,
-    clutchWins: [0, 0, 0, 0, 0], clutchAttempts: [0, 0, 0, 0, 0],
-  };
-}
-
-// Fold one completed matchup into the running career totals for everyone who
-// played in it. Mirrors the per-match logic the old history scan used so the
-// numbers are identical. Must be called exactly once per matchup.
-function recordMatchupCareers(careers: Record<string, CareerStats>, m: Matchup) {
-  if (m.status !== "completed" || !m.winnerSide
-      || m.ctScore === undefined || m.tScore === undefined) return;
-  const sides = [
-    { ids: m.ctPlayerIds, side: "CT" as const, own: m.ctScore, opp: m.tScore },
-    { ids: m.tPlayerIds,  side: "T"  as const, own: m.tScore,  opp: m.ctScore },
-  ];
-  for (const { ids, side, own, opp } of sides) {
-    const won = side === m.winnerSide;
-    for (const id of ids) {
-      const c = careers[id] ?? (careers[id] = emptyCareer());
-      c.played++;
-      if (won) c.wins++; else c.losses++;
-      c.roundsWon += own;
-      c.roundsLost += opp;
-      const s = m.playerStats?.[id];
-      if (s) {
-        c.matchesWithStats++;
-        c.kills += s.kills; c.deaths += s.deaths; c.assists += s.assists;
-        c.damage += s.damage; c.rounds += s.roundsPlayed;
-        c.k1 += s.k1; c.k2 += s.k2; c.k3 += s.k3; c.k4 += s.k4; c.k5 += s.k5;
-      }
-      // Clutch attempts/wins use the PER-CLUTCH outcome (survived + won that
-      // round), not the match result — losing a 1v5 in a won match is still a
-      // failed attempt. Legacy saves only stored successful clutches, so a
-      // missing flag counts as a win.
-      for (const cl of m.clutches ?? []) {
-        if (cl.playerId !== id) continue;
-        const b = Math.max(1, Math.min(5, clutchBucket(cl)));
-        c.clutchAttempts[b - 1]++;
-        if (cl.won ?? true) c.clutchWins[b - 1]++;
-      }
-    }
-  }
 }
 
 // Rebuild every career total from scratch by replaying all known completed
