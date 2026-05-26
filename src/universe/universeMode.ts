@@ -5,9 +5,7 @@ import {
 } from "../domain/countries.ts";
 import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
 import { builtinMaps } from "../domain/builtinMaps.ts";
-import { applyMatchElo } from "./elo.ts";
-import { applyMatchChemistry, decayRelationships } from "./chemistry.ts";
-import { applyMatchForm } from "./form.ts";
+import { decayRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
@@ -849,6 +847,9 @@ export class UniverseMode {
     if (m.seed === undefined) m.seed = newSeed();
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
+    // Snapshot the morale the match is played with so its replay reproduces it.
+    const moods: Record<string, number> = {};
+    for (const p of [...ctPlayers, ...tPlayers]) moods[p.id] = p.morale;
 
     await observeMatch(body, {
       ctName: teamNameFor(ctPlayers, u.elos),
@@ -856,18 +857,14 @@ export class UniverseMode {
       ctPlayers, tPlayers, map,
       seed: m.seed,
       onDone: (result) => {
-        m.status = "completed";
-        m.ctScore = result.ctScore;
-        m.tScore  = result.tScore;
-        m.winnerSide = result.winnerSide;
-        m.clutches = result.clutches;
-    m.playerStats = result.playerStats;
-        const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
-        const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
-        m.eloDelta = applyMatchElo(winners, losers, u.elos);
-        applyMatchChemistry(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
-        applyMatchForm(u.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
-        recordMatchupCareers(u.careers ??= {}, m);
+        // Fold the watched result through the same path the sim uses, so elo,
+        // chemistry, form, careers, map comfort, and the mood snapshot all match.
+        const outcome: MatchupOutcome = {
+          id: m.id, winnerSide: result.winnerSide, ctScore: result.ctScore, tScore: result.tScore,
+          clutches: result.clutches, playerStats: result.playerStats,
+          seed: m.seed, mapIndex: m.mapIndex, moods,
+        };
+        foldOutcome(this.foldState(u), m, outcome, new Map(u.players.map(p => [p.id, p] as const)));
         this.persist();
         this.activeMatchupId = null;
         this.screen = "matchups";
@@ -1906,6 +1903,31 @@ function playerPage(
   }
   mkCard.appendChild(mkRow);
   root.appendChild(mkCard);
+
+  // ----- Map comfort (emergent from results per map) -----
+  const mapEntries = Object.entries(p.mapStats ?? {}).sort((a, b) => b[1].played - a[1].played);
+  if (mapEntries.length > 0) {
+    const mapCard = document.createElement("div");
+    mapCard.className = "upp-clutches";
+    const mTitle = document.createElement("div");
+    mTitle.className = "upp-stat-title";
+    mTitle.textContent = "Map comfort";
+    mapCard.appendChild(mTitle);
+    const mRow = document.createElement("div");
+    mRow.className = "upp-clutch-row";
+    for (const [name, rec] of mapEntries) {
+      const winPct = rec.played > 0 ? Math.round((rec.won / rec.played) * 100) : 0;
+      const cell = document.createElement("div");
+      cell.className = "upp-clutch-cell";
+      cell.innerHTML =
+        `<div class="upp-clutch-label">${escapeHtml(name)}</div>` +
+        `<div class="upp-clutch-val" style="color:${ratingColor(winPct)}">${winPct}%</div>` +
+        `<div class="upp-gl-missing" style="font-size:11px">${rec.won}-${rec.played - rec.won}</div>`;
+      mRow.appendChild(cell);
+    }
+    mapCard.appendChild(mRow);
+    root.appendChild(mapCard);
+  }
 
   // ----- Game log -----
   const logCard = document.createElement("div");

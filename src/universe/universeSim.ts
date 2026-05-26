@@ -117,14 +117,52 @@ export function simulateMatchup(m: Matchup, byId: Map<string, Player>, maps: Gam
   return { id: m.id, winnerSide: ctWon > tWon ? "CT" : "T", ctScore: ctWon, tScore: tWon, games };
 }
 
-// Fold one game's result into elo, chemistry, form, and career totals. Per the
-// per-game model, each game of a series is folded exactly like a standalone Bo1.
+// Update each participating player's per-map win/loss record for the map just
+// played — the raw material for emergent map comfort.
+function recordMapComfort(
+  byId: Map<string, Player>, ctIds: string[], tIds: string[],
+  mapName: string | undefined, winnerSide: "CT" | "T",
+): void {
+  if (!mapName) return;
+  const winSet = new Set(winnerSide === "CT" ? ctIds : tIds);
+  for (const id of [...ctIds, ...tIds]) {
+    const p = byId.get(id);
+    if (!p) continue;
+    const ms = (p.mapStats ??= {});
+    const rec = ms[mapName] ?? (ms[mapName] = { played: 0, won: 0 });
+    rec.played++;
+    if (winSet.has(id)) rec.won++;
+  }
+}
+
+// A team's emergent comfort on a map (0..1): the average of its players' win
+// rate on that map, smoothed toward a neutral prior so a couple of games don't
+// swing it wildly. Players with no history sit at neutral. Consumed by the veto.
+const MAP_COMFORT_PRIOR = 2;
+const MAP_COMFORT_NEUTRAL = 0.5;
+export function teamMapComfort(playerIds: string[], byId: Map<string, Player>, mapName: string): number {
+  let sum = 0, n = 0;
+  for (const id of playerIds) {
+    const p = byId.get(id);
+    if (!p) continue;
+    const rec = p.mapStats?.[mapName];
+    sum += rec
+      ? (rec.won + MAP_COMFORT_PRIOR * MAP_COMFORT_NEUTRAL) / (rec.played + MAP_COMFORT_PRIOR)
+      : MAP_COMFORT_NEUTRAL;
+    n++;
+  }
+  return n > 0 ? sum / n : MAP_COMFORT_NEUTRAL;
+}
+
+// Fold one game's result into elo, chemistry, form, career totals, and map
+// comfort. Per the per-game model, each game of a series folds like a Bo1.
 function foldGame(state: SimState, ctIds: string[], tIds: string[], g: GameResult, byId: Map<string, Player>): number {
   const winners = g.winnerSide === "CT" ? ctIds : tIds;
   const losers  = g.winnerSide === "CT" ? tIds  : ctIds;
   const delta = applyMatchElo(winners, losers, state.elos);
   applyMatchChemistry(state.players, { winnerIds: winners, loserIds: losers, stats: g.playerStats }, byId);
   applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: g.playerStats }, byId);
+  recordMapComfort(byId, ctIds, tIds, state.maps[g.mapIndex]?.name, g.winnerSide);
   // Per-game career fold: a game looks like a completed Bo1 match for tallying.
   recordMatchupCareers(state.careers, {
     id: "", status: "completed", ctPlayerIds: ctIds, tPlayerIds: tIds,
@@ -165,6 +203,7 @@ export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId
   m.eloDelta = applyMatchElo(winners, losers, state.elos);
   applyMatchChemistry(state.players, { winnerIds: winners, loserIds: losers, stats: o.playerStats! }, byId);
   applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: o.playerStats! }, byId);
+  recordMapComfort(byId, m.ctPlayerIds, m.tPlayerIds, state.maps[m.mapIndex ?? 0]?.name, o.winnerSide);
   recordMatchupCareers(state.careers, m);
 }
 

@@ -87,6 +87,10 @@ export interface Player {
   relationships: Record<string, number>;
   // Coach-set CT-side placement. "auto" means RoundSim picks based on setup.
   ctAssignment: "A" | "B" | "mid" | "auto";
+  // Per-map record keyed by map NAME, accumulated one game at a time. Drives
+  // emergent map comfort: a team's preference for a map (used by the series
+  // veto) is the aggregate of its players' comfort here. Absent until played.
+  mapStats?: Record<string, { played: number; won: number }>;
 }
 
 export type WeaponId =
