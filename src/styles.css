@@ -1146,11 +1146,14 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
   padding: 18px 20px;
 }
+.universe-settings-card + .universe-settings-card { margin-top: 14px; }
 .universe-settings-card h2 {
-  font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em;
+  font-family: var(--font-display);
+  font-size: 15px; text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--muted); margin: 0 0 6px 0;
 }
 .universe-settings-sub { color: var(--muted); font-size: 12px; margin: 0 0 16px 0; }
+.universe-settings-tools { display: flex; gap: 10px; flex-wrap: wrap; }
 .universe-map-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .universe-map-row {
   display: flex; justify-content: space-between; align-items: center;

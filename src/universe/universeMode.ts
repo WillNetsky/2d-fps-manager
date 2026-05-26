@@ -1011,6 +1011,23 @@ export class UniverseMode {
       this.render();
     }));
 
+    // Tools — map editor and balance testing open as separate workspaces.
+    const tools = document.createElement("div");
+    tools.className = "universe-settings-card";
+    const th = document.createElement("h2");
+    th.textContent = "Tools";
+    tools.appendChild(th);
+    const tsub = document.createElement("p");
+    tsub.className = "universe-settings-sub";
+    tsub.textContent = "Design custom maps to add to the rotation, or run loadout/balance experiments. These open in a separate workspace; your universe is saved.";
+    tools.appendChild(tsub);
+    const toolRow = document.createElement("div");
+    toolRow.className = "universe-settings-tools";
+    toolRow.appendChild(btn("Map Editor", "", () => { window.location.hash = "#editor"; }));
+    toolRow.appendChild(btn("Balance Testing", "", () => { window.location.hash = "#balance"; }));
+    tools.appendChild(toolRow);
+    wrap.appendChild(tools);
+
     body.appendChild(wrap);
   }
 
