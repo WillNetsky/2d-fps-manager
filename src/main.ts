@@ -1,7 +1,10 @@
 import "./styles.css";
-import { MapEditor } from "./editor/mapEditor.ts";
+import { MapEditor, seedDefaultMaps } from "./editor/mapEditor.ts";
 import { BalanceMode } from "./balance/balanceMode.ts";
 import { UniverseMode } from "./universe/universeMode.ts";
+
+// One-time seed of the default map into the saved-map store (no-op after first run).
+seedDefaultMaps();
 
 const app = document.getElementById("app")!;
 app.innerHTML = "";

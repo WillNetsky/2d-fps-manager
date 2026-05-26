@@ -3,8 +3,8 @@ import { makePlayer, setSeed } from "../domain/factory.ts";
 import {
   flagEmoji, REGION_ORDER, REGION_LABELS, type Region,
 } from "../domain/countries.ts";
-import { loadCustomMap, loadSavedMapsAll } from "../editor/mapEditor.ts";
-import { builtinMaps } from "../domain/builtinMaps.ts";
+import { loadCustomMap, loadSavedMapsAll, savedMapsList } from "../editor/mapEditor.ts";
+import { defaultMap } from "../domain/defaultMaps.ts";
 import { decayRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
@@ -331,9 +331,9 @@ export class UniverseMode {
       name: `Universe ${new Date().toLocaleDateString()}`,
       regions: new Set(REGION_ORDER),
       perRegion: PLAYERS_PER_REGION,
-      // Default to the full builtin rotation (plus a saved custom map if any) so
-      // series have distinct maps per game — Bo3 needs ≥3, Bo5 needs ≥5.
-      maps: [...(loadCustomMap() ? [loadCustomMap()!] : []), ...builtinMaps().map(deepCloneMap)],
+      // Default to the saved-map rotation so series have distinct maps per game
+      // (Bo3 needs ≥3, Bo5 needs ≥5) — add more in the editor for richer vetoes.
+      maps: savedMapsList().map(deepCloneMap),
     };
     this.screen = "newUniverse";
     this.render();
@@ -347,7 +347,7 @@ export class UniverseMode {
     if (regions.length === 0) { alert("Pick at least one region."); return; }
     // Need both teams' worth of players for a region to field a lobby.
     const perRegion = Math.min(MAX_PLAYERS_PER_REGION, Math.max(TEAM_SIZE * 2, Math.floor(s.perRegion) || 0));
-    const maps = s.maps.length > 0 ? s.maps : [deepCloneMap(builtinMaps()[0])];
+    const maps = s.maps.length > 0 ? s.maps : [deepCloneMap(defaultMap())];
 
     setSeed(Date.now());
     const players: Player[] = [];
@@ -492,7 +492,7 @@ export class UniverseMode {
     if (!u) return;
     // Migrate older saves that predate the universe-level map / map rotation.
     if (!u.maps || u.maps.length === 0) {
-      u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
+      u.maps = [u.map ?? loadCustomMap() ?? deepCloneMap(defaultMap())];
     }
     delete u.map;
     // Backfill the ambition personality axis on pre-existing players.
@@ -832,7 +832,7 @@ export class UniverseMode {
   private runInstantSim(m: Matchup) {
     if (!this.universe) return;
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(defaultMap())];
     simOneMatchup(this.foldState(u), m);
   }
 
@@ -853,7 +853,7 @@ export class UniverseMode {
     const m = this.findMatchup(this.activeMatchupId);
     if (!m) { this.screen = "matchups"; this.render(); return; }
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(defaultMap())];
     if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
       m.mapIndex = Math.floor(Math.random() * u.maps.length);
     }
@@ -980,7 +980,7 @@ export class UniverseMode {
   private renderSettings(body: HTMLElement) {
     if (!this.universe) return;
     const u = this.universe;
-    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
+    if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(defaultMap())];
 
     const wrap = document.createElement("div");
     wrap.className = "universe-settings";
@@ -1122,21 +1122,16 @@ function playersFor(matchups: Matchup[], byId: Map<string, Player>): Player[] {
 
 interface MapSource { key: string; label: string; map: () => GameMap; }
 
-// Every map available to add to a rotation, grouped by origin.
+// Every map available to add to a rotation. Saved maps come from the editor's
+// store (the default map is seeded there on first run).
 function collectMapSources(): { group: string; items: MapSource[] }[] {
-  const sources: { group: string; items: MapSource[] }[] = [{
-    group: "Built-in",
-    items: builtinMaps().map(m => ({ key: `b:${m.name}`, label: m.name, map: () => deepCloneMap(m) })),
-  }];
   const saved = loadSavedMapsAll();
   const savedNames = Object.keys(saved).sort();
-  if (savedNames.length > 0) {
-    sources.push({
-      group: "Saved (editor)",
-      items: savedNames.map(name => ({ key: `s:${name}`, label: name, map: () => deepCloneMap(saved[name]) })),
-    });
-  }
-  return sources;
+  if (savedNames.length === 0) return [];
+  return [{
+    group: "Saved",
+    items: savedNames.map(name => ({ key: `s:${name}`, label: name, map: () => deepCloneMap(saved[name]) })),
+  }];
 }
 
 // Read-only list of the maps in a rotation. If `onRemove` is given, each row

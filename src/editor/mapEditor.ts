@@ -1,6 +1,6 @@
 import type { GameMap, Vec2 } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
-import { builtinMaps } from "../domain/builtinMaps.ts";
+import { defaultMaps } from "../domain/defaultMaps.ts";
 
 type Tool =
   | "wall" | "floor"
@@ -23,6 +23,25 @@ function loadSavedMaps(): Record<string, GameMap> {
 
 function writeSavedMaps(maps: Record<string, GameMap>) {
   localStorage.setItem(SAVED_MAPS_KEY, JSON.stringify(maps));
+}
+
+const SEED_FLAG_KEY = "2d-fps-manager-seeded-default-maps";
+
+// One-time seed of the default map(s) into the saved-map store, so a fresh
+// install has something to play and the default appears as an ordinary editable
+// "Saved" map. Guarded by a flag so a map the user later deletes stays deleted.
+export function seedDefaultMaps(): void {
+  if (localStorage.getItem(SEED_FLAG_KEY)) return;
+  const saved = loadSavedMaps();
+  for (const m of defaultMaps()) if (!saved[m.name]) saved[m.name] = m;
+  writeSavedMaps(saved);
+  localStorage.setItem(SEED_FLAG_KEY, "1");
+}
+
+// All saved maps, guaranteeing at least the default if the store is somehow empty.
+export function savedMapsList(): GameMap[] {
+  const maps = Object.values(loadSavedMaps());
+  return maps.length > 0 ? maps : defaultMaps();
 }
 
 function makeBlankMap(): GameMap {
@@ -353,37 +372,30 @@ export class MapEditor {
 
   private loadMapDialog() {
     const userMaps = loadSavedMaps();
-    const builtins: Record<string, GameMap> = {};
-    for (const m of builtinMaps()) builtins[m.name] = m;
-    const userNames = Object.keys(userMaps).sort();
-    const builtinNames = Object.keys(builtins);
-    const all = [...builtinNames.map(n => ({ name: n, builtin: true })),
-                 ...userNames.map(n => ({ name: n, builtin: false }))];
-    if (!all.length) { alert("No maps available."); return; }
-    const list = all.map((m, i) => `${i + 1}. ${m.name}${m.builtin ? "  (built-in)" : ""}`).join("\n");
-    const choice = prompt(`Load which map? (enter number or name)\n\n${list}\n\nType 'del N' to delete a saved entry (built-ins can't be deleted).`);
+    const names = Object.keys(userMaps).sort();
+    if (!names.length) { alert("No saved maps yet — design one and save it."); return; }
+    const list = names.map((n, i) => `${i + 1}. ${n}`).join("\n");
+    const choice = prompt(`Load which map? (enter number or name)\n\n${list}\n\nType 'del N' to delete a saved map.`);
     if (!choice) return;
     const trimmed = choice.trim();
     if (/^del\s+/i.test(trimmed)) {
       const rest = trimmed.replace(/^del\s+/i, "").trim();
       const idx = Number(rest);
-      const picked = !isNaN(idx) && idx >= 1 && idx <= all.length ? all[idx - 1].name : (userMaps[rest] ? rest : null);
-      if (!picked || !userMaps[picked]) { alert("No matching user map to delete (built-ins can't be deleted)."); return; }
+      const picked = !isNaN(idx) && idx >= 1 && idx <= names.length ? names[idx - 1] : (userMaps[rest] ? rest : null);
+      if (!picked || !userMaps[picked]) { alert("No matching saved map to delete."); return; }
       if (!confirm(`Delete "${picked}"?`)) return;
       delete userMaps[picked];
       writeSavedMaps(userMaps);
       return;
     }
     const asNum = Number(trimmed);
-    const picked = !isNaN(asNum) && asNum >= 1 && asNum <= all.length
-      ? all[asNum - 1]
-      : (builtins[trimmed] ? { name: trimmed, builtin: true } :
-         userMaps[trimmed] ? { name: trimmed, builtin: false } : null);
+    const picked = !isNaN(asNum) && asNum >= 1 && asNum <= names.length
+      ? names[asNum - 1]
+      : (userMaps[trimmed] ? trimmed : null);
     if (!picked) { alert("No matching map."); return; }
-    const src = picked.builtin ? builtins[picked.name] : userMaps[picked.name];
-    this.map = JSON.parse(JSON.stringify(src)) as GameMap;
-    this.currentName = picked.name;
-    this.map.name = picked.name;
+    this.map = JSON.parse(JSON.stringify(userMaps[picked])) as GameMap;
+    this.currentName = picked;
+    this.map.name = picked;
     this.updateNameLabel();
     this.syncColorInputs();
     this.draw();
