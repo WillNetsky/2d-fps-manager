@@ -8,11 +8,11 @@ import type { GameMap, Player } from "../domain/types.ts";
 import { regionOf, REGION_ORDER, type Region } from "../domain/countries.ts";
 import { buildTeam, simulateMatchInstant } from "./matchSim.ts";
 import { applyMatchElo } from "./elo.ts";
-import { applyMatchChemistry, decayRelationships, FRIEND_THRESHOLD } from "./chemistry.ts";
+import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
   STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type CompletedDay, type Matchup, type PendingDay,
+  type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
 } from "./types.ts";
 
 // The mutable slice of a Universe the simulation reads and writes. Everything
@@ -33,84 +33,147 @@ export function newSeed(): number {
 }
 
 // ---- Per-match simulation + folding --------------------------------------
+//
+// Simulation and folding are split so a whole day of matches can be simulated
+// in parallel across a worker pool (every player plays exactly one match per
+// day, so the matches are independent) and then folded sequentially on the
+// coordinator. simulateMatchResult is pure (no shared-state mutation);
+// foldMatchResult applies the result to elo/chemistry/form/career totals.
 
-// Simulate one pending matchup and fold the result into elo, chemistry, form,
-// and career totals. Mutates `m` and the shared state in place. `byId` is an
-// optional prebuilt id→player index; without it one is built from state.players
-// (fine for a one-off single match, wasteful in a loop — pass one there).
-export function simOneMatchup(state: SimState, m: Matchup, byId?: Map<string, Player>): void {
-  const maps = state.maps;
-  if (m.mapIndex === undefined || m.mapIndex >= maps.length) {
-    m.mapIndex = Math.floor(Math.random() * maps.length);
-  }
-  const map = maps[m.mapIndex];
-  if (m.seed === undefined) m.seed = newSeed();
+// The result of simulating one matchup that crosses the worker boundary. For a
+// Bo1 it carries the single game's fields; for a series it carries the per-game
+// list plus the series tally (games won) in ctScore/tScore.
+export interface MatchupOutcome {
+  id: string;
+  winnerSide: "CT" | "T";
+  ctScore: number;                                  // Bo1: rounds; series: games won by CT
+  tScore: number;
+  games?: GameResult[];                             // series only
+  // Bo1 only — series detail lives per game in `games`.
+  clutches?: Clutch[];
+  playerStats?: Record<string, PlayerMatchStats>;
+  seed?: number;
+  mapIndex?: number;
+  moods?: Record<string, number>;                   // Bo1 sim-time morale snapshot
+}
 
-  const index = byId ?? new Map(state.players.map(p => [p.id, p] as const));
-  const ctPlayers = m.ctPlayerIds.map(id => index.get(id)!).filter(Boolean);
-  const tPlayers  = m.tPlayerIds.map (id => index.get(id)!).filter(Boolean);
+// The round-level result of a single game (before its seed/map/moods are attached).
+type GameOutcome = Omit<GameResult, "seed" | "mapIndex" | "moods">;
+
+// Snapshot each participating player's current morale — the value the sim seeds
+// in-match mood from — so a replay reproduces the exact match later.
+function snapshotMoods(ctIds: string[], tIds: string[], byId: Map<string, Player>): Record<string, number> {
+  const moods: Record<string, number> = {};
+  for (const id of [...ctIds, ...tIds]) moods[id] = byId.get(id)?.morale ?? 50;
+  return moods;
+}
+
+function runGame(ctIds: string[], tIds: string[], byId: Map<string, Player>, map: GameMap, seed: number): GameOutcome {
+  const ctPlayers = ctIds.map(id => byId.get(id)!).filter(Boolean);
+  const tPlayers  = tIds.map (id => byId.get(id)!).filter(Boolean);
   const ctTeam = buildTeam("ct", "CT-side", ctPlayers, "CT");
   const tTeam  = buildTeam("t",  "T-side",  tPlayers,  "T");
-  const result = simulateMatchInstant(ctTeam, tTeam, map, m.seed);
+  const r = simulateMatchInstant(ctTeam, tTeam, map, seed);
+  return { ctScore: r.ctScore, tScore: r.tScore, winnerSide: r.winnerSide, clutches: r.clutches, playerStats: r.playerStats };
+}
 
+// Phase A map selection for a series: distinct maps in random order. (Phase C
+// replaces this with a preference-driven CS pick/ban veto.) The series length
+// is gated to the pool size at matchmaking, so we always have enough.
+function chooseSeriesMaps(maps: GameMap[], bestOf: number): number[] {
+  const idxs = maps.map((_, i) => i);
+  for (let i = idxs.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+  }
+  return idxs.slice(0, Math.min(bestOf, idxs.length));
+}
+
+// Pure: simulate a matchup (Bo1 or full series) and return its outcome. Does not
+// touch shared state, so it's safe to run in parallel for matchups with disjoint
+// players. A series stops as soon as one team clinches a majority.
+export function simulateMatchup(m: Matchup, byId: Map<string, Player>, maps: GameMap[]): MatchupOutcome {
+  const bestOf = m.bestOf ?? 1;
+  const moods = snapshotMoods(m.ctPlayerIds, m.tPlayerIds, byId);
+  if (bestOf <= 1) {
+    if (m.mapIndex === undefined || m.mapIndex >= maps.length) m.mapIndex = Math.floor(Math.random() * maps.length);
+    if (m.seed === undefined) m.seed = newSeed();
+    const g = runGame(m.ctPlayerIds, m.tPlayerIds, byId, maps[m.mapIndex], m.seed);
+    return { id: m.id, winnerSide: g.winnerSide, ctScore: g.ctScore, tScore: g.tScore, clutches: g.clutches, playerStats: g.playerStats, seed: m.seed, mapIndex: m.mapIndex, moods };
+  }
+  const mapOrder = chooseSeriesMaps(maps, bestOf);
+  const need = Math.ceil(bestOf / 2);
+  const games: GameResult[] = [];
+  let ctWon = 0, tWon = 0;
+  for (let i = 0; i < bestOf && ctWon < need && tWon < need; i++) {
+    const seed = newSeed();
+    const mapIndex = mapOrder[i % mapOrder.length];
+    const g = runGame(m.ctPlayerIds, m.tPlayerIds, byId, maps[mapIndex], seed);
+    // All games of a series are simulated from the same pre-series morale (folding
+    // happens after), so each game snapshots the same moods.
+    games.push({ seed, mapIndex, ...g, moods });
+    if (g.winnerSide === "CT") ctWon++; else tWon++;
+  }
+  return { id: m.id, winnerSide: ctWon > tWon ? "CT" : "T", ctScore: ctWon, tScore: tWon, games };
+}
+
+// Fold one game's result into elo, chemistry, form, and career totals. Per the
+// per-game model, each game of a series is folded exactly like a standalone Bo1.
+function foldGame(state: SimState, ctIds: string[], tIds: string[], g: GameResult, byId: Map<string, Player>): number {
+  const winners = g.winnerSide === "CT" ? ctIds : tIds;
+  const losers  = g.winnerSide === "CT" ? tIds  : ctIds;
+  const delta = applyMatchElo(winners, losers, state.elos);
+  applyMatchChemistry(state.players, { winnerIds: winners, loserIds: losers, stats: g.playerStats }, byId);
+  applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: g.playerStats }, byId);
+  // Per-game career fold: a game looks like a completed Bo1 match for tallying.
+  recordMatchupCareers(state.careers, {
+    id: "", status: "completed", ctPlayerIds: ctIds, tPlayerIds: tIds,
+    ctScore: g.ctScore, tScore: g.tScore, winnerSide: g.winnerSide,
+    clutches: g.clutches, playerStats: g.playerStats,
+  });
+  return delta;
+}
+
+// Sequential: record a matchup outcome onto the matchup and fold it into elo,
+// chemistry, form, and career totals. `byId` is the shared id→player index.
+export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId: Map<string, Player>): void {
   m.status = "completed";
-  m.ctScore = result.ctScore;
-  m.tScore  = result.tScore;
-  m.winnerSide = result.winnerSide;
-  m.clutches = result.clutches;
-  m.playerStats = result.playerStats;
+  m.winnerSide = o.winnerSide;
+  m.ctScore = o.ctScore;
+  m.tScore  = o.tScore;
 
-  const winners = result.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
-  const losers  = result.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
+  if (o.games) {
+    m.games = o.games;
+    // Each game adjusts elo; the card shows an approximate symmetric delta — the
+    // winning side's average net elo change across the series. Per-game truth
+    // lives in the box score.
+    const winnerIds = o.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
+    const pre = winnerIds.map(id => state.elos[id] ?? STARTING_ELO);
+    for (const g of o.games) foldGame(state, m.ctPlayerIds, m.tPlayerIds, g, byId);
+    const net = winnerIds.reduce((s, id, i) => s + ((state.elos[id] ?? STARTING_ELO) - pre[i]), 0) / winnerIds.length;
+    m.eloDelta = Math.round(net);
+    return;
+  }
+
+  m.clutches = o.clutches;
+  m.playerStats = o.playerStats;
+  m.moods = o.moods;
+  if (o.seed !== undefined) m.seed = o.seed;
+  if (o.mapIndex !== undefined) m.mapIndex = o.mapIndex;
+  const winners = o.winnerSide === "CT" ? m.ctPlayerIds : m.tPlayerIds;
+  const losers  = o.winnerSide === "CT" ? m.tPlayerIds  : m.ctPlayerIds;
   m.eloDelta = applyMatchElo(winners, losers, state.elos);
-  applyMatchChemistry(state.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
-  applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: m.playerStats });
+  applyMatchChemistry(state.players, { winnerIds: winners, loserIds: losers, stats: o.playerStats! }, byId);
+  applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: o.playerStats! }, byId);
   recordMatchupCareers(state.careers, m);
 }
 
-// Sim every still-pending match in the current day, leaving the day in place
-// (no roll). Used by "Sim all remaining".
-export function simPendingDay(state: SimState): void {
-  if (!state.pendingDay) return;
-  const byId = new Map(state.players.map(p => [p.id, p] as const));
-  for (const m of state.pendingDay.matchups) {
-    if (m.status !== "completed") simOneMatchup(state, m, byId);
-  }
-}
-
-// Fast-forward `nDays` days: ensure a pending day, sim all its matches, roll it
-// into a completed day, decay relationships, advance the date. Always leaves a
-// fresh pending day ready for the next interaction. Returns the days produced
-// so the caller can archive them. `onDay(done)` fires after each day for
-// progress reporting.
-export function simulateDays(
-  state: SimState,
-  nDays: number,
-  onDay?: (done: number) => void,
-): { completedDays: CompletedDay[] } {
-  const byId = new Map(state.players.map(p => [p.id, p] as const));
-  const completedDays: CompletedDay[] = [];
-  const mapCount = Math.max(1, state.maps.length);
-
-  for (let i = 0; i < nDays; i++) {
-    if (!state.pendingDay) {
-      state.pendingDay = { day: state.day, matchups: generateMatchups(state.players, state.elos, mapCount) };
-    }
-    for (const m of state.pendingDay.matchups) {
-      if (m.status !== "completed") simOneMatchup(state, m, byId);
-    }
-    completedDays.push({ day: state.pendingDay.day, matchups: state.pendingDay.matchups });
-    decayRelationships(state.players); // bonds fade day-to-day without upkeep
-    state.pendingDay = null;
-    state.day++;
-    onDay?.(i + 1);
-  }
-
-  // Drop a fresh pending day so the day view always has something to act on.
-  if (!state.pendingDay) {
-    state.pendingDay = { day: state.day, matchups: generateMatchups(state.players, state.elos, mapCount) };
-  }
-  return { completedDays };
+// Simulate + fold one matchup on the current thread. Used for the single-match
+// "Sim" button, where spinning up the worker pool isn't worth it. Handles series.
+export function simOneMatchup(state: SimState, m: Matchup, byId?: Map<string, Player>): void {
+  const index = byId ?? new Map(state.players.map(p => [p.id, p] as const));
+  const o = simulateMatchup(m, index, state.maps);
+  foldOutcome(state, m, o, index);
 }
 
 // ---- Matchup generation: region-locked, friendship-aware -----------------
@@ -145,23 +208,37 @@ export function generateMatchups(players: Player[], elos: Record<string, number>
     // Pair adjacent teams by Elo so each matchup is between similar-strength
     // 5-stacks. An odd team out sits the day.
     teams.sort((a, b) => avgElo(b.players) - avgElo(a.players));
+    const pairings = [];
     for (let i = 0; i + 1 < teams.length; i += 2) {
+      const a = teams[i], b = teams[i + 1];
+      pairings.push({ a, b, elo: (avgElo(a.players) + avgElo(b.players)) / 2 });
+    }
+
+    // The region's top pairing plays a Bo3 "tournament" series — but only when
+    // it's STRICTLY stronger than the runner-up (a tie at the top means no clear
+    // headliner, so everyone plays Bo1) and the rotation has ≥3 maps for a
+    // distinct map each game.
+    const topIsSeries = pairings.length >= 2 && pairings[0].elo > pairings[1].elo && pool >= 3;
+
+    pairings.forEach((pr, pi) => {
       const aStartsCt = Math.random() < 0.5;
-      const ct = aStartsCt ? teams[i] : teams[i + 1];
-      const t  = aStartsCt ? teams[i + 1] : teams[i];
+      const ct = aStartsCt ? pr.a : pr.b;
+      const t  = aStartsCt ? pr.b : pr.a;
       // Surface the friend-stacks (2+ that queued together) in this lobby.
       const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
+      const series = pi === 0 && topIsSeries;
       matchups.push({
         id: `m${idx++}`,
         ctPlayerIds: ct.players.map(p => p.id),
         tPlayerIds:  t.players.map(p => p.id),
         status: "pending",
-        seed: newSeed(),
-        mapIndex: Math.floor(Math.random() * pool),
+        // Bo1 picks its seed/map up front; a series assigns them per game at
+        // sim time (each game has its own).
+        ...(series ? { bestOf: 3 as const } : { seed: newSeed(), mapIndex: Math.floor(Math.random() * pool) }),
         region,
         ...(parties.length > 0 ? { parties } : {}),
       });
-    }
+    });
   }
   return matchups;
 }
@@ -268,8 +345,19 @@ export function clutchBucket(c: { kills: number; enemiesAtStart?: number; won?: 
 // Fold one completed matchup into the running career totals for everyone who
 // played in it. Must be called exactly once per matchup.
 export function recordMatchupCareers(careers: Record<string, CareerStats>, m: Matchup) {
-  if (m.status !== "completed" || !m.winnerSide
-      || m.ctScore === undefined || m.tScore === undefined) return;
+  if (m.status !== "completed") return;
+  // A series folds in per game — each game counts as a match for career totals.
+  if (m.games?.length) {
+    for (const g of m.games) {
+      recordMatchupCareers(careers, {
+        id: m.id, status: "completed", ctPlayerIds: m.ctPlayerIds, tPlayerIds: m.tPlayerIds,
+        ctScore: g.ctScore, tScore: g.tScore, winnerSide: g.winnerSide,
+        clutches: g.clutches, playerStats: g.playerStats,
+      });
+    }
+    return;
+  }
+  if (!m.winnerSide || m.ctScore === undefined || m.tScore === undefined) return;
   const sides = [
     { ids: m.ctPlayerIds, side: "CT" as const, own: m.ctScore, opp: m.tScore },
     { ids: m.tPlayerIds,  side: "T"  as const, own: m.tScore,  opp: m.ctScore },

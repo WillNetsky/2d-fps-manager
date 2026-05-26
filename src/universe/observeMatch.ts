@@ -22,6 +22,10 @@ export interface ObserveMatchOptions {
   map: GameMap;
   // Master RNG seed — same seed reproduces the same match.
   seed: number;
+  // Sim-time morale per player (replay only). The match seeds in-match mood from
+  // morale, which drifts day to day, so a replay must use the snapshot to
+  // reproduce the stored match. Absent for live play (uses current morale).
+  moods?: Record<string, number>;
   // If >1, fast-forward (headless) up to but not including this round, then
   // start live observation from there. Used to jump straight to a clutch.
   startAtRound?: number;
@@ -157,15 +161,19 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   // up front. Cheap (instant-sim of ~24 rounds) and lets the replay UI show
   // the full timeline immediately without spoiling live first-play.
   const prescan = simulateMatchInstant(
-    buildTeam("ct-prescan", "CT", opts.ctPlayers, "CT"),
-    buildTeam("t-prescan",  "T",  opts.tPlayers,  "T"),
+    buildTeam("ct-prescan", "CT", opts.ctPlayers, "CT", opts.moods),
+    buildTeam("t-prescan",  "T",  opts.tPlayers,  "T", opts.moods),
     opts.map,
     opts.seed,
   );
 
   // --- Teams ---
-  const ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT");
-  const tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T");
+  const ct = buildTeam("ct", opts.ctName, opts.ctPlayers, "CT", opts.moods);
+  const tSide = buildTeam("t",  opts.tName,  opts.tPlayers,  "T", opts.moods);
+  // Each clone's initial mood, captured so jump/scrub re-sims restart from the
+  // exact same conditions (mood drifts round-to-round during a sim).
+  const initialMoods = new Map<string, number>();
+  for (const team of [ct, tSide]) for (const p of team.players) initialMoods.set(p.id, p.mood);
   // After halftime these references swap (the same Team object plays the other side).
   let ctSide: Team = ct;
   let tSideRef: Team = tSide;
@@ -185,7 +193,12 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     tSideRef = tSide;
     for (const team of [ct, tSide]) {
       team.roundsWon = 0;
-      for (const p of team.players) p.money = STARTING_BANK;
+      for (const p of team.players) {
+        p.money = STARTING_BANK;
+        // Restore mood to the round-1 value — it drifts during a sim, and a
+        // jump/scrub re-runs from round 1, so it must reset or replays diverge.
+        p.mood = initialMoods.get(p.id) ?? p.mood;
+      }
       for (const id of Object.keys(team.matchStats)) {
         team.matchStats[id] = { kills: 0, deaths: 0, assists: 0, damage: 0, roundsPlayed: 0 };
       }
@@ -486,6 +499,9 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
       while (!headless.finished && safety-- > 0) headless.tick();
       if (!headless.result) break;
       applyRoundOutcome(headless);
+      // Never resim past match point — guards against a divergent re-sim piling
+      // up impossible scores.
+      if (matchIsOver()) break;
       if (roundNumber === HALFTIME_ROUND) {
         roundNumber++;
         halftimeSwap();

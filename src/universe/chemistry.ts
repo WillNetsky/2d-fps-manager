@@ -52,9 +52,11 @@ export interface MatchChemistryInput {
 // fray) based on result, each other's performance, and personality; opponents
 // pick up small rivalries or mutual respect. Everything carries random jitter,
 // and the swings are gated by each viewer's ambition.
-export function applyMatchChemistry(players: Player[], input: MatchChemistryInput) {
+export function applyMatchChemistry(players: Player[], input: MatchChemistryInput, index?: Map<string, Player>) {
   const { winnerIds, loserIds, stats, rng = Math.random } = input;
-  const byId = new Map(players.map(p => [p.id, p] as const));
+  // Building a full id→player Map per match is O(players); when folding a whole
+  // day of matches the caller passes a prebuilt index to avoid rebuilding it.
+  const byId = index ?? new Map(players.map(p => [p.id, p] as const));
   const noise = () => (rng() * 2 - 1) * NOISE;
 
   // Move a's directional feeling toward b.

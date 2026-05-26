@@ -10,8 +10,8 @@ import { applyMatchChemistry, decayRelationships } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
-  generateMatchups, newSeed, simOneMatchup, recordMatchupCareers,
-  emptyCareer, clutchBucket, type SimState,
+  generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
+  emptyCareer, clutchBucket, type SimState, type MatchupOutcome,
 } from "./universeSim.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -20,8 +20,8 @@ import {
   saveUniverse, HISTORY_WINDOW,
 } from "./storage.ts";
 import {
-  PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type CompletedDay, type Matchup, type PlayerMatchStats, type Universe,
+  PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
+  type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats, type Universe,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -52,7 +52,7 @@ export class UniverseMode {
   // Screen to return to from the player page (set when navigating in).
   private playerReturnScreen: Screen = "standings";
   // Replay state: which historical matchup to play back, and where to return.
-  private replayRef: { day: number; matchIdx: number; startAtRound?: number } | null = null;
+  private replayRef: { day: number; matchIdx: number; startAtRound?: number; gameIdx?: number } | null = null;
   private replayReturnPlayerId: string | null = null;
   // Config being assembled on the New Universe setup screen.
   private setup: UniverseSetup | null = null;
@@ -103,9 +103,9 @@ export class UniverseMode {
     }
   }
 
-  private openReplay(day: number, matchIdx: number, startAtRound?: number) {
+  private openReplay(day: number, matchIdx: number, startAtRound?: number, gameIdx?: number) {
     if (!this.universe) return;
-    this.replayRef = { day, matchIdx, startAtRound };
+    this.replayRef = { day, matchIdx, startAtRound, gameIdx };
     // If we're already on a player page, return to it after the replay.
     this.replayReturnPlayerId = this.screen === "player" ? this.activePlayerId : null;
     this.screen = "replay";
@@ -121,8 +121,15 @@ export class UniverseMode {
     const day = u.history.find(d => d.day === ref.day)
       ?? (u.pendingDay?.day === ref.day ? u.pendingDay : undefined);
     const m = day?.matchups[ref.matchIdx];
-    if (!m || m.seed === undefined || !u.maps || u.maps.length === 0) { this.exitReplay(); return; }
-    const map = u.maps[m.mapIndex ?? 0] ?? u.maps[0];
+    if (!m || !u.maps || u.maps.length === 0) { this.exitReplay(); return; }
+    // A series replays a specific game (each has its own seed/map); a Bo1 uses
+    // the matchup's own seed/map.
+    const game = m.games && ref.gameIdx !== undefined ? m.games[ref.gameIdx] : undefined;
+    const seed = game ? game.seed : m.seed;
+    if (seed === undefined) { this.exitReplay(); return; }
+    const map = u.maps[(game ? game.mapIndex : m.mapIndex) ?? 0] ?? u.maps[0];
+    // Sim-time morale snapshot, so the replay reproduces the exact stored match.
+    const moods = game ? game.moods : m.moods;
     const ctPlayers = m.ctPlayerIds.map(id => u.players.find(p => p.id === id)!).filter(Boolean);
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
     const back = () => this.exitReplay();
@@ -131,7 +138,8 @@ export class UniverseMode {
       tName:  teamNameFor(tPlayers,  u.elos),
       ctPlayers, tPlayers,
       map,
-      seed: m.seed,
+      seed,
+      moods,
       startAtRound: ref.startAtRound,
       isReplay: true,
       // Replays don't mutate saved results — both endings just exit.
@@ -312,7 +320,9 @@ export class UniverseMode {
       name: `Universe ${new Date().toLocaleDateString()}`,
       regions: new Set(REGION_ORDER),
       perRegion: PLAYERS_PER_REGION,
-      maps: [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])],
+      // Default to the full builtin rotation (plus a saved custom map if any) so
+      // series have distinct maps per game — Bo3 needs ≥3, Bo5 needs ≥5.
+      maps: [...(loadCustomMap() ? [loadCustomMap()!] : []), ...builtinMaps().map(deepCloneMap)],
     };
     this.screen = "newUniverse";
     this.render();
@@ -325,7 +335,7 @@ export class UniverseMode {
     const regions = REGION_ORDER.filter(r => s.regions.has(r));
     if (regions.length === 0) { alert("Pick at least one region."); return; }
     // Need both teams' worth of players for a region to field a lobby.
-    const perRegion = Math.max(TEAM_SIZE * 2, Math.floor(s.perRegion) || 0);
+    const perRegion = Math.min(MAX_PLAYERS_PER_REGION, Math.max(TEAM_SIZE * 2, Math.floor(s.perRegion) || 0));
     const maps = s.maps.length > 0 ? s.maps : [deepCloneMap(builtinMaps()[0])];
 
     setSeed(Date.now());
@@ -389,6 +399,7 @@ export class UniverseMode {
     perInput.type = "number";
     perInput.className = "universe-setup-input narrow";
     perInput.min = String(TEAM_SIZE * 2);
+    perInput.max = String(MAX_PLAYERS_PER_REGION);
     perInput.step = "10";
     perInput.value = String(s.perRegion);
     perField.appendChild(perInput);
@@ -520,12 +531,12 @@ export class UniverseMode {
     if (this.saving) await this.saving;
   }
 
-  // ---- Headless simulation (off-thread) ----
+  // ---- Headless simulation (off-thread, parallel) ----
 
-  // The mutable slice of the universe handed to the sim worker. postMessage
-  // structured-clones it, so the worker mutates a copy and we merge its result
-  // back via applyWorkerState — the live universe is untouched until then.
-  private snapshotState(u: Universe): SimState {
+  // A SimState view over the live universe — foldMatchResult mutates the
+  // players/elos/careers it references in place, so applying results updates the
+  // universe directly. pendingDay/day are advanced by the coordinator on `u`.
+  private foldState(u: Universe): SimState {
     return {
       players: u.players,
       elos: u.elos,
@@ -536,31 +547,52 @@ export class UniverseMode {
     };
   }
 
-  private applyWorkerState(u: Universe, state: SimState) {
-    u.players = state.players;
-    u.elos = state.elos;
-    u.careers = state.careers;
-    u.pendingDay = state.pendingDay;
-    u.day = state.day;
-  }
-
-  // Run one sim request in a throwaway worker, forwarding progress and resolving
-  // with the terminal message. Mirrors the per-run worker lifecycle in balanceMode.
-  private runSimWorker(
-    req: SimWorkerRequest,
-    onProgress?: (done: number, total: number) => void,
-  ): Promise<Exclude<SimWorkerResponse, { kind: "progress" }>> {
-    return new Promise((resolve, reject) => {
-      const worker = new SimWorker();
-      worker.addEventListener("message", (e: MessageEvent<SimWorkerResponse>) => {
-        const msg = e.data;
-        if (msg.kind === "progress") { onProgress?.(msg.done, msg.total); return; }
-        worker.terminate();
-        resolve(msg);
-      });
-      worker.addEventListener("error", err => { worker.terminate(); reject(err); });
-      worker.postMessage(req);
-    });
+  // Simulate `nDays` days. Each day's matches are sharded across a worker pool
+  // and run in parallel (every player plays one match per day, so they're
+  // independent), then folded sequentially here. With roll=false, only the
+  // current pending day's remaining matches are simulated (no day roll) — that's
+  // "Sim all remaining". Returns the completed days produced, for archiving.
+  private async runDaySim(
+    u: Universe, nDays: number, roll: boolean,
+    onDay?: (done: number) => void,
+  ): Promise<CompletedDay[]> {
+    const state = this.foldState(u);
+    const byId = new Map(u.players.map(p => [p.id, p] as const));
+    const pool = new SimPool(simPoolSize(), u.maps ?? []);
+    const completed: CompletedDay[] = [];
+    try {
+      for (let i = 0; i < nDays; i++) {
+        if (!u.pendingDay) {
+          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+        }
+        const pending = u.pendingDay.matchups.filter(m => m.status !== "completed");
+        if (pending.length > 0) {
+          const results = await pool.simulate(pending, byId);
+          const resById = new Map(results.map(r => [r.id, r]));
+          // Fold in matchup order (deterministic; players are disjoint within a day).
+          for (const m of u.pendingDay.matchups) {
+            const r = resById.get(m.id);
+            if (r) foldOutcome(state, m, r, byId);
+          }
+        }
+        if (!roll) break;
+        const done: CompletedDay = { day: u.pendingDay.day, matchups: u.pendingDay.matchups };
+        u.history.push(done);
+        completed.push(done);
+        trimHistory(u);
+        decayRelationships(u.players); // bonds fade day-to-day without upkeep
+        u.pendingDay = null;
+        u.day++;
+        onDay?.(i + 1);
+        await nextFrame(); // let the overlay repaint between days
+      }
+      if (roll && !u.pendingDay) {
+        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+      }
+    } finally {
+      pool.terminate();
+    }
+    return completed;
   }
 
   // ---- Players (roster) screen ----
@@ -638,7 +670,7 @@ export class UniverseMode {
 
     // Top performers across all completed matches today. Updates as more
     // matches finish, so even a single sim'd match shows the top of the day.
-    const completed = day.matchups.filter(m => m.status === "completed" && m.playerStats);
+    const completed = day.matchups.filter(m => m.status === "completed" && (m.playerStats || m.games?.length));
     if (completed.length > 0) {
       body.appendChild(this.topPerformersGrid(completed, playerById));
     }
@@ -667,12 +699,14 @@ export class UniverseMode {
       const card = document.createElement("div");
       card.className = "universe-matchup-card " + (m.status === "completed" ? "completed" : "");
 
+      const isSeries = (m.bestOf ?? 1) > 1;
       const header = document.createElement("div");
       header.className = "umc-header";
       const mapName = this.universe!.maps?.[m.mapIndex ?? 0]?.name ?? this.universe!.map?.name;
-      header.textContent = m.status === "completed" && mapName
-        ? `Match ${i + 1} · ${mapName}`
-        : `Match ${i + 1}`;
+      // Series show their format (the map differs per game); Bo1 shows the map.
+      header.textContent = isSeries
+        ? `Match ${i + 1} · Bo${m.bestOf}`
+        : (m.status === "completed" && mapName ? `Match ${i + 1} · ${mapName}` : `Match ${i + 1}`);
       card.appendChild(header);
 
       const teams = document.createElement("div");
@@ -696,12 +730,22 @@ export class UniverseMode {
       actions.className = "umc-actions";
       if (m.status === "pending") {
         actions.appendChild(btn("Sim", "", () => this.simMatchup(m.id)));
-        actions.appendChild(btn("Play", "primary", () => this.playMatchup(m.id)));
-      } else if (m.seed !== undefined) {
-        // Replay reruns the match deterministically from its seed. matchIdx is
-        // the index into the day's full matchups list (not the per-region slice).
+        // A series can't be watched as a single match; only Bo1 offers live Play.
+        if (!isSeries) actions.appendChild(btn("Play", "primary", () => this.playMatchup(m.id)));
+      } else {
+        // Replay reruns deterministically from a stored seed. matchIdx is the
+        // index into the day's full matchups list (not the per-region slice).
         const matchIdx = day.matchups.indexOf(m);
-        actions.appendChild(btn("Replay", "", () => this.openReplay(day.day, matchIdx)));
+        if (isSeries && m.games?.length) {
+          // One replay button per game in the series.
+          m.games.forEach((_g, gi) => {
+            const b = btn(`G${gi + 1}`, "", () => this.openReplay(day.day, matchIdx, undefined, gi));
+            b.title = `Replay game ${gi + 1}`;
+            actions.appendChild(b);
+          });
+        } else if (m.seed !== undefined) {
+          actions.appendChild(btn("Replay", "", () => this.openReplay(day.day, matchIdx)));
+        }
       }
       card.appendChild(actions);
       grid.appendChild(card);
@@ -718,10 +762,12 @@ export class UniverseMode {
     }
     const rows: Row[] = [];
     for (const m of matchups) {
-      if (!m.playerStats) continue;
-      for (const [pid, stats] of Object.entries(m.playerStats)) {
+      // Series carry stats per game; aggregate them across the series so a
+      // player's whole-series line competes in the day's top performers.
+      const stats = matchupPlayerStats(m);
+      for (const [pid, s] of Object.entries(stats)) {
         const side: "CT" | "T" = m.ctPlayerIds.includes(pid) ? "CT" : "T";
-        rows.push({ pid, side, stats, rating: hltvRating1(stats) });
+        rows.push({ pid, side, stats: s, rating: hltvRating1(s) });
       }
     }
     rows.sort((a, b) => b.rating - a.rating);
@@ -775,7 +821,7 @@ export class UniverseMode {
     if (!this.universe) return;
     const u = this.universe;
     if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])];
-    simOneMatchup(this.snapshotState(u), m);
+    simOneMatchup(this.foldState(u), m);
   }
 
   private playMatchup(id: string) {
@@ -842,9 +888,7 @@ export class UniverseMode {
   private async simRemaining() {
     if (!this.universe || !this.universe.pendingDay) return;
     const u = this.universe;
-    const res = await this.runSimWorker({ kind: "simPendingDay", state: this.snapshotState(u) });
-    if (res.kind !== "donePending") return;
-    this.applyWorkerState(u, res.state);
+    await this.runDaySim(u, 1, /* roll */ false);
     this.viewingDay = null; // jump back to the live day to show the results
     this.persist();
     this.render();
@@ -887,24 +931,15 @@ export class UniverseMode {
     // re-renders — otherwise a throw leaves the blocking overlay up and the app
     // appears frozen.
     try {
-      // The whole fast-forward runs in the worker; we get one progress message
-      // per day and the final mutated state. The big player/elo clone is paid
-      // exactly twice (in and out), not per day.
-      const res = await this.runSimWorker(
-        { kind: "simDays", state: this.snapshotState(u), nDays: capped },
-        done => overlay.update(done),
-      );
-      if (res.kind === "doneDays") {
-        this.applyWorkerState(u, res.state);
-        for (const d of res.completedDays) u.history.push(d);
-        trimHistory(u);
-        // Archive every completed day in one transaction, then save core state
-        // and wait for it to land — a multi-day sim is too much work to risk
-        // losing if the tab closes right after the overlay disappears.
-        await appendDays(u.id, res.completedDays);
-        this.persist();
-        await this.flush();
-      }
+      // Each day's matches run in parallel across the worker pool; days roll
+      // sequentially (matchmaking depends on the prior day's elo/chemistry).
+      const completed = await this.runDaySim(u, capped, /* roll */ true, done => overlay.update(done));
+      // Archive every completed day in one transaction, then save core state and
+      // wait for it to land — a multi-day sim is too much work to risk losing if
+      // the tab closes right after the overlay disappears.
+      await appendDays(u.id, completed);
+      this.persist();
+      await this.flush();
     } finally {
       this.viewingDay = null;
       overlay.el.remove();
@@ -983,8 +1018,76 @@ export class UniverseMode {
       this.render();
       return;
     }
-    body.appendChild(playerPage(p, u, (day, idx, round) => this.openReplay(day, idx, round)));
+    body.appendChild(playerPage(p, u, (day, idx, round, gameIdx) => this.openReplay(day, idx, round, gameIdx)));
   }
+}
+
+// ---- Sim worker pool -----------------------------------------------------
+
+// Cap the pool at the hardware concurrency (leaving the spec's fallback), but
+// never more than 8 — beyond that the per-message cloning overhead outweighs
+// the gain for our match sizes.
+function simPoolSize(): number {
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
+  return Math.max(1, Math.min(8, cores));
+}
+
+// A fixed set of sim workers. Maps are sent once at construction (they carry
+// large wall arrays); each simulate() call shards the matchups across all
+// workers and resolves with the combined results.
+class SimPool {
+  private workers: Worker[];
+
+  constructor(size: number, maps: GameMap[]) {
+    this.workers = Array.from({ length: size }, () => new SimWorker());
+    const init: SimWorkerRequest = { kind: "init", maps };
+    for (const w of this.workers) w.postMessage(init);
+  }
+
+  async simulate(matchups: Matchup[], byId: Map<string, Player>): Promise<MatchupOutcome[]> {
+    const chunks = chunkEvenly(matchups, this.workers.length);
+    const out = await Promise.all(chunks.map((c, i) => this.runChunk(this.workers[i], c, byId)));
+    return out.flat();
+  }
+
+  private runChunk(worker: Worker, matchups: Matchup[], byId: Map<string, Player>): Promise<MatchupOutcome[]> {
+    if (matchups.length === 0) return Promise.resolve([]);
+    const players = playersFor(matchups, byId);
+    return new Promise((resolve, reject) => {
+      const onMsg = (e: MessageEvent<SimWorkerResponse>) => { cleanup(); resolve(e.data.results); };
+      const onErr = (err: ErrorEvent) => { cleanup(); reject(err); };
+      const cleanup = () => {
+        worker.removeEventListener("message", onMsg);
+        worker.removeEventListener("error", onErr);
+      };
+      worker.addEventListener("message", onMsg);
+      worker.addEventListener("error", onErr);
+      const req: SimWorkerRequest = { kind: "simMatches", players, matchups };
+      worker.postMessage(req);
+    });
+  }
+
+  terminate() { for (const w of this.workers) w.terminate(); }
+}
+
+// Round-robin split so each worker gets a near-equal count of matches.
+function chunkEvenly<T>(arr: T[], n: number): T[][] {
+  const chunks: T[][] = Array.from({ length: n }, () => []);
+  arr.forEach((item, i) => chunks[i % n].push(item));
+  return chunks;
+}
+
+// The unique player objects involved in a batch of matchups — only these need
+// to cross to the worker (each player appears in just one match per day).
+function playersFor(matchups: Matchup[], byId: Map<string, Player>): Player[] {
+  const ids = new Set<string>();
+  for (const m of matchups) {
+    for (const id of m.ctPlayerIds) ids.add(id);
+    for (const id of m.tPlayerIds) ids.add(id);
+  }
+  const out: Player[] = [];
+  for (const id of ids) { const p = byId.get(id); if (p) out.push(p); }
+  return out;
 }
 
 // ---- Shared map-rotation UI (settings + new-universe setup) --------------
@@ -1185,83 +1288,158 @@ const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Pl
   { key: "overall",    label: "OVR",       getter: (p) => Math.round(avgStats(p, ["accuracy","crosshairPlacement","sprayControl","tapping","flickAim","counterStrafe","reflexes","handSpeed","movement","jiggle","mapAwareness","positioning","gameSense","timing","adaptability","composure","aggression","patience","discipline","recovery","utility","smokeLineups","flashTiming","molotovUse"])) },
 ];
 
+// A generic sortable table whose rows are virtualized: only the rows visible in
+// the scroll viewport (plus a small overscan) are ever in the DOM, with spacer
+// rows preserving total scroll height. Lets the standings/career tables handle
+// thousands of players without building tens of thousands of nodes per sort.
+interface VCol<T> {
+  label: string;
+  thClass?: string;                                   // header class (e.g. width)
+  fill: (item: T, td: HTMLTableCellElement) => void;  // populate a body cell
+  cmp: (a: T, b: T) => number;                        // ascending comparator
+}
+
+function virtualTable<T>(
+  items: T[],
+  cols: VCol<T>[],
+  initialSortIdx: number,
+  initialDir: 1 | -1,
+  onPick?: (item: T) => void,
+): HTMLElement {
+  let sortIdx = initialSortIdx;
+  let sortDir = initialDir;
+  let sorted: T[] = [];
+  let rowH = 44;            // measured after first paint; matched to avoid drift
+  let measured = false;
+  const OVERSCAN = 8;
+
+  const wrap = document.createElement("div");
+  wrap.className = "universe-player-table-wrap";
+  const scroll = document.createElement("div");
+  scroll.className = "universe-player-table-scroll";
+  const table = document.createElement("table");
+  table.className = "universe-player-table";
+  const thead = document.createElement("thead");
+  const tbody = document.createElement("tbody");
+  table.append(thead, tbody);
+  scroll.appendChild(table);
+  wrap.appendChild(scroll);
+
+  const buildHeader = () => {
+    thead.innerHTML = "";
+    const trh = document.createElement("tr");
+    cols.forEach((col, i) => {
+      const th = document.createElement("th");
+      th.textContent = col.label + (sortIdx === i ? (sortDir === -1 ? " ▼" : " ▲") : "");
+      if (col.thClass) th.className = col.thClass;
+      th.onclick = () => {
+        if (sortIdx === i) sortDir = (sortDir === 1 ? -1 : 1);
+        else { sortIdx = i; sortDir = -1; }
+        resort();
+        scroll.scrollTop = 0;
+        buildHeader();
+        renderWindow();
+      };
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+  };
+
+  const resort = () => {
+    sorted = [...items].sort((a, b) => cols[sortIdx].cmp(a, b) * sortDir);
+  };
+
+  const makeRow = (item: T): HTMLTableRowElement => {
+    const tr = document.createElement("tr");
+    if (onPick) {
+      tr.classList.add("clickable-row");
+      tr.onclick = () => onPick(item);
+    }
+    for (const col of cols) {
+      const td = document.createElement("td");
+      col.fill(item, td);
+      tr.appendChild(td);
+    }
+    return tr;
+  };
+
+  const spacer = (h: number): HTMLTableRowElement => {
+    const tr = document.createElement("tr");
+    tr.className = "pt-spacer";
+    const td = document.createElement("td");
+    td.colSpan = cols.length;
+    td.style.height = `${h}px`;
+    tr.appendChild(td);
+    return tr;
+  };
+
+  const renderWindow = () => {
+    const viewH = scroll.clientHeight || 600;
+    const start = Math.max(0, Math.floor(scroll.scrollTop / rowH) - OVERSCAN);
+    const end = Math.min(sorted.length, Math.ceil((scroll.scrollTop + viewH) / rowH) + OVERSCAN);
+
+    tbody.innerHTML = "";
+    if (start > 0) tbody.appendChild(spacer(start * rowH));
+    for (let i = start; i < end; i++) tbody.appendChild(makeRow(sorted[i]));
+    if (end < sorted.length) tbody.appendChild(spacer((sorted.length - end) * rowH));
+
+    // Calibrate row height from a real row once, then re-window so the spacer
+    // math (and thus scroll height) matches actual layout exactly.
+    if (!measured && start === 0 && sorted.length > 0) {
+      measured = true;
+      const first = tbody.querySelector("tr:not(.pt-spacer)") as HTMLElement | null;
+      const h = first?.offsetHeight ?? 0;
+      if (h > 0 && Math.abs(h - rowH) > 0.5) { rowH = h; renderWindow(); }
+    }
+  };
+
+  scroll.addEventListener("scroll", renderWindow);
+  resort();
+  buildHeader();
+  renderWindow();
+  // clientHeight is 0 until the table is in the document; re-window next frame
+  // so the initial visible range fills the real viewport height.
+  requestAnimationFrame(renderWindow);
+  return wrap;
+}
+
 function playerTable(
   players: Player[],
   elos: Record<string, number>,
   showElo: boolean,
   onPick?: (playerId: string) => void,
 ): HTMLElement {
-  let sortKey: SortKey = showElo ? "elo" : "overall";
-  let sortDir: 1 | -1 = -1;
+  const cols = COLUMNS.filter(c => !c.needsElo || showElo);
+  const valueOf = (col: typeof COLUMNS[number], p: Player) => col.getter(p, elos[p.id] ?? STARTING_ELO);
 
-  const wrap = document.createElement("div");
-  wrap.className = "universe-player-table-wrap";
-
-  const renderTable = () => {
-    wrap.innerHTML = "";
-    const table = document.createElement("table");
-    table.className = "universe-player-table";
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    for (const col of COLUMNS) {
-      if (col.needsElo && !showElo) continue;
-      const th = document.createElement("th");
-      th.textContent = col.label + (sortKey === col.key ? (sortDir === -1 ? " ▼" : " ▲") : "");
-      th.onclick = () => {
-        if (sortKey === col.key) sortDir = (sortDir === 1 ? -1 : 1);
-        else { sortKey = col.key; sortDir = -1; }
-        renderTable();
-      };
-      trh.appendChild(th);
-    }
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const sortedCol = COLUMNS.find(c => c.key === sortKey)!;
-    const sorted = [...players].sort((a, b) => {
-      const va = sortedCol.getter(a, elos[a.id] ?? STARTING_ELO);
-      const vb = sortedCol.getter(b, elos[b.id] ?? STARTING_ELO);
-      if (typeof va === "number" && typeof vb === "number") return (va - vb) * sortDir;
-      return String(va).localeCompare(String(vb)) * sortDir;
-    });
-
-    const tbody = document.createElement("tbody");
-    for (const p of sorted) {
-      const tr = document.createElement("tr");
-      if (onPick) {
-        tr.classList.add("clickable-row");
-        tr.onclick = () => onPick(p.id);
+  const vcols: VCol<Player>[] = cols.map(col => ({
+    label: col.label,
+    thClass: col.key === "name" ? "pt-col-name" : undefined,
+    cmp: (a, b) => {
+      const va = valueOf(col, a), vb = valueOf(col, b);
+      if (typeof va === "number" && typeof vb === "number") return va - vb;
+      return String(va).localeCompare(String(vb));
+    },
+    fill: (p, td) => {
+      const v = valueOf(col, p);
+      if (col.key === "country") {
+        td.innerHTML = `<span class="flag">${flagEmoji(p.country)}</span> ${escapeHtml(p.country)}`;
+        td.className = "country-cell";
+      } else if (col.key === "name") {
+        td.innerHTML = `<span class="pt-handle">${escapeHtml(p.handle)}</span>` +
+          `<span class="pt-realname">${escapeHtml(p.name)}</span>`;
+        td.className = "name-cell";
+      } else {
+        td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
       }
-      for (const col of COLUMNS) {
-        if (col.needsElo && !showElo) continue;
-        const td = document.createElement("td");
-        const v = col.getter(p, elos[p.id] ?? STARTING_ELO);
-        if (col.key === "country") {
-          td.innerHTML = `<span class="flag">${flagEmoji(p.country)}</span> ${escapeHtml(p.country)}`;
-          td.className = "country-cell";
-        } else if (col.key === "name") {
-          // Handle is the primary identifier; real name rides along underneath.
-          td.innerHTML = `<span class="pt-handle">${escapeHtml(p.handle)}</span>` +
-            `<span class="pt-realname">${escapeHtml(p.name)}</span>`;
-          td.className = "name-cell";
-        } else {
-          td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
-        }
-        // Color-code stat ratings on a red→yellow→green gradient. Elo, age,
-        // country, name, and role stay uncolored — they aren't 0-100 ratings.
-        if (typeof v === "number" && col.key !== "elo" && col.key !== "age") {
-          td.style.color = ratingColor(v);
-        }
-        tr.appendChild(td);
+      if (typeof v === "number" && col.key !== "elo" && col.key !== "age") {
+        td.style.color = ratingColor(v);
       }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-  };
+    },
+  }));
 
-  renderTable();
-  return wrap;
+  const initialIdx = Math.max(0, cols.findIndex(c => c.key === (showElo ? "elo" : "overall")));
+  return virtualTable(players, vcols, initialIdx, -1, onPick ? p => onPick(p.id) : undefined);
 }
 
 // Career stats table — aggregates each player's game log into a sortable
@@ -1352,53 +1530,14 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
     })),
   ];
 
-  let sortIdx = cols.findIndex(c => c.label === "Rating");
-  let sortDir: 1 | -1 = -1;
-
-  const wrap = document.createElement("div");
-  wrap.className = "universe-player-table-wrap";
-
-  const draw = () => {
-    wrap.innerHTML = "";
-    const table = document.createElement("table");
-    table.className = "universe-player-table";
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    cols.forEach((c, i) => {
-      const th = document.createElement("th");
-      th.textContent = c.label + (sortIdx === i ? (sortDir === -1 ? " ▼" : " ▲") : "");
-      th.onclick = () => {
-        if (sortIdx === i) sortDir = (sortDir === 1 ? -1 : 1);
-        else { sortIdx = i; sortDir = -1; }
-        draw();
-      };
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const sorted = [...rows].sort((a, b) => cols[sortIdx].cmp(a, b) * sortDir);
-    const tbody = document.createElement("tbody");
-    for (const r of sorted) {
-      const tr = document.createElement("tr");
-      if (onPick) {
-        tr.classList.add("clickable-row");
-        tr.onclick = () => onPick(r.p.id);
-      }
-      for (const c of cols) {
-        const td = document.createElement("td");
-        td.innerHTML = c.cellHtml(r);
-        if (c.cls) td.className = c.cls;
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-  };
-
-  draw();
-  return wrap;
+  const initialIdx = Math.max(0, cols.findIndex(c => c.label === "Rating"));
+  const vcols: VCol<CareerRow>[] = cols.map(c => ({
+    label: c.label,
+    thClass: c.label === "Name" ? "pt-col-name" : undefined,
+    cmp: c.cmp,
+    fill: (r, td) => { td.innerHTML = c.cellHtml(r); if (c.cls) td.className = c.cls; },
+  }));
+  return virtualTable(rows, vcols, initialIdx, -1, onPick ? r => onPick(r.p.id) : undefined);
 }
 
 // Map a 0-100 rating to a red→yellow→green background. Stats here cluster in
@@ -1435,7 +1574,9 @@ function showMatchStatsModal(m: Matchup, u: Universe) {
   const header = document.createElement("div");
   header.className = "ustats-header";
   const ctWon = m.winnerSide === "CT";
+  const isSeries = !!m.games?.length;
   header.innerHTML =
+    (isSeries ? `<div class="ustats-series-label">Bo${m.bestOf} series</div>` : ``) +
     `<div class="ustats-score">` +
       `<span class="ct${ctWon ? " winner" : ""}">${m.ctScore ?? 0}</span>` +
       `<span class="sep">:</span>` +
@@ -1448,11 +1589,49 @@ function showMatchStatsModal(m: Matchup, u: Universe) {
   header.appendChild(closeBtn);
   modal.appendChild(header);
 
-  const wrap = document.createElement("div");
-  wrap.className = "ustats-teams";
-  wrap.appendChild(boxScoreTable("CT", m.ctPlayerIds, m, u));
-  wrap.appendChild(boxScoreTable("T",  m.tPlayerIds,  m, u));
-  modal.appendChild(wrap);
+  // Body holds the box score for the selected game (or the single match).
+  const body = document.createElement("div");
+
+  const renderBox = (gm: Matchup, label?: string) => {
+    body.innerHTML = "";
+    if (label) {
+      const l = document.createElement("div");
+      l.className = "ustats-game-label";
+      l.textContent = label;
+      body.appendChild(l);
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "ustats-teams";
+    wrap.appendChild(boxScoreTable("CT", gm.ctPlayerIds, gm, u));
+    wrap.appendChild(boxScoreTable("T",  gm.tPlayerIds,  gm, u));
+    body.appendChild(wrap);
+  };
+
+  if (m.games?.length) {
+    // Tab per game; each tab shows that game's map, round score, and box score.
+    const tabs = document.createElement("div");
+    tabs.className = "ustats-game-tabs";
+    m.games.forEach((g, gi) => {
+      const mapName = u.maps?.[g.mapIndex]?.name ?? `Map ${g.mapIndex + 1}`;
+      const tab = btn(`G${gi + 1}`, "", () => {
+        const gm: Matchup = {
+          ...m, games: undefined, playerStats: g.playerStats, clutches: g.clutches,
+          ctScore: g.ctScore, tScore: g.tScore, winnerSide: g.winnerSide,
+          seed: g.seed, mapIndex: g.mapIndex,
+        };
+        renderBox(gm, `Game ${gi + 1} · ${mapName} · ${g.ctScore}-${g.tScore}`);
+        for (const c of Array.from(tabs.children)) c.classList.remove("active");
+        tab.classList.add("active");
+      });
+      tabs.appendChild(tab);
+    });
+    modal.appendChild(tabs);
+    modal.appendChild(body);
+    (tabs.firstChild as HTMLElement | null)?.click(); // default to game 1
+  } else {
+    renderBox(m);
+    modal.appendChild(body);
+  }
 
   backdrop.appendChild(modal);
   document.body.appendChild(backdrop);
@@ -1559,7 +1738,7 @@ const STAT_GROUPS: { label: string; keys: (keyof import("../domain/types.ts").Pl
 
 function playerPage(
   p: Player, u: Universe,
-  onReplay: (day: number, matchIdx: number, startAtRound?: number) => void,
+  onReplay: (day: number, matchIdx: number, startAtRound?: number, gameIdx?: number) => void,
 ): HTMLElement {
   const root = document.createElement("div");
   root.className = "universe-player-page";
@@ -1801,7 +1980,7 @@ function playerPage(
           chip.title = `${c.kills} kill${c.kills === 1 ? "" : "s"} · replay round ${c.round}`;
           chip.onclick = (ev) => {
             ev.stopPropagation();
-            onReplay(g.day, g.matchIdx, c.round);
+            onReplay(g.day, g.matchIdx, c.round, g.gameIdx);
           };
         }
         clutchTd.appendChild(chip);
@@ -1812,7 +1991,7 @@ function playerPage(
       if (g.seed !== undefined) {
         tr.classList.add("clickable-row");
         tr.title = "Replay match";
-        tr.onclick = () => onReplay(g.day, g.matchIdx);
+        tr.onclick = () => onReplay(g.day, g.matchIdx, undefined, g.gameIdx);
       }
       tbody.appendChild(tr);
     }
@@ -1838,6 +2017,7 @@ function playerPage(
 interface GameLogEntry {
   day: number;
   matchIdx: number;
+  gameIdx?: number;          // set for a game within a series (for replay)
   seed: number | undefined;
   side: "CT" | "T";
   ownScore: number;
@@ -1921,47 +2101,59 @@ function hltvRating1(s: import("./types.ts").PlayerMatchStats): number {
   return (kr + 0.7 * sr + mkr) / 2.7;
 }
 
+// Per-player stats for a matchup: a Bo1's own stats, or a series' games summed
+// per player (so a whole-series line can be shown/ranked as one).
+function matchupPlayerStats(m: Matchup): Record<string, PlayerMatchStats> {
+  if (!m.games?.length) return m.playerStats ?? {};
+  const agg: Record<string, PlayerMatchStats> = {};
+  for (const g of m.games) {
+    for (const [pid, s] of Object.entries(g.playerStats)) {
+      const a = agg[pid] ?? (agg[pid] = { kills: 0, deaths: 0, assists: 0, damage: 0, roundsPlayed: 0, k1: 0, k2: 0, k3: 0, k4: 0, k5: 0 });
+      a.kills += s.kills; a.deaths += s.deaths; a.assists += s.assists; a.damage += s.damage; a.roundsPlayed += s.roundsPlayed;
+      a.k1 += s.k1; a.k2 += s.k2; a.k3 += s.k3; a.k4 += s.k4; a.k5 += s.k5;
+    }
+  }
+  return agg;
+}
+
 function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
   const out: GameLogEntry[] = [];
   for (const day of u.history) {
     day.matchups.forEach((m, idx) => {
-      if (m.status !== "completed" || !m.winnerSide
-          || m.ctScore === undefined || m.tScore === undefined) return;
+      if (m.status !== "completed") return;
       const onCt = m.ctPlayerIds.includes(playerId);
       const onT  = m.tPlayerIds.includes(playerId);
       if (!onCt && !onT) return;
       const side: "CT" | "T" = onCt ? "CT" : "T";
-      const ownScore = onCt ? m.ctScore : m.tScore;
-      const oppScore = onCt ? m.tScore : m.ctScore;
-      const myClutches = (m.clutches ?? []).filter(c => c.playerId === playerId);
-      // Whether each clutch was CONVERTED is a per-round fact (the clutcher
-      // survived and their side won that round) — detectClutch records it on
-      // each clutch. It is independent of the match result: you can win a
-      // clutch in a match you lose, and lose a 1v5 in a match you win. Legacy
-      // saves only stored successful clutches, so treat a missing flag as won.
-      const clutchWonOf = (c: { won?: boolean }) => c.won ?? true;
-      // Only successful clutches get a replayable chip.
-      const clutches = myClutches
-        .filter(clutchWonOf)
-        .map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round }));
-      const clutchAttempts = myClutches.map(c => ({
-        bucket: clutchBucket(c),
-        won: clutchWonOf(c),
-        round: c.round,
-      }));
-      out.push({
-        day: day.day,
-        matchIdx: idx,
-        seed: m.seed,
-        side,
-        ownScore,
-        oppScore,
-        won: (onCt && m.winnerSide === "CT") || (onT && m.winnerSide === "T"),
-        opponentIds: onCt ? m.tPlayerIds : m.ctPlayerIds,
-        clutches,
-        clutchAttempts,
-        stats: m.playerStats?.[playerId] ?? null,
-      });
+      const opponentIds = onCt ? m.tPlayerIds : m.ctPlayerIds;
+      const clutchWonOf = (c: { won?: boolean }) => c.won ?? true; // legacy = won
+
+      // Emit one log row per game. A Bo1 contributes a single row; a series
+      // contributes one row per game (each with its own seed for replay).
+      const pushRow = (
+        gameIdx: number | undefined, seed: number | undefined, winnerSide: "CT" | "T",
+        ctScore: number, tScore: number, clutchesArr: Clutch[],
+        stats: PlayerMatchStats | null,
+      ) => {
+        const mine = clutchesArr.filter(c => c.playerId === playerId);
+        out.push({
+          day: day.day, matchIdx: idx, gameIdx, seed, side,
+          ownScore: onCt ? ctScore : tScore,
+          oppScore: onCt ? tScore : ctScore,
+          won: (onCt && winnerSide === "CT") || (onT && winnerSide === "T"),
+          opponentIds,
+          clutches: mine.filter(clutchWonOf).map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round })),
+          clutchAttempts: mine.map(c => ({ bucket: clutchBucket(c), won: clutchWonOf(c), round: c.round })),
+          stats,
+        });
+      };
+
+      if (m.games?.length) {
+        m.games.forEach((g, gi) =>
+          pushRow(gi, g.seed, g.winnerSide, g.ctScore, g.tScore, g.clutches ?? [], g.playerStats?.[playerId] ?? null));
+      } else if (m.winnerSide && m.ctScore !== undefined && m.tScore !== undefined) {
+        pushRow(undefined, m.seed, m.winnerSide, m.ctScore, m.tScore, m.clutches ?? [], m.playerStats?.[playerId] ?? null);
+      }
     });
   }
   // Most recent first.

@@ -47,9 +47,10 @@ export interface MatchFormInput {
 }
 
 // Update persistent form for everyone who played, in-place. Call once per match.
-export function applyMatchForm(players: Player[], input: MatchFormInput) {
+export function applyMatchForm(players: Player[], input: MatchFormInput, index?: Map<string, Player>) {
   const { winnerIds, loserIds, stats, rng = Math.random } = input;
-  const byId = new Map(players.map(p => [p.id, p] as const));
+  // Caller may pass a prebuilt id→player index to avoid rebuilding per match.
+  const byId = index ?? new Map(players.map(p => [p.id, p] as const));
 
   const process = (ids: string[], won: boolean) => {
     for (const id of ids) {

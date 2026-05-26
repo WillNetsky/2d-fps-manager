@@ -812,14 +812,24 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Player table */
 .universe-player-table-wrap { width: 100%; }
-.universe-player-table {
-  width: 100%; border-collapse: collapse; font-size: 12px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+/* Scroll viewport for the virtualized player table. Rows are windowed in JS;
+   the header sticks and the body scrolls within this fixed-height box. */
+.universe-player-table-scroll {
+  max-height: calc(100vh - 200px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
 }
+.universe-player-table {
+  width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed;
+}
+.universe-player-table .pt-col-name { width: 20%; }
+.universe-player-table tbody tr { height: 44px; }
+.universe-player-table tr.pt-spacer td { padding: 0; border: none; height: auto; }
+.universe-player-table tr.pt-spacer:hover td { background: transparent; }
 .universe-player-table th {
   text-align: left; padding: 8px 10px; background: var(--panel-2); cursor: pointer;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--muted); border-bottom: 1px solid var(--line); user-select: none;
+  position: sticky; top: 0; z-index: 1;
 }
 .universe-player-table th:hover { color: var(--accent); }
 .universe-player-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
@@ -995,6 +1005,18 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .ustats-score .t  { color: var(--t);  opacity: 0.55; }
 .ustats-score .ct.winner, .ustats-score .t.winner { opacity: 1; }
 .ustats-score .sep { color: var(--muted); }
+.ustats-series-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); font-weight: 600;
+}
+/* Per-game tabs in the series box-score modal */
+.ustats-game-tabs { display: flex; gap: 6px; padding: 10px 18px 0; }
+.ustats-game-tabs .universe-btn.active {
+  background: var(--accent, #e0b341); color: #1a1a1a; border-color: transparent;
+}
+.ustats-game-label {
+  padding: 10px 18px 0; font-size: 12px; color: var(--muted); font-weight: 600;
+}
 .ustats-close {
   background: transparent; border: none; color: var(--muted); cursor: pointer;
   font-size: 18px; padding: 4px 10px;

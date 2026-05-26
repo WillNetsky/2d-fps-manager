@@ -65,6 +65,31 @@ export interface Matchup {
   // Friend-stacks (player-id groups of 2+ that queued together) present in this
   // lobby — one per team at most. Used to mark grouped players on the board.
   parties?: string[][];
+  // Series length: 1 (or absent) = single match, 3 = Bo3, 5 = Bo5. A series is
+  // the same two teams playing multiple games. For a series, the matchup's
+  // top-level winnerSide / ctScore / tScore hold the SERIES result (games won,
+  // e.g. 2-1) and the per-game detail lives in `games`; the top-level
+  // seed / mapIndex / clutches / playerStats are unused (they live per game).
+  bestOf?: 1 | 3 | 5;
+  games?: GameResult[];
+  // For a Bo1: each participating player's morale at sim time, snapshotted so a
+  // replay reproduces the exact match (the sim seeds in-match mood from morale,
+  // which drifts day to day). Series store this per game instead.
+  moods?: Record<string, number>;
+}
+
+// One game within a series. Carries its own seed and map so it replays
+// deterministically, exactly like a single Bo1 match does today.
+export interface GameResult {
+  seed: number;
+  mapIndex: number;
+  ctScore: number;                          // rounds won
+  tScore: number;
+  winnerSide: "CT" | "T";
+  clutches: Clutch[];
+  playerStats: Record<string, PlayerMatchStats>;
+  // Each participating player's morale at sim time (see Matchup.moods).
+  moods: Record<string, number>;
 }
 
 export interface Clutch {
@@ -117,8 +142,12 @@ export interface CareerStats {
 }
 
 export const STARTING_ELO = 1000;
-// Players are generated per region so every competitive scene can field many
-// full lobbies a day. Each region gets exactly PLAYERS_PER_REGION players.
-export const PLAYERS_PER_REGION = 100;
+// Default players per region on the New Universe screen (the user can dial this
+// up or down). Each region gets its own pool so every competitive scene can
+// field many full lobbies a day. The sim runs off-thread and the roster/career
+// tables are virtualized, so a full 1000/region (6k players) stays responsive.
+export const PLAYERS_PER_REGION = 1000;
+// Upper guard for the setup input — prevents runaway player generation from a typo.
+export const MAX_PLAYERS_PER_REGION = 2000;
 export const PLAYER_COUNT = PLAYERS_PER_REGION * REGION_ORDER.length;
 export const TEAM_SIZE = 5;

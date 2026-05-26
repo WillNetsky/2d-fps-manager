@@ -152,7 +152,7 @@ const WIN_THRESHOLD = 13;
 const MAX_ROUNDS = 24;
 const isPistolRound = (n: number): boolean => n === 1 || n === HALFTIME_ROUND + 1;
 
-export function buildTeam(id: string, name: string, players: Player[], side: Side): Team {
+export function buildTeam(id: string, name: string, players: Player[], side: Side, moodOverride?: Record<string, number>): Team {
   // Deep-clone the players so the universe's canonical Player objects aren't
   // mutated by per-match state (money, mood drift, matchStats, etc.).
   const cloned: Player[] = players.map(p => ({
@@ -162,8 +162,10 @@ export function buildTeam(id: string, name: string, players: Player[], side: Sid
     money: STARTING_BANK,
     // Start the match's in-the-moment mood at the player's persistent form
     // (morale), so a hot streak or a tilt carries into how they shoot. Mood
-    // then swings round-to-round on the clone and is discarded after.
-    mood: p.morale,
+    // then swings round-to-round on the clone and is discarded after. A replay
+    // passes the snapshotted sim-time morale so it reproduces the exact match
+    // even after the player's live morale has drifted.
+    mood: moodOverride?.[p.id] ?? p.morale,
   }));
   return {
     id, name, side,

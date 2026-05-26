@@ -1,32 +1,34 @@
-// Web Worker that runs the headless universe simulation off the main thread, so
-// fast-forwarding many days (or simming a full day of hundreds of matches) never
-// freezes the UI. The pure engine lives in universeSim.ts; this file is just the
-// message boundary. Spawned per request and terminated on completion by
-// universeMode.ts (mirrors balanceWorker.ts).
+// Web Worker that simulates a batch of matches off the main thread. The
+// coordinator (universeMode.ts) runs a pool of these and hands each one a slice
+// of a day's matchups — every player plays one match per day, so the matches
+// are independent and can run in parallel. Folding results into elo/chemistry/
+// form happens back on the coordinator. The pure engine lives in universeSim.ts.
 
-import { simulateDays, simPendingDay, type SimState } from "./universeSim.ts";
-import type { CompletedDay } from "./types.ts";
+import { simulateMatchup, type MatchupOutcome } from "./universeSim.ts";
+import type { GameMap, Player } from "../domain/types.ts";
+import type { Matchup } from "./types.ts";
 
 export type SimWorkerRequest =
-  | { kind: "simDays"; state: SimState; nDays: number }
-  | { kind: "simPendingDay"; state: SimState };
+  | { kind: "init"; maps: GameMap[] }
+  | { kind: "simMatches"; players: Player[]; matchups: Matchup[] };
 
 export type SimWorkerResponse =
-  | { kind: "progress"; done: number; total: number }
-  | { kind: "doneDays"; state: SimState; completedDays: CompletedDay[] }
-  | { kind: "donePending"; state: SimState };
+  | { kind: "matchResults"; results: MatchupOutcome[] };
+
+// Maps are sent once at init and reused for every batch — they carry large wall
+// arrays, so we avoid re-cloning them across postMessage on every day.
+let maps: GameMap[] = [];
 
 const post = (msg: SimWorkerResponse) => (self as unknown as Worker).postMessage(msg);
 
 self.onmessage = (e: MessageEvent<SimWorkerRequest>) => {
   const msg = e.data;
-  if (msg.kind === "simDays") {
-    const { completedDays } = simulateDays(msg.state, msg.nDays, done => {
-      post({ kind: "progress", done, total: msg.nDays });
-    });
-    post({ kind: "doneDays", state: msg.state, completedDays });
-  } else if (msg.kind === "simPendingDay") {
-    simPendingDay(msg.state);
-    post({ kind: "donePending", state: msg.state });
+  if (msg.kind === "init") {
+    maps = msg.maps;
+    return;
   }
+  // simMatches
+  const byId = new Map(msg.players.map(p => [p.id, p] as const));
+  const results = msg.matchups.map(m => simulateMatchup(m, byId, maps));
+  post({ kind: "matchResults", results });
 };
