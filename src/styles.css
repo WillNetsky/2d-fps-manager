@@ -1114,26 +1114,30 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-matchup-card.completed { opacity: 0.7; }
 .umc-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
 .umc-teams { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; }
-.umc-roster { display: flex; flex-direction: column; gap: 2px; }
+/* min-width:0 lets the 1fr grid tracks shrink below their content so long
+   names truncate instead of widening the column past the card. */
+.umc-roster { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .umc-team-header { padding: 4px 6px 6px; margin-bottom: 2px; border-bottom: 1px solid var(--line); }
 .umc-roster.ct .umc-team-name { color: var(--ct); }
 .umc-roster.t  .umc-team-name { color: var(--t); }
-.umc-team-name { font-size: 12px; font-weight: 600; }
+.umc-team-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .umc-team-elo { font-size: 10px; color: var(--muted); font-family: ui-monospace, monospace; }
 .umc-roster.ct .umc-roster-row { border-left: 2px solid var(--ct); }
 .umc-roster.t  .umc-roster-row { border-left: 2px solid var(--t); }
 .umc-roster-row {
-  display: flex; justify-content: space-between; padding: 3px 6px;
+  display: flex; align-items: baseline; justify-content: space-between; padding: 3px 6px;
   background: var(--panel-2); border-radius: 2px; font-size: 11px;
 }
 .umc-roster-row.clickable { cursor: pointer; }
 .umc-roster-row.clickable:hover { background: var(--panel); }
-.umc-name { font-weight: 500; flex: 1; }
-.umc-flag { margin-right: 6px; }
-.umc-elo { color: var(--muted); font-family: ui-monospace, monospace; }
+/* Name takes the slack but is allowed to shrink and truncate so the elo +
+   delta chips on the right always stay on the card. */
+.umc-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.umc-flag { margin-right: 6px; flex: none; }
+.umc-elo { color: var(--muted); font-family: ui-monospace, monospace; flex: none; }
 .umc-elo-delta {
   font-family: ui-monospace, monospace; font-size: 11px; font-weight: 600;
-  margin-left: 6px;
+  margin-left: 6px; flex: none;
 }
 .umc-elo-delta.good { color: var(--good); }
 .umc-elo-delta.bad  { color: var(--bad); }
@@ -1154,6 +1158,14 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .umc-score .ct.winner, .umc-score .t.winner { opacity: 1; text-shadow: 0 0 6px currentColor; }
 .umc-actions { display: flex; gap: 6px; }
 .umc-actions .universe-btn { flex: 1; }
+
+/* Matchups day navigator */
+.umc-day-nav {
+  display: flex; gap: 8px; align-items: center; justify-content: center;
+  margin-bottom: 16px;
+}
+.umc-day-nav .umc-day-label { min-width: 180px; }
+.umc-day-nav .universe-btn:disabled { opacity: 0.4; cursor: default; }
 
 /* Observe-match canvas screen */
 .universe-match {
