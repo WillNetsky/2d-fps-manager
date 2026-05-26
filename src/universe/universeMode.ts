@@ -22,7 +22,15 @@ import {
 // far back individual matches stay replayable — not the career totals.
 const HISTORY_DAYS = 60;
 
-type Screen = "menu" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
+
+// In-progress configuration for the New Universe setup screen.
+interface UniverseSetup {
+  name: string;
+  regions: Set<Region>;
+  perRegion: number;
+  maps: GameMap[];
+}
 
 // Screens that share the day-view tab bar.
 const DAY_TABS: Screen[] = ["matchups", "standings", "career", "settings"];
@@ -38,6 +46,8 @@ export class UniverseMode {
   // Replay state: which historical matchup to play back, and where to return.
   private replayRef: { day: number; matchIdx: number; startAtRound?: number } | null = null;
   private replayReturnPlayerId: string | null = null;
+  // Config being assembled on the New Universe setup screen.
+  private setup: UniverseSetup | null = null;
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -70,6 +80,7 @@ export class UniverseMode {
 
     switch (this.screen) {
       case "menu":      this.renderMenu(body); break;
+      case "newUniverse": this.renderNewUniverse(body); break;
       case "players":   this.renderPlayers(body); break;
       case "matchups":  this.renderMatchups(body); break;
       case "match":     this.renderMatch(body); break;
@@ -232,7 +243,7 @@ export class UniverseMode {
     sub.textContent = "Generate a pool of players and let them play casual matchups day by day. Elo rises and falls with each result.";
     card.appendChild(sub);
 
-    card.appendChild(btn("New Universe", "primary big", () => this.createUniverse()));
+    card.appendChild(btn("New Universe", "primary big", () => this.openNewUniverse()));
 
     const loadHeader = document.createElement("div");
     loadHeader.className = "universe-section-label";
@@ -274,19 +285,38 @@ export class UniverseMode {
 
   // ---- Universe lifecycle ----
 
+  // Open the New Universe setup screen with sensible defaults.
+  private openNewUniverse() {
+    this.setup = {
+      name: `Universe ${new Date().toLocaleDateString()}`,
+      regions: new Set(REGION_ORDER),
+      perRegion: PLAYERS_PER_REGION,
+      maps: [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])],
+    };
+    this.screen = "newUniverse";
+    this.render();
+  }
+
+  // Build the universe from the assembled setup config.
   private createUniverse() {
+    const s = this.setup;
+    if (!s) return;
+    const regions = REGION_ORDER.filter(r => s.regions.has(r));
+    if (regions.length === 0) { alert("Pick at least one region."); return; }
+    // Need both teams' worth of players for a region to field a lobby.
+    const perRegion = Math.max(TEAM_SIZE * 2, Math.floor(s.perRegion) || 0);
+    const maps = s.maps.length > 0 ? s.maps : [deepCloneMap(builtinMaps()[0])];
+
     setSeed(Date.now());
     const players: Player[] = [];
-    // Seed a fixed headcount per region so every scene can field full lobbies.
-    for (const region of REGION_ORDER) {
-      for (let i = 0; i < PLAYERS_PER_REGION; i++) players.push(makePlayer(region));
+    for (const region of regions) {
+      for (let i = 0; i < perRegion; i++) players.push(makePlayer(region));
     }
     const elos: Record<string, number> = {};
     for (const p of players) elos[p.id] = STARTING_ELO;
-    const name = prompt("Name this universe:", `Universe ${new Date().toLocaleDateString()}`) ?? "Universe";
     this.universe = {
       id: newUniverseId(),
-      name,
+      name: s.name.trim() || `Universe ${new Date().toLocaleDateString()}`,
       createdAt: Date.now(),
       day: 1,
       players,
@@ -294,12 +324,124 @@ export class UniverseMode {
       history: [],
       pendingDay: null,
       careers: {},
-      // Start with one map in rotation — settings tab lets the user add more.
-      maps: [loadCustomMap() ?? deepCloneMap(builtinMaps()[0])],
+      maps: maps.map(deepCloneMap),
     };
+    this.setup = null;
     this.persist();
     this.screen = "players";
     this.render();
+  }
+
+  // ---- New Universe setup screen ----
+
+  private renderNewUniverse(body: HTMLElement) {
+    const s = this.setup;
+    if (!s) { this.screen = "menu"; this.render(); return; }
+
+    const wrap = document.createElement("div");
+    wrap.className = "universe-menu-wrap";
+    const card = document.createElement("div");
+    card.className = "universe-menu-card universe-setup-card";
+    wrap.appendChild(card);
+
+    const h = document.createElement("h2");
+    h.textContent = "New Universe";
+    card.appendChild(h);
+
+    // --- Name ---
+    const nameField = document.createElement("div");
+    nameField.className = "universe-setup-field";
+    nameField.innerHTML = `<label>Name</label>`;
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.className = "universe-setup-input";
+    nameInput.value = s.name;
+    nameInput.oninput = () => { s.name = nameInput.value; };
+    nameField.appendChild(nameInput);
+    card.appendChild(nameField);
+
+    // --- Players per region ---
+    const perField = document.createElement("div");
+    perField.className = "universe-setup-field";
+    perField.innerHTML = `<label>Players per region</label>`;
+    const perInput = document.createElement("input");
+    perInput.type = "number";
+    perInput.className = "universe-setup-input narrow";
+    perInput.min = String(TEAM_SIZE * 2);
+    perInput.step = "10";
+    perInput.value = String(s.perRegion);
+    perField.appendChild(perInput);
+    card.appendChild(perField);
+
+    // --- Regions ---
+    const regLabel = document.createElement("div");
+    regLabel.className = "universe-section-label";
+    regLabel.textContent = "Regions";
+    card.appendChild(regLabel);
+
+    const regGrid = document.createElement("div");
+    regGrid.className = "universe-region-checks";
+    const summary = document.createElement("div");
+    summary.className = "universe-setup-summary";
+    const updateSummary = () => {
+      const n = REGION_ORDER.filter(r => s.regions.has(r)).length;
+      const per = Math.max(TEAM_SIZE * 2, Math.floor(s.perRegion) || 0);
+      summary.textContent = `${n} region${n === 1 ? "" : "s"} × ${per} = ${n * per} players`;
+    };
+    perInput.oninput = () => {
+      const v = parseInt(perInput.value, 10);
+      s.perRegion = Number.isFinite(v) ? v : 0;
+      updateSummary();
+    };
+    for (const region of REGION_ORDER) {
+      const id = `region-${region}`;
+      const lab = document.createElement("label");
+      lab.className = "universe-region-check";
+      lab.htmlFor = id;
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = id;
+      cb.checked = s.regions.has(region);
+      cb.onchange = () => {
+        if (cb.checked) s.regions.add(region); else s.regions.delete(region);
+        updateSummary();
+      };
+      lab.appendChild(cb);
+      const span = document.createElement("span");
+      span.textContent = REGION_LABELS[region];
+      lab.appendChild(span);
+      regGrid.appendChild(lab);
+    }
+    card.appendChild(regGrid);
+    card.appendChild(summary);
+    updateSummary();
+
+    // --- Starting maps ---
+    const mapLabel = document.createElement("div");
+    mapLabel.className = "universe-section-label";
+    mapLabel.textContent = "Starting map rotation";
+    card.appendChild(mapLabel);
+    card.appendChild(mapRotationList(s.maps, (idx) => {
+      s.maps.splice(idx, 1);
+      this.render();
+    }));
+    card.appendChild(mapPickerRow((m) => {
+      s.maps.push(m);
+      this.render();
+    }));
+
+    // --- Actions ---
+    const actions = document.createElement("div");
+    actions.className = "universe-setup-actions";
+    actions.appendChild(btn("Cancel", "", () => {
+      this.setup = null;
+      this.screen = "menu";
+      this.render();
+    }));
+    actions.appendChild(btn("Create universe", "primary big", () => this.createUniverse()));
+    card.appendChild(actions);
+
+    body.appendChild(wrap);
   }
 
   private loadUniverseById(id: string) {
@@ -692,84 +834,18 @@ export class UniverseMode {
     sub.textContent = "Each match picks one map from this pool at random. Adding more variety here changes future matchups only — already-generated games keep their assigned map.";
     card.appendChild(sub);
 
-    const list = document.createElement("div");
-    list.className = "universe-map-list";
-    u.maps.forEach((map, idx) => {
-      const row = document.createElement("div");
-      row.className = "universe-map-row";
-      const left = document.createElement("div");
-      left.className = "umr-info";
-      left.innerHTML = `<div class="umr-name">${escapeHtml(map.name || `Map ${idx + 1}`)}</div>` +
-                       `<div class="umr-meta">${map.width}×${map.height} tiles · ${map.bombsites.length} sites</div>`;
-      row.appendChild(left);
-      const actions = document.createElement("div");
-      // Removing must keep at least one map in the pool, otherwise future
-      // matchup generation has nothing to assign.
-      if (u.maps!.length > 1) {
-        actions.appendChild(btn("Remove", "danger", () => {
-          u.maps!.splice(idx, 1);
-          this.persist();
-          this.render();
-        }));
-      }
-      row.appendChild(actions);
-      list.appendChild(row);
-    });
-    card.appendChild(list);
-
-    // Collect everything available across the four storage sources so the
-    // user can add any of them to this universe's rotation.
-    interface Source { key: string; label: string; map: () => GameMap; }
-    const sources: { group: string; items: Source[] }[] = [];
-    sources.push({
-      group: "Built-in",
-      items: builtinMaps().map(m => ({
-        key: `b:${m.name}`,
-        label: m.name,
-        map: () => deepCloneMap(m),
-      })),
-    });
-    const saved = loadSavedMapsAll();
-    const savedNames = Object.keys(saved).sort();
-    if (savedNames.length > 0) {
-      sources.push({
-        group: "Saved (editor)",
-        items: savedNames.map(name => ({
-          key: `s:${name}`,
-          label: name,
-          map: () => deepCloneMap(saved[name]),
-        })),
-      });
-    }
-    const addRow = document.createElement("div");
-    addRow.className = "universe-map-add";
-    const select = document.createElement("select");
-    select.className = "universe-map-select";
-    for (const group of sources) {
-      const og = document.createElement("optgroup");
-      og.label = group.group;
-      for (const item of group.items) {
-        const opt = document.createElement("option");
-        opt.value = item.key;
-        opt.textContent = item.label;
-        og.appendChild(opt);
-      }
-      select.appendChild(og);
-    }
-    addRow.appendChild(select);
-    addRow.appendChild(btn("+ Add to rotation", "primary", () => {
-      const key = select.value;
-      for (const group of sources) {
-        const found = group.items.find(it => it.key === key);
-        if (found) {
-          u.maps!.push(found.map());
-          this.persist();
-          this.render();
-          return;
-        }
-      }
+    // Removing must keep at least one map in the pool, otherwise future
+    // matchup generation has nothing to assign.
+    card.appendChild(mapRotationList(u.maps, (idx) => {
+      u.maps!.splice(idx, 1);
+      this.persist();
+      this.render();
     }));
-    card.appendChild(addRow);
+    card.appendChild(mapPickerRow((m) => {
+      u.maps!.push(m);
+      this.persist();
+      this.render();
+    }));
 
     body.appendChild(wrap);
   }
@@ -926,6 +1002,80 @@ function avgOf(team: Player[], eloOf: (p: Player) => number): number {
 
 function newSeed(): number {
   return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+// ---- Shared map-rotation UI (settings + new-universe setup) --------------
+
+interface MapSource { key: string; label: string; map: () => GameMap; }
+
+// Every map available to add to a rotation, grouped by origin.
+function collectMapSources(): { group: string; items: MapSource[] }[] {
+  const sources: { group: string; items: MapSource[] }[] = [{
+    group: "Built-in",
+    items: builtinMaps().map(m => ({ key: `b:${m.name}`, label: m.name, map: () => deepCloneMap(m) })),
+  }];
+  const saved = loadSavedMapsAll();
+  const savedNames = Object.keys(saved).sort();
+  if (savedNames.length > 0) {
+    sources.push({
+      group: "Saved (editor)",
+      items: savedNames.map(name => ({ key: `s:${name}`, label: name, map: () => deepCloneMap(saved[name]) })),
+    });
+  }
+  return sources;
+}
+
+// Read-only list of the maps in a rotation. If `onRemove` is given, each row
+// gets a Remove button — but the last map can't be removed (matchups need one).
+function mapRotationList(maps: GameMap[], onRemove?: (idx: number) => void): HTMLElement {
+  const list = document.createElement("div");
+  list.className = "universe-map-list";
+  maps.forEach((map, idx) => {
+    const row = document.createElement("div");
+    row.className = "universe-map-row";
+    const left = document.createElement("div");
+    left.className = "umr-info";
+    left.innerHTML = `<div class="umr-name">${escapeHtml(map.name || `Map ${idx + 1}`)}</div>` +
+                     `<div class="umr-meta">${map.width}×${map.height} tiles · ${map.bombsites.length} sites</div>`;
+    row.appendChild(left);
+    const actions = document.createElement("div");
+    if (onRemove && maps.length > 1) {
+      actions.appendChild(btn("Remove", "danger", () => onRemove(idx)));
+    }
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+  return list;
+}
+
+// Dropdown of all available maps + an "add" button that hands back a fresh
+// clone of the chosen map.
+function mapPickerRow(onAdd: (m: GameMap) => void): HTMLElement {
+  const sources = collectMapSources();
+  const addRow = document.createElement("div");
+  addRow.className = "universe-map-add";
+  const select = document.createElement("select");
+  select.className = "universe-map-select";
+  for (const group of sources) {
+    const og = document.createElement("optgroup");
+    og.label = group.group;
+    for (const item of group.items) {
+      const opt = document.createElement("option");
+      opt.value = item.key;
+      opt.textContent = item.label;
+      og.appendChild(opt);
+    }
+    select.appendChild(og);
+  }
+  addRow.appendChild(select);
+  addRow.appendChild(btn("+ Add to rotation", "primary", () => {
+    const key = select.value;
+    for (const group of sources) {
+      const found = group.items.find(it => it.key === key);
+      if (found) { onAdd(found.map()); return; }
+    }
+  }));
+  return addRow;
 }
 
 // Faceit-style team name: the highest-elo player in the lineup names the
