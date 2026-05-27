@@ -465,7 +465,11 @@ function avgOf(team: Player[], eloOf: (p: Player) => number): number {
 // scrim lobbies don't move the table. Must be called exactly once per matchup
 // (at day roll-over), mirroring how careers are folded. `ctScore`/`tScore` hold
 // the match (or series) result, so round diff uses them directly.
-export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[]): void {
+//
+// `foldSeason` controls whether the current-season tallies move too. Regular-
+// season days fold both lifetime and season records; playoff days fold only
+// lifetime (season standings are frozen — they already seeded the bracket).
+export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[], foldSeason = true): void {
   const byId = new Map(teams.map(t => [t.id, t] as const));
   for (const m of matchups) {
     if (m.status !== "completed" || !m.ctTeamId || !m.tTeamId) continue;
@@ -478,6 +482,7 @@ export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[]): v
     if (ctWon) { ct.wins++; t.losses++; } else { ct.losses++; t.wins++; }
     ct.streak = ctWon ? Math.max(1, ct.streak + 1) : Math.min(-1, ct.streak - 1);
     t.streak = ctWon ? Math.min(-1, t.streak - 1) : Math.max(1, t.streak + 1);
+    if (!foldSeason) continue;
     // Mirror into the current-season tallies (reset each season rollover).
     ct.seasonRoundsWon = (ct.seasonRoundsWon ?? 0) + m.ctScore;
     ct.seasonRoundsLost = (ct.seasonRoundsLost ?? 0) + m.tScore;
@@ -491,6 +496,19 @@ export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[]): v
       t.seasonWins = (t.seasonWins ?? 0) + 1;
     }
   }
+}
+
+// Teams grouped by region and sorted best-first by regular-season standing,
+// limited to those that actually played. The input to playoff seeding and the
+// regular-season standings table.
+export function rankedTeamsByRegion(teams: UniverseTeam[]): Map<Region, UniverseTeam[]> {
+  const byRegion = new Map<Region, UniverseTeam[]>();
+  for (const t of teams) {
+    if ((t.seasonWins ?? 0) + (t.seasonLosses ?? 0) === 0) continue;
+    (byRegion.get(t.region) ?? byRegion.set(t.region, []).get(t.region)!).push(t);
+  }
+  for (const list of byRegion.values()) list.sort(compareSeasonStanding);
+  return byRegion;
 }
 
 // Compare two teams for regular-season standing: more season wins first, then

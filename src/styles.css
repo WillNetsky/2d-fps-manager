@@ -957,6 +957,32 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-standings-table .usc-pos { color: var(--good, #5fce7e); }
 .uni-standings-table .usc-neg { color: var(--bad, #e06c6c); }
 
+/* Playoffs */
+.uss-progress.uss-playoffs { color: var(--accent, #e8b34a); font-weight: 700; letter-spacing: .03em; }
+.universe-region-header.is-playoff { color: var(--accent, #e8b34a); }
+.umc-header.is-playoff { color: var(--accent, #e8b34a); font-weight: 700; }
+.uni-playoffs { margin-bottom: 1.25rem; }
+.uni-playoff-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.uni-playoff-card { border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: hidden; }
+.upo-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+  padding: .5rem .75rem; font-weight: 600; background: var(--panel, #1a1f2b);
+  border-bottom: 1px solid var(--border, #2a3142);
+}
+.upo-head .upo-stage { font-size: .72rem; font-weight: 500; color: var(--muted, #8a93a6); }
+.upo-champ { padding: .5rem .75rem; font-weight: 700; color: var(--accent, #e8b34a); }
+.upo-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.upo-table td { padding: .28rem .6rem; border-bottom: 1px solid rgba(255,255,255,.04); }
+.upo-table td.upo-seed { color: var(--muted, #8a93a6); width: 2ch; }
+.upo-table td.upo-rec { text-align: right; }
+.upo-table td.upo-mark { text-align: center; width: 2ch; }
+.upo-table tr.upo-adv { color: var(--good, #5fce7e); }
+.upo-table tr.upo-elim { color: var(--muted, #6a7080); text-decoration: line-through; }
+.upo-round { padding: .4rem .75rem .15rem; font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted, #8a93a6); }
+.upo-match { display: flex; align-items: center; gap: .4rem; padding: .15rem .75rem; font-size: .82rem; }
+.upo-match .upo-vs { color: var(--muted, #6a7080); font-size: .7rem; }
+.upo-match .upo-win { font-weight: 700; color: var(--good, #5fce7e); }
+
 .uni-champions { margin-top: 1.5rem; }
 .uni-champions-head { font-weight: 600; margin-bottom: 0.5rem; }
 .uni-champions-row {

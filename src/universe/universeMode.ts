@@ -9,9 +9,10 @@ import { decayRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
-  recordTeamResults, rollSeasonIfDue, compareSeasonStanding,
+  recordTeamResults, compareSeasonStanding, rankedTeamsByRegion,
   emptyCareer, clutchBucket, type SimState, type MatchupOutcome, type TeamContext,
 } from "./universeSim.ts";
+import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -20,7 +21,7 @@ import {
   saveUniverse, HISTORY_WINDOW,
 } from "./storage.ts";
 import {
-  PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE, SEASON_LENGTH,
+  PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE, SEASON_LENGTH, CHAMPIONS_LOG_MAX,
   type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats,
   type Season, type SeasonChampion, type Universe, type UniverseTeam,
 } from "./types.ts";
@@ -231,6 +232,10 @@ export class UniverseMode {
     } else if (DAY_TABS.includes(this.screen) && this.screen !== "settings"
                && this.universe && this.universe.pendingDay) {
       right.appendChild(btn("Sim X days", "", () => this.simManyDays()));
+      // During the regular season, offer a jump straight to the playoffs.
+      if (this.universe.season?.phase !== "playoffs") {
+        right.appendChild(btn("Sim to end of season", "", () => this.simToEndOfSeason()));
+      }
       const allDone = this.universe.pendingDay.matchups.every(m => m.status === "completed");
       if (allDone) {
         right.appendChild(btn("Continue →", "primary", () => this.continueFromMatchups()));
@@ -518,12 +523,6 @@ export class UniverseMode {
     // only rebuild when careers are entirely absent, and only from what we have.
     if (!u.careers) rebuildCareers(u);
     trimHistory(u);
-    // Older saves may have rolled a day into history without generating the
-    // next day's matchups. The day view now always expects a pendingDay, so
-    // backfill one before rendering.
-    if (!u.pendingDay && u.history.length > 0) {
-      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
-    }
     // Reserve existing team names so freshly crystallized teams don't collide,
     // and retire any legacy "Team X" org names (those now read as pickup labels).
     if (u.teams?.length) {
@@ -532,6 +531,12 @@ export class UniverseMode {
       for (const t of u.teams) if (legacy(t.name)) t.name = generateTeamName(Math.random);
     }
     this.ensureSeason(u); // lazy-init seasons for saves predating them
+    // Older saves may have rolled a day into history without generating the
+    // next day's matchups. The day view now always expects a pendingDay, so
+    // backfill one (phase-aware) before rendering.
+    if (!u.pendingDay && u.history.length > 0) {
+      u.pendingDay = { day: u.day, matchups: this.nextDayMatchups(u) };
+    }
     this.universe = u;
     this.screen = u.pendingDay ? "matchups" : "players";
     this.render();
@@ -593,12 +598,83 @@ export class UniverseMode {
     return (u.season ??= { number: 1, startDay: u.day, length: SEASON_LENGTH });
   }
 
-  // Fold a just-completed day into team + season standings, then roll the season
-  // over if the window closed. Called at each day-roll chokepoint.
-  private foldDayStandings(u: Universe, done: CompletedDay): void {
-    recordTeamResults(u.teams ??= [], done.matchups);
+  // A team's current 5-man roster, for building playoff matchups.
+  private rosterOf(u: Universe): (teamId: string) => string[] {
+    const byId = new Map((u.teams ?? []).map(t => [t.id, t] as const));
+    return (id: string) => byId.get(id)?.playerIds ?? [];
+  }
+
+  // Matchups for the upcoming day (u.day): a playoff round during the playoff
+  // phase, otherwise the regular region-locked matchmaking.
+  private nextDayMatchups(u: Universe): Matchup[] {
     const season = this.ensureSeason(u);
-    rollSeasonIfDue(season, u.teams, u.champions!, done.day);
+    if (season.phase === "playoffs" && u.playoffs) {
+      return playoffRoundMatchups(u.playoffs, this.rosterOf(u));
+    }
+    return generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u));
+  }
+
+  // Fold a completed day into standings and advance the season calendar
+  // (regular -> playoffs -> next season). Call once per day, with u.day still the
+  // day that just finished (before incrementing).
+  private advanceCalendar(u: Universe, done: CompletedDay): void {
+    const season = this.ensureSeason(u);
+    u.teams ??= [];
+    const inPlayoffs = season.phase === "playoffs";
+    // Lifetime team records always update; season standings freeze during playoffs.
+    recordTeamResults(u.teams, done.matchups, /* foldSeason */ !inPlayoffs);
+
+    if (!inPlayoffs) {
+      // Regular season: start the playoffs the day the window closes.
+      if (done.day >= season.startDay + season.length - 1) this.beginPlayoffs(u, done.day);
+      return;
+    }
+    // Playoff day: advance brackets; finish the season once every region is done.
+    if (advancePlayoffs(u.playoffs!, done.matchups)) this.finishPlayoffs(u, done.day);
+  }
+
+  // Seed the playoffs from final regular-season standings. If no region fielded a
+  // ranked team, skip straight to the next regular season.
+  private beginPlayoffs(u: Universe, day: number) {
+    const playoffs = startPlayoffs(u.season!.number, rankedTeamsByRegion(u.teams ?? []));
+    if (playoffs.regions.length === 0) { this.startNextSeason(u, day); return; }
+    u.playoffs = playoffs;
+    u.season!.phase = "playoffs";
+  }
+
+  // Crown each region's bracket winner into the champions log, then roll over.
+  private finishPlayoffs(u: Universe, day: number) {
+    const byId = new Map((u.teams ?? []).map(t => [t.id, t] as const));
+    const champions = (u.champions ??= []);
+    for (const rp of u.playoffs?.regions ?? []) {
+      const champ = rp.championTeamId ? byId.get(rp.championTeamId) : undefined;
+      if (!champ) continue;
+      const leader = rp.entrants[0] ? byId.get(rp.entrants[0].teamId) : undefined; // top seed
+      const entry: SeasonChampion = {
+        season: u.season!.number, region: rp.region,
+        teamId: champ.id, teamName: champ.name,
+        wins: champ.seasonWins ?? 0, losses: champ.seasonLosses ?? 0,
+      };
+      if (leader && leader.id !== champ.id) {
+        entry.regularSeasonLeaderId = leader.id;
+        entry.regularSeasonLeaderName = leader.name;
+      }
+      champions.push(entry);
+    }
+    if (champions.length > CHAMPIONS_LOG_MAX) champions.splice(0, champions.length - CHAMPIONS_LOG_MAX);
+    u.playoffs = null;
+    this.startNextSeason(u, day);
+  }
+
+  // Reset season tallies and start the next regular season tomorrow.
+  private startNextSeason(u: Universe, day: number) {
+    for (const t of u.teams ?? []) {
+      t.seasonWins = 0; t.seasonLosses = 0; t.seasonRoundsWon = 0; t.seasonRoundsLost = 0;
+    }
+    const s = u.season!;
+    s.number += 1;
+    s.startDay = day + 1;
+    s.phase = "regular";
   }
 
   // Simulate `nDays` days. Each day's matches are sharded across a worker pool
@@ -617,7 +693,7 @@ export class UniverseMode {
     try {
       for (let i = 0; i < nDays; i++) {
         if (!u.pendingDay) {
-          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
+          u.pendingDay = { day: u.day, matchups: this.nextDayMatchups(u) };
         }
         const pending = u.pendingDay.matchups.filter(m => m.status !== "completed");
         if (pending.length > 0) {
@@ -631,7 +707,7 @@ export class UniverseMode {
         }
         if (!roll) break;
         const done: CompletedDay = { day: u.pendingDay.day, matchups: u.pendingDay.matchups };
-        this.foldDayStandings(u, done); // team + season standings, once per day
+        this.advanceCalendar(u, done); // standings + season/playoff calendar, once per day
         u.history.push(done);
         completed.push(done);
         trimHistory(u);
@@ -642,7 +718,7 @@ export class UniverseMode {
         await nextFrame(); // let the overlay repaint between days
       }
       if (roll && !u.pendingDay) {
-        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
+        u.pendingDay = { day: u.day, matchups: this.nextDayMatchups(u) };
       }
     } finally {
       pool.terminate();
@@ -666,7 +742,7 @@ export class UniverseMode {
     if (!this.universe.pendingDay) {
       this.universe.pendingDay = {
         day: this.universe.day,
-        matchups: generateMatchups(this.universe.players, this.universe.elos, this.universe.maps?.length ?? 1, this.teamCtx(this.universe)),
+        matchups: this.nextDayMatchups(this.universe),
       };
       this.persist();
     }
@@ -745,7 +821,11 @@ export class UniverseMode {
         : "All regions";
       const section = document.createElement("div");
       section.className = "universe-region-header";
-      section.textContent = `${label} · ${regionMatchups.length} match${regionMatchups.length === 1 ? "" : "es"}`;
+      const poLabel = regionMatchups[0]?.playoff ? playoffRoundLabel(regionMatchups[0], u) : null;
+      section.textContent = poLabel
+        ? `${label} · Playoffs · ${poLabel}`
+        : `${label} · ${regionMatchups.length} match${regionMatchups.length === 1 ? "" : "es"}`;
+      if (poLabel) section.classList.add("is-playoff");
       body.appendChild(section);
 
       const grid = document.createElement("div");
@@ -760,10 +840,14 @@ export class UniverseMode {
       const header = document.createElement("div");
       header.className = "umc-header";
       const mapName = this.universe!.maps?.[m.mapIndex ?? 0]?.name ?? this.universe!.map?.name;
-      // Series show their format (the map differs per game); Bo1 shows the map.
-      header.textContent = isSeries
-        ? `Match ${i + 1} · Bo${m.bestOf}`
-        : (m.status === "completed" && mapName ? `Match ${i + 1} · ${mapName}` : `Match ${i + 1}`);
+      const poLabel = m.playoff ? playoffRoundLabel(m, u) : null;
+      // Playoff games show their round; series show format; Bo1 shows the map.
+      header.textContent = poLabel
+        ? `${poLabel} · Bo${m.bestOf}`
+        : isSeries
+          ? `Match ${i + 1} · Bo${m.bestOf}`
+          : (m.status === "completed" && mapName ? `Match ${i + 1} · ${mapName}` : `Match ${i + 1}`);
+      if (poLabel) header.classList.add("is-playoff");
       card.appendChild(header);
 
       const teams = document.createElement("div");
@@ -957,13 +1041,13 @@ export class UniverseMode {
     if (!this.universe || !this.universe.pendingDay) return;
     const u = this.universe;
     const done: CompletedDay = { day: u.pendingDay!.day, matchups: u.pendingDay!.matchups };
-    this.foldDayStandings(u, done); // team + season standings, once per day
+    this.advanceCalendar(u, done); // standings + season/playoff calendar, once per day
     u.history.push(done);
     trimHistory(u);
     void appendDays(u.id, [done]); // archive the completed day (append-only)
     decayRelationships(u.players); // bonds fade day-to-day without upkeep
     u.day++;
-    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
+    u.pendingDay = { day: u.day, matchups: this.nextDayMatchups(u) };
     this.viewingDay = null;
     this.persist();
     this.screen = "matchups";
@@ -976,10 +1060,28 @@ export class UniverseMode {
     if (input === null) return;
     const n = Math.floor(Number(input));
     if (!Number.isFinite(n) || n <= 0) return;
-    const capped = Math.min(n, 1000); // soft guard — 1000 days is already a lot
-    const u = this.universe;
+    await this.runDaysWithOverlay(Math.min(n, 1000)); // soft guard — 1000 days is a lot
+  }
 
-    const overlay = makeSimOverlay(capped);
+  // Fast-forward through the rest of the current regular season, landing on the
+  // first day of the playoffs (or the next regular season if no region qualified
+  // for a tournament). No-op once the playoffs are already underway.
+  private async simToEndOfSeason() {
+    if (!this.universe) return;
+    const u = this.universe;
+    const s = this.ensureSeason(u);
+    if (s.phase === "playoffs") return;
+    const seasonEnd = s.startDay + s.length - 1;
+    const days = Math.max(1, seasonEnd - u.day + 1);
+    await this.runDaysWithOverlay(days);
+  }
+
+  // Run `count` days behind the full-screen sim overlay, then archive + persist.
+  // Shared by "Sim X days", "Sim to end of season", etc.
+  private async runDaysWithOverlay(count: number) {
+    if (!this.universe || count <= 0) return;
+    const u = this.universe;
+    const overlay = makeSimOverlay(count);
     this.root.appendChild(overlay.el);
     // Let the browser paint the overlay before we hand off to the worker.
     await nextFrame();
@@ -990,7 +1092,7 @@ export class UniverseMode {
     try {
       // Each day's matches run in parallel across the worker pool; days roll
       // sequentially (matchmaking depends on the prior day's elo/chemistry).
-      const completed = await this.runDaySim(u, capped, /* roll */ true, done => overlay.update(done));
+      const completed = await this.runDaySim(u, count, /* roll */ true, done => overlay.update(done));
       // Archive every completed day in one transaction, then save core state and
       // wait for it to land — a multi-day sim is too much work to risk losing if
       // the tab closes right after the overlay disappears.
@@ -1032,16 +1134,26 @@ export class UniverseMode {
     const byId = new Map(u.players.map(p => [p.id, p] as const));
     const season = this.ensureSeason(u);
 
-    // Season banner + day progress.
+    // Season banner + day/phase progress.
     const banner = document.createElement("div");
     banner.className = "uni-season-banner";
-    const seasonEnd = season.startDay + season.length - 1;
-    const dayInSeason = Math.min(season.length, u.day - season.startDay + 1);
-    banner.innerHTML =
-      `<span class="uss-title">Season ${season.number}</span>` +
-      `<span class="uss-progress">Day ${Math.max(1, dayInSeason)} of ${season.length}` +
-      ` · ends day ${seasonEnd}</span>`;
+    const inPlayoffs = season.phase === "playoffs" && !!u.playoffs;
+    if (inPlayoffs) {
+      banner.innerHTML =
+        `<span class="uss-title">Season ${season.number}</span>` +
+        `<span class="uss-progress uss-playoffs">★ Playoffs · Day ${u.playoffs!.day}</span>`;
+    } else {
+      const seasonEnd = season.startDay + season.length - 1;
+      const dayInSeason = Math.min(season.length, u.day - season.startDay + 1);
+      banner.innerHTML =
+        `<span class="uss-title">Season ${season.number}</span>` +
+        `<span class="uss-progress">Day ${Math.max(1, dayInSeason)} of ${season.length}` +
+        ` · ends day ${seasonEnd}</span>`;
+    }
     body.appendChild(banner);
+
+    // Live playoff bracket/Swiss panel.
+    if (inPlayoffs) body.appendChild(this.playoffPanel(u));
 
     // View toggle: per-region season standings vs all-time ladder.
     const toggle = document.createElement("div");
@@ -1141,11 +1253,67 @@ export class UniverseMode {
       row.className = "uni-champions-row";
       const items = (bySeason.get(s) ?? [])
         .map(c => `<span class="ucr-item">${REGION_LABELS[c.region] ?? c.region}: ` +
-          `<b>${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span></span>`)
+          `<b>🏆 ${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span>` +
+          (c.regularSeasonLeaderName
+            ? ` <span class="ucr-rs">RS #1: ${escapeHtml(c.regularSeasonLeaderName)}</span>` : "") +
+          `</span>`)
         .join("");
       row.innerHTML = `<span class="ucr-season">S${s}</span>${items}`;
       wrap.appendChild(row);
     }
+    return wrap;
+  }
+
+  // Live playoff panel: per-region Swiss standings or knockout bracket.
+  private playoffPanel(u: Universe): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "uni-playoffs";
+    const nameOf = (id?: string) => (id ? (u.teams?.find(t => t.id === id)?.name ?? "?") : "TBD");
+
+    const grid = document.createElement("div");
+    grid.className = "uni-playoff-grid";
+    for (const rp of u.playoffs?.regions ?? []) {
+      const card = document.createElement("div");
+      card.className = "uni-playoff-card";
+      const stageLabel = rp.stage === "swiss" ? `Swiss · Round ${rp.swissRound}`
+        : rp.stage === "bracket" ? "Knockout bracket" : "Complete";
+      let html = `<div class="upo-head">${REGION_LABELS[rp.region] ?? rp.region}` +
+        `<span class="upo-stage">${stageLabel}</span></div>`;
+
+      if (rp.stage === "done" && rp.championTeamId) {
+        html += `<div class="upo-champ">🏆 ${escapeHtml(nameOf(rp.championTeamId))}</div>`;
+      }
+
+      if (rp.stage === "swiss" || (rp.skippedSwiss && rp.stage === "done" && rp.bracket.length === 0)) {
+        const rows = [...rp.entrants]
+          .sort((a, b) => (b.wins - b.losses) - (a.wins - a.losses) || a.seed - b.seed)
+          .map(e => {
+            const cls = e.status === "advanced" ? "upo-adv" : e.status === "eliminated" ? "upo-elim" : "";
+            const mark = e.status === "advanced" ? "✓" : e.status === "eliminated" ? "✗" : "";
+            return `<tr class="${cls}"><td class="upo-seed">${e.seed}</td>` +
+              `<td>${escapeHtml(nameOf(e.teamId))}</td><td class="upo-rec">${e.wins}-${e.losses}</td>` +
+              `<td class="upo-mark">${mark}</td></tr>`;
+          }).join("");
+        html += `<table class="upo-table"><tbody>${rows}</tbody></table>`;
+      } else if (rp.bracket.length > 0) {
+        const total = bracketTotalRounds(u, rp.region);
+        const rounds = [...new Set(rp.bracket.map(m => m.round))].sort((a, b) => a - b);
+        for (const r of rounds) {
+          html += `<div class="upo-round">${bracketRoundName(total, r)}</div>`;
+          for (const m of rp.bracket.filter(x => x.round === r).sort((a, b) => a.slot - b.slot)) {
+            const aW = m.winnerTeamId && m.winnerTeamId === m.aTeamId;
+            const bW = m.winnerTeamId && m.winnerTeamId === m.bTeamId;
+            html += `<div class="upo-match">` +
+              `<span class="${aW ? "upo-win" : ""}">${escapeHtml(nameOf(m.aTeamId))}</span>` +
+              `<span class="upo-vs">v</span>` +
+              `<span class="${bW ? "upo-win" : ""}">${escapeHtml(nameOf(m.bTeamId))}</span></div>`;
+          }
+        }
+      }
+      card.innerHTML = html;
+      grid.appendChild(card);
+    }
+    wrap.appendChild(grid);
     return wrap;
   }
 
@@ -1388,6 +1556,37 @@ function teamNameFor(players: Player[], elos: Record<string, number>, orgName?: 
 function orgNameOf(u: Universe, teamId: string | undefined): string | undefined {
   if (!teamId) return undefined;
   return u.teams?.find(t => t.id === teamId)?.name;
+}
+
+// Knockout rounds in a region's current bracket (0 if not in/at bracket stage).
+function bracketTotalRounds(u: Universe, region: Region): number {
+  const rp = u.playoffs?.regions.find(r => r.region === region);
+  if (!rp) return 0;
+  const r1 = rp.bracket.filter(m => m.round === 1).length;
+  return r1 > 0 ? Math.round(Math.log2(r1 * 2)) : 0;
+}
+
+// Name a knockout round by its depth from the final.
+function bracketRoundName(total: number, round: number): string {
+  const depth = total - round;
+  if (depth === 0) return "Final";
+  if (depth === 1) return "Semifinals";
+  if (depth === 2) return "Quarterfinals";
+  if (depth === 3) return "Round of 16";
+  return `Round ${round}`;
+}
+
+// Human label for a playoff matchup's round ("Swiss Round 2", "Semifinal", …).
+function playoffRoundLabel(m: Matchup, u: Universe): string | null {
+  if (!m.playoff || !m.region) return null;
+  if (m.playoff.stage === "swiss") return `Swiss Round ${m.playoff.round}`;
+  const total = bracketTotalRounds(u, m.region as Region);
+  const depth = total - m.playoff.round; // 0 = final
+  if (depth === 0) return "Grand Final";
+  if (depth === 1) return "Semifinal";
+  if (depth === 2) return "Quarterfinal";
+  if (depth === 3) return "Round of 16";
+  return `Bracket Round ${m.playoff.round}`;
 }
 
 // Deep-clone a map so adding the same source twice doesn't share mutable

@@ -44,6 +44,60 @@ export interface Universe {
   // Bounded log of past season winners per region (most recent last). Powers the
   // champions history and, later, playoff seeding. Trimmed to CHAMPIONS_LOG_MAX.
   champions?: SeasonChampion[];
+  // Active end-of-season playoffs, present only while season.phase === "playoffs".
+  // Cleared back to null/undefined when the playoffs finish and the next regular
+  // season begins.
+  playoffs?: PlayoffState | null;
+}
+
+// Which part of the season calendar we're in. Regular season builds standings;
+// playoffs are the dedicated knockout days that crown the champion.
+export type SeasonPhase = "regular" | "playoffs";
+
+// End-of-season playoffs across every region that qualified. Each region runs its
+// own bracket; a playoff "day" plays one round from every region still going.
+export interface PlayoffState {
+  season: number;                           // the season these playoffs decide
+  day: number;                              // 1-based playoff day index
+  regions: RegionPlayoff[];
+}
+
+export type PlayoffStage = "swiss" | "bracket" | "done";
+
+// One region's playoff run: an optional Swiss group stage that whittles entrants
+// down to the bracket cut, then a single-elimination bracket to the title.
+export interface RegionPlayoff {
+  region: Region;
+  stage: PlayoffStage;
+  entrants: PlayoffEntrant[];               // seed order (seed 1 first)
+  swissRound: number;                       // 1-based Swiss round (next to play)
+  swissTarget: number;                      // wins to advance / losses to drop (e.g. 3)
+  bracket: BracketMatch[];                  // single-elim matches (all rounds, filled in)
+  bracketRound: number;                     // 1-based current bracket round
+  championTeamId?: string;
+  skippedSwiss?: boolean;                   // true when too few teams for a Swiss stage
+}
+
+// A team in a region's playoff, with its live Swiss record.
+export interface PlayoffEntrant {
+  teamId: string;
+  seed: number;                             // 1..N from final regular-season standing
+  wins: number;                             // Swiss wins
+  losses: number;                           // Swiss losses
+  status: "active" | "advanced" | "eliminated";
+  oppIds: string[];                         // Swiss opponents faced (rematch avoidance)
+}
+
+// One single-elimination match. Team ids fill in as prior rounds resolve; the
+// winner advances to (round+1, floor(slot/2)).
+export interface BracketMatch {
+  round: number;                            // 1 = first knockout round
+  slot: number;                             // position within the round (0-based)
+  aTeamId?: string;
+  bTeamId?: string;
+  winnerTeamId?: string;
+  // The matchup id (within the playoff day) that decided this match, for replay.
+  matchupId?: string;
 }
 
 // A competitive season: a fixed-length window of days. Regular-season standings
@@ -52,19 +106,33 @@ export interface Universe {
 // reset. The unit Phase 3 playoffs will seed from.
 export interface Season {
   number: number;                           // 1-based season index
-  startDay: number;                         // day the season began (inclusive)
-  length: number;                           // days per season
+  startDay: number;                         // day the regular season began (inclusive)
+  length: number;                           // regular-season days per season
+  phase?: SeasonPhase;                      // "regular" (default) | "playoffs"
 }
 
-// One region's winner for one completed season — the top of that region's
-// regular-season table at rollover.
+// One region's winner for one completed season. With playoffs, the champion is
+// the team that won the region's knockout bracket; the regular-season leader is
+// recorded separately as the #1 seed / regular-season title holder.
 export interface SeasonChampion {
   season: number;
   region: Region;
   teamId: string;
   teamName: string;
-  wins: number;
+  wins: number;                             // record shown next to the title
   losses: number;
+  // Regular-season leader (top seed) when playoffs decided the title and it
+  // differs from the playoff champion. Display only.
+  regularSeasonLeaderId?: string;
+  regularSeasonLeaderName?: string;
+}
+
+// Links a playoff matchup back to its place in the tournament so results advance
+// the right region/stage/round/slot.
+export interface PlayoffMatchTag {
+  stage: PlayoffStage;                      // "swiss" | "bracket"
+  round: number;                            // round within that stage (1-based)
+  slot: number;                             // pairing/match index within the round
 }
 
 // A persistent, named team: a full 5-man friend-stack that has crystallized into
@@ -131,6 +199,9 @@ export interface Matchup {
   // sides aren't tracked orgs. A matchup with both set is a ranked team result.
   ctTeamId?: string;
   tTeamId?: string;
+  // Set when this matchup is a playoff game, so its result maps back to the
+  // tournament. `region` (above) identifies which region's playoff.
+  playoff?: PlayoffMatchTag;
   // Series length: 1 (or absent) = single match, 3 = Bo3, 5 = Bo5. A series is
   // the same two teams playing multiple games. For a series, the matchup's
   // top-level winnerSide / ctScore / tScore hold the SERIES result (games won,
@@ -222,6 +293,14 @@ export interface CareerStats {
 export const SEASON_LENGTH = 30;
 // Cap on the champions log so season history doesn't grow without bound.
 export const CHAMPIONS_LOG_MAX = 120;
+
+// Playoff sizing. A region with >= SWISS_FIELD ranked teams runs a Swiss stage
+// (SWISS_TARGET wins to advance / losses to drop) that cuts to BRACKET_FIELD,
+// then a single-elimination bracket. Smaller fields skip Swiss and seed a
+// power-of-two bracket directly (see startPlayoffs).
+export const SWISS_FIELD = 16;
+export const SWISS_TARGET = 3;
+export const BRACKET_FIELD = 8;
 
 export const STARTING_ELO = 1000;
 // Default players per region on the New Universe screen (the user can dial this
