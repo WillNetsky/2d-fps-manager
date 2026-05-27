@@ -9,7 +9,7 @@ import { decayRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
-  recordTeamResults, compareSeasonStanding, rankedTeamsByRegion,
+  recordTeamResults, compareSeasonStanding, rankedTeamsByRegion, runVeto,
   emptyCareer, clutchBucket, type SimState, type MatchupOutcome, type TeamContext,
 } from "./universeSim.ts";
 import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
@@ -22,8 +22,8 @@ import {
 } from "./storage.ts";
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE, SEASON_LENGTH, CHAMPIONS_LOG_MAX,
-  type BracketMatch, type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats,
-  type RegionPlayoff, type Season, type SeasonChampion, type Universe, type UniverseTeam,
+  type BracketMatch, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
+  type RegionPlayoff, type Season, type SeasonChampion, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -42,6 +42,19 @@ interface UniverseSetup {
   maps: GameMap[];
 }
 
+// Live series play: a Bo3/Bo5 watched one game at a time. The map order comes
+// from the same veto the headless sim uses; morale is snapshotted once up front
+// (the series folds only after the final game, mirroring the headless path).
+interface SeriesPlay {
+  matchupId: string;
+  mapOrder: number[];
+  veto: VetoStep[];
+  moods: Record<string, number>;
+  games: GameResult[];
+  ctWon: number;
+  tWon: number;
+}
+
 // Screens that share the day-view tab bar.
 const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "career", "settings"];
 
@@ -50,6 +63,8 @@ export class UniverseMode {
   private universe: Universe | null = null;
   private screen: Screen = "menu";
   private activeMatchupId: string | null = null;
+  // In-progress live series play (Bo3/Bo5 watched game-by-game). Null for Bo1.
+  private seriesPlay: SeriesPlay | null = null;
   private activePlayerId: string | null = null;
   private activeTeamId: string | null = null;
   // Screen to return to from the team page (set when navigating in).
@@ -889,8 +904,8 @@ export class UniverseMode {
       actions.className = "umc-actions";
       if (m.status === "pending") {
         actions.appendChild(btn("Sim", "", () => this.simMatchup(m.id)));
-        // A series can't be watched as a single match; only Bo1 offers live Play.
-        if (!isSeries) actions.appendChild(btn("Play", "primary", () => this.playMatchup(m.id)));
+        // Bo1 plays as one match; a series is watched game-by-game (renderMatch).
+        actions.appendChild(btn(isSeries ? "Play series" : "Play", "primary", () => this.playMatchup(m.id)));
       } else {
         // Replay reruns deterministically from a stored seed. matchIdx is the
         // index into the day's full matchups list (not the per-region slice).
@@ -1001,6 +1016,8 @@ export class UniverseMode {
     if (!m) { this.screen = "matchups"; this.render(); return; }
     const u = this.universe;
     if (!u.maps || u.maps.length === 0) u.maps = [loadCustomMap() ?? deepCloneMap(defaultMap())];
+    // A series is watched one game at a time.
+    if ((m.bestOf ?? 1) > 1) { await this.renderSeriesGame(body, m); return; }
     if (m.mapIndex === undefined || m.mapIndex >= u.maps.length) {
       m.mapIndex = Math.floor(Math.random() * u.maps.length);
     }
@@ -1033,6 +1050,77 @@ export class UniverseMode {
       },
       onCancel: () => {
         // No result recorded — return to matchup board with this match still pending.
+        this.activeMatchupId = null;
+        this.screen = "matchups";
+        this.render();
+      },
+    });
+  }
+
+  // Watch a Bo3/Bo5 series live, one game at a time. The map order is fixed by
+  // the veto up front; each game is observed with a fresh seed, results accrue
+  // in `seriesPlay`, and the whole series folds once a side clinches a majority
+  // (mirroring the headless path: morale is snapshotted once and folded after).
+  private async renderSeriesGame(body: HTMLElement, m: Matchup) {
+    const u = this.universe!;
+    const byId = new Map(u.players.map(p => [p.id, p] as const));
+    const bestOf = m.bestOf ?? 3;
+
+    // (Re)initialize series state for this matchup.
+    let sp = this.seriesPlay;
+    if (!sp || sp.matchupId !== m.id) {
+      const { order, steps } = runVeto(u.maps!, bestOf, m.ctPlayerIds, m.tPlayerIds, byId);
+      const moods: Record<string, number> = {};
+      for (const id of [...m.ctPlayerIds, ...m.tPlayerIds]) moods[id] = byId.get(id)?.morale ?? 50;
+      sp = this.seriesPlay = { matchupId: m.id, mapOrder: order, veto: steps, moods, games: [], ctWon: 0, tWon: 0 };
+    }
+
+    const need = Math.ceil(bestOf / 2);
+    const gameIdx = sp.games.length;
+    const mapIndex = sp.mapOrder[gameIdx % sp.mapOrder.length];
+    const map = u.maps![mapIndex];
+    const seed = newSeed();
+    const ctPlayers = m.ctPlayerIds.map(id => byId.get(id)!).filter(Boolean);
+    const tPlayers  = m.tPlayerIds.map (id => byId.get(id)!).filter(Boolean);
+    const ctBase = teamNameFor(ctPlayers, u.elos, orgNameOf(u, m.ctTeamId));
+    const tBase  = teamNameFor(tPlayers,  u.elos, orgNameOf(u, m.tTeamId));
+
+    await observeMatch(body, {
+      // Series score rides in the name so the live HUD shows the standing.
+      ctName: `${ctBase} [${sp.ctWon}]`,
+      tName:  `${tBase} [${sp.tWon}]`,
+      ctPlayers, tPlayers, map, seed,
+      moods: sp.moods,
+      onDone: (result) => {
+        sp!.games.push({
+          seed, mapIndex,
+          ctScore: result.ctScore, tScore: result.tScore, winnerSide: result.winnerSide,
+          clutches: result.clutches, playerStats: result.playerStats, moods: sp!.moods,
+        });
+        if (result.winnerSide === "CT") sp!.ctWon++; else sp!.tWon++;
+
+        if (sp!.ctWon >= need || sp!.tWon >= need) {
+          // Series clinched — fold the whole thing through the normal path.
+          const outcome: MatchupOutcome = {
+            id: m.id,
+            winnerSide: sp!.ctWon > sp!.tWon ? "CT" : "T",
+            ctScore: sp!.ctWon, tScore: sp!.tWon,
+            games: sp!.games, veto: sp!.veto,
+          };
+          foldOutcome(this.foldState(u), m, outcome, byId);
+          this.seriesPlay = null;
+          this.activeMatchupId = null;
+          this.persist();
+          this.screen = "matchups";
+          this.render();
+        } else {
+          // Next game of the series.
+          this.render();
+        }
+      },
+      onCancel: () => {
+        // Abandon the series — nothing recorded, matchup stays pending.
+        this.seriesPlay = null;
         this.activeMatchupId = null;
         this.screen = "matchups";
         this.render();

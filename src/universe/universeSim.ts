@@ -87,7 +87,7 @@ function runGame(ctIds: string[], tIds: string[], byId: Map<string, Player>, map
 // the next game, and the final leftover is the decider. Deterministic given the
 // players' map records (ties break by map name), so a series is reproducible.
 // Returns the map indices in game order plus the veto sequence for display.
-function runVeto(
+export function runVeto(
   maps: GameMap[], bestOf: number, ctIds: string[], tIds: string[], byId: Map<string, Player>,
 ): { order: number[]; steps: VetoStep[] } {
   const remaining = maps.map((_, i) => i);
