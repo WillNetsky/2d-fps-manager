@@ -1,6 +1,7 @@
 import type { GameMap, Vec2 } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
 import { defaultMaps } from "../domain/defaultMaps.ts";
+import { RECOVERED_MAPS } from "../domain/recoveredMaps.ts";
 
 type Tool =
   | "wall" | "floor"
@@ -36,6 +37,19 @@ export function seedDefaultMaps(): void {
   for (const m of defaultMaps()) if (!saved[m.name]) saved[m.name] = m;
   writeSavedMaps(saved);
   localStorage.setItem(SEED_FLAG_KEY, "1");
+}
+
+// One-time, merge-only restore of maps that were lost from localStorage (only
+// the seeded default survived). Recovered from a session transcript; see
+// recoveredMaps.ts. Guarded by its own flag so it runs once and never clobbers
+// an existing map of the same name or resurrects one the user later deletes.
+const RECOVERY_FLAG_KEY = "2d-fps-manager-recovered-edited-maps-v1";
+export function seedRecoveredMaps(): void {
+  if (localStorage.getItem(RECOVERY_FLAG_KEY)) return;
+  const saved = loadSavedMaps();
+  for (const m of RECOVERED_MAPS) if (!saved[m.name]) saved[m.name] = m;
+  writeSavedMaps(saved);
+  localStorage.setItem(RECOVERY_FLAG_KEY, "1");
 }
 
 // All saved maps, guaranteeing at least the default if the store is somehow empty.
@@ -159,6 +173,8 @@ export class MapEditor {
     mkBtn("Save As…", "", () => this.saveMap(true));
     mkBtn("Load…", "", () => this.loadMapDialog());
     mkBtn("Copy JSON", "", () => this.copyMapJson());
+    mkBtn("Export all maps", "", () => this.exportAllMaps());
+    mkBtn("Import maps…", "", () => this.importMaps());
     mkBtn("Reset to default", "", () => {
       this.map = makeMap();
       this.currentName = this.map.name || "Default";
@@ -368,6 +384,64 @@ export class MapEditor {
       // Clipboard API can fail (e.g. non-secure context). Fall back to a prompt.
       prompt("Copy map JSON:", json);
     }
+  }
+
+  // Download every saved map as a single JSON file — a portable backup that
+  // survives localStorage wipes / origin changes. Re-importable via importMaps().
+  private exportAllMaps() {
+    const maps = loadSavedMaps();
+    const names = Object.keys(maps);
+    if (names.length === 0) { alert("No saved maps to export."); return; }
+    const json = JSON.stringify(maps, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `2d-fps-maps-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Import maps from a JSON file (either an export from exportAllMaps — a
+  // name->map object — or a single map object). Merges into the saved store;
+  // existing maps of the same name are overwritten only after confirmation.
+  private importMaps() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(await file.text()); }
+      catch { alert("Couldn't parse that file as JSON."); return; }
+
+      // Normalize to a name->GameMap record. Accept a single map or a bundle.
+      const incoming: Record<string, GameMap> = {};
+      const isMap = (o: any): o is GameMap =>
+        o && typeof o === "object" && Array.isArray(o.walls) && Array.isArray(o.ctSpawns) && Array.isArray(o.bombsites) && o.width && o.height;
+      if (isMap(parsed)) {
+        incoming[(parsed as GameMap).name || "Imported"] = parsed as GameMap;
+      } else if (parsed && typeof parsed === "object") {
+        for (const v of Object.values(parsed as Record<string, unknown>)) {
+          if (isMap(v)) incoming[(v as GameMap).name] = v as GameMap;
+        }
+      }
+      const names = Object.keys(incoming);
+      if (names.length === 0) { alert("No valid maps found in that file."); return; }
+
+      const saved = loadSavedMaps();
+      const clashes = names.filter(n => saved[n]);
+      if (clashes.length > 0 &&
+          !confirm(`${clashes.length} map(s) already exist and will be overwritten:\n${clashes.join(", ")}\n\nContinue?`)) {
+        return;
+      }
+      for (const n of names) saved[n] = incoming[n];
+      writeSavedMaps(saved);
+      alert(`Imported ${names.length} map(s): ${names.join(", ")}`);
+    };
+    input.click();
   }
 
   private loadMapDialog() {
