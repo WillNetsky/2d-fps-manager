@@ -22,8 +22,8 @@ import {
 } from "./storage.ts";
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE, SEASON_LENGTH, CHAMPIONS_LOG_MAX,
-  type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats,
-  type Season, type SeasonChampion, type Universe, type UniverseTeam,
+  type BracketMatch, type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats,
+  type RegionPlayoff, type Season, type SeasonChampion, type Universe, type UniverseTeam,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -32,7 +32,7 @@ import {
 // matches stay replayable — not the career totals.
 const HISTORY_DAYS = HISTORY_WINDOW;
 
-type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "career" | "settings" | "player" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "career" | "settings" | "player" | "team" | "replay";
 
 // In-progress configuration for the New Universe setup screen.
 interface UniverseSetup {
@@ -51,6 +51,9 @@ export class UniverseMode {
   private screen: Screen = "menu";
   private activeMatchupId: string | null = null;
   private activePlayerId: string | null = null;
+  private activeTeamId: string | null = null;
+  // Screen to return to from the team page (set when navigating in).
+  private teamReturnScreen: Screen = "teams";
   // Screen to return to from the player page (set when navigating in).
   private playerReturnScreen: Screen = "standings";
   // Replay state: which historical matchup to play back, and where to return.
@@ -106,6 +109,7 @@ export class UniverseMode {
       case "career":    this.renderCareer(body); break;
       case "settings":  this.renderSettings(body); break;
       case "player":    this.renderPlayer(body); break;
+      case "team":      this.renderTeam(body); break;
       case "replay":    this.renderReplay(body); break;
     }
   }
@@ -197,8 +201,16 @@ export class UniverseMode {
 
   private openPlayer(playerId: string) {
     this.activePlayerId = playerId;
+    // Returning from a player opened off a team page lands back on that team.
     this.playerReturnScreen = this.screen === "player" ? this.playerReturnScreen : this.screen;
     this.screen = "player";
+    this.render();
+  }
+
+  private openTeam(teamId: string) {
+    this.activeTeamId = teamId;
+    this.teamReturnScreen = this.screen === "team" ? this.teamReturnScreen : this.screen;
+    this.screen = "team";
     this.render();
   }
 
@@ -246,6 +258,12 @@ export class UniverseMode {
       right.appendChild(btn("← Back", "", () => {
         this.screen = this.playerReturnScreen;
         this.activePlayerId = null;
+        this.render();
+      }));
+    } else if (this.screen === "team" && this.universe) {
+      right.appendChild(btn("← Back", "", () => {
+        this.screen = this.teamReturnScreen;
+        this.activeTeamId = null;
         this.render();
       }));
     }
@@ -852,7 +870,7 @@ export class UniverseMode {
 
       const teams = document.createElement("div");
       teams.className = "umc-teams";
-      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.ctTeamId ? teamNameById.get(m.ctTeamId) : undefined));
+      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.ctTeamId ? teamNameById.get(m.ctTeamId) : undefined, id => this.openTeam(id)));
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
@@ -864,7 +882,7 @@ export class UniverseMode {
         vs.textContent = "vs";
       }
       teams.appendChild(vs);
-      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.tTeamId ? teamNameById.get(m.tTeamId) : undefined));
+      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.tTeamId ? teamNameById.get(m.tTeamId) : undefined, id => this.openTeam(id)));
       card.appendChild(teams);
 
       const actions = document.createElement("div");
@@ -1169,7 +1187,7 @@ export class UniverseMode {
     body.appendChild(toggle);
 
     if (this.teamsView === "alltime") {
-      body.appendChild(teamsTable(teams, byId));
+      body.appendChild(teamsTable(teams, byId, id => this.openTeam(id)));
       return;
     }
 
@@ -1229,6 +1247,8 @@ export class UniverseMode {
         `<td>${w}-${l}</td>` +
         `<td class="${diff > 0 ? "usc-pos" : diff < 0 ? "usc-neg" : ""}">${diff > 0 ? "+" : ""}${diff}</td>` +
         `<td class="${t.streak > 0 ? "usc-pos" : t.streak < 0 ? "usc-neg" : ""}">${strk}</td>`;
+      tr.classList.add("clickable-row");
+      tr.onclick = () => this.openTeam(t.id);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -1253,22 +1273,49 @@ export class UniverseMode {
       row.className = "uni-champions-row";
       const items = (bySeason.get(s) ?? [])
         .map(c => `<span class="ucr-item">${REGION_LABELS[c.region] ?? c.region}: ` +
-          `<b>🏆 ${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span>` +
+          `<b class="clickable" data-tid="${c.teamId}">🏆 ${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span>` +
           (c.regularSeasonLeaderName
-            ? ` <span class="ucr-rs">RS #1: ${escapeHtml(c.regularSeasonLeaderName)}</span>` : "") +
+            ? ` <span class="ucr-rs">RS #1: ${c.regularSeasonLeaderId
+                ? `<span class="clickable" data-tid="${c.regularSeasonLeaderId}">${escapeHtml(c.regularSeasonLeaderName)}</span>`
+                : escapeHtml(c.regularSeasonLeaderName)}</span>` : "") +
           `</span>`)
         .join("");
       row.innerHTML = `<span class="ucr-season">S${s}</span>${items}`;
       wrap.appendChild(row);
     }
+    wrap.addEventListener("click", (e) => {
+      const el = (e.target as HTMLElement).closest("[data-tid]") as HTMLElement | null;
+      if (el?.dataset.tid) this.openTeam(el.dataset.tid);
+    });
     return wrap;
   }
 
-  // Live playoff panel: per-region Swiss standings or knockout bracket.
+  // Live playoff panel: per-region Swiss standings + knockout bracket. Team names
+  // link to the team page (delegated click via data-tid).
   private playoffPanel(u: Universe): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "uni-playoffs";
-    const nameOf = (id?: string) => (id ? (u.teams?.find(t => t.id === id)?.name ?? "?") : "TBD");
+    const teamById = new Map((u.teams ?? []).map(t => [t.id, t] as const));
+    const nameOf = (id?: string) => (id ? (teamById.get(id)?.name ?? "?") : "TBD");
+    const seedOf = (rp: RegionPlayoff, id?: string) => rp.entrants.find(e => e.teamId === id)?.seed;
+
+    // Series score for a bracket match, looked up by its deciding matchup id.
+    const matchupById = new Map<string, Matchup>();
+    for (const d of u.history) for (const m of d.matchups) if (m.playoff) matchupById.set(m.id, m);
+    if (u.pendingDay) for (const m of u.pendingDay.matchups) if (m.playoff) matchupById.set(m.id, m);
+    const scoreOf = (bm: BracketMatch): string | null => {
+      const m = bm.matchupId ? matchupById.get(bm.matchupId) : undefined;
+      if (!m || m.ctScore === undefined || m.tScore === undefined) return null;
+      // Order the score to read winner-first isn't necessary; show a:b by slot side.
+      const aIsCt = m.ctTeamId === bm.aTeamId;
+      return aIsCt ? `${m.ctScore}-${m.tScore}` : `${m.tScore}-${m.ctScore}`;
+    };
+    // A clickable team label (or plain "TBD").
+    const teamSpan = (id?: string, won = false) => {
+      const cls = `upo-team${won ? " upo-win" : ""}${id ? " clickable" : ""}`;
+      const tid = id ? ` data-tid="${id}"` : "";
+      return `<span class="${cls}"${tid}>${escapeHtml(nameOf(id))}</span>`;
+    };
 
     const grid = document.createElement("div");
     grid.className = "uni-playoff-grid";
@@ -1281,38 +1328,53 @@ export class UniverseMode {
         `<span class="upo-stage">${stageLabel}</span></div>`;
 
       if (rp.stage === "done" && rp.championTeamId) {
-        html += `<div class="upo-champ">🏆 ${escapeHtml(nameOf(rp.championTeamId))}</div>`;
+        html += `<div class="upo-champ">🏆 ${teamSpan(rp.championTeamId)}</div>`;
       }
 
-      if (rp.stage === "swiss" || (rp.skippedSwiss && rp.stage === "done" && rp.bracket.length === 0)) {
+      // Swiss table (shown while in Swiss, or for a region that never reached the bracket).
+      if (rp.stage === "swiss" || (rp.entrants.length > 0 && rp.bracket.length === 0)) {
         const rows = [...rp.entrants]
           .sort((a, b) => (b.wins - b.losses) - (a.wins - a.losses) || a.seed - b.seed)
           .map(e => {
             const cls = e.status === "advanced" ? "upo-adv" : e.status === "eliminated" ? "upo-elim" : "";
             const mark = e.status === "advanced" ? "✓" : e.status === "eliminated" ? "✗" : "";
             return `<tr class="${cls}"><td class="upo-seed">${e.seed}</td>` +
-              `<td>${escapeHtml(nameOf(e.teamId))}</td><td class="upo-rec">${e.wins}-${e.losses}</td>` +
+              `<td>${teamSpan(e.teamId)}</td><td class="upo-rec">${e.wins}-${e.losses}</td>` +
               `<td class="upo-mark">${mark}</td></tr>`;
           }).join("");
         html += `<table class="upo-table"><tbody>${rows}</tbody></table>`;
-      } else if (rp.bracket.length > 0) {
+      }
+
+      // Knockout bracket, laid out as one column per round.
+      if (rp.bracket.length > 0) {
         const total = bracketTotalRounds(u, rp.region);
         const rounds = [...new Set(rp.bracket.map(m => m.round))].sort((a, b) => a - b);
+        let cols = `<div class="upo-bracket">`;
         for (const r of rounds) {
-          html += `<div class="upo-round">${bracketRoundName(total, r)}</div>`;
+          cols += `<div class="upo-col"><div class="upo-round">${bracketRoundName(total, r)}</div>`;
           for (const m of rp.bracket.filter(x => x.round === r).sort((a, b) => a.slot - b.slot)) {
-            const aW = m.winnerTeamId && m.winnerTeamId === m.aTeamId;
-            const bW = m.winnerTeamId && m.winnerTeamId === m.bTeamId;
-            html += `<div class="upo-match">` +
-              `<span class="${aW ? "upo-win" : ""}">${escapeHtml(nameOf(m.aTeamId))}</span>` +
-              `<span class="upo-vs">v</span>` +
-              `<span class="${bW ? "upo-win" : ""}">${escapeHtml(nameOf(m.bTeamId))}</span></div>`;
+            const aW = !!m.winnerTeamId && m.winnerTeamId === m.aTeamId;
+            const bW = !!m.winnerTeamId && m.winnerTeamId === m.bTeamId;
+            const score = scoreOf(m);
+            const seedTag = (id?: string) => { const s = seedOf(rp, id); return s ? `<span class="upo-bseed">${s}</span>` : ""; };
+            cols += `<div class="upo-bmatch">` +
+              `<div class="upo-bteam">${seedTag(m.aTeamId)}${teamSpan(m.aTeamId, aW)}${score ? `<span class="upo-bscore">${score.split("-")[0]}</span>` : ""}</div>` +
+              `<div class="upo-bteam">${seedTag(m.bTeamId)}${teamSpan(m.bTeamId, bW)}${score ? `<span class="upo-bscore">${score.split("-")[1]}</span>` : ""}</div>` +
+              `</div>`;
           }
+          cols += `</div>`;
         }
+        cols += `</div>`;
+        html += cols;
       }
       card.innerHTML = html;
       grid.appendChild(card);
     }
+    // Delegated team-link clicks.
+    grid.addEventListener("click", (e) => {
+      const el = (e.target as HTMLElement).closest("[data-tid]") as HTMLElement | null;
+      if (el?.dataset.tid) this.openTeam(el.dataset.tid);
+    });
     wrap.appendChild(grid);
     return wrap;
   }
@@ -1395,7 +1457,18 @@ export class UniverseMode {
       this.render();
       return;
     }
-    body.appendChild(playerPage(p, u, (day, idx, round, gameIdx) => this.openReplay(day, idx, round, gameIdx)));
+    body.appendChild(playerPage(p, u, (day, idx, round, gameIdx) => this.openReplay(day, idx, round, gameIdx), id => this.openTeam(id)));
+  }
+
+  private renderTeam(body: HTMLElement) {
+    if (!this.universe || !this.activeTeamId) { this.screen = this.teamReturnScreen; this.render(); return; }
+    const u = this.universe;
+    const team = (u.teams ?? []).find(t => t.id === this.activeTeamId);
+    if (!team) { this.screen = this.teamReturnScreen; this.render(); return; }
+    body.appendChild(teamPage(team, u, {
+      onPlayer: id => this.openPlayer(id),
+      onReplay: (day, idx, round, gameIdx) => this.openReplay(day, idx, round, gameIdx),
+    }));
   }
 }
 
@@ -1616,6 +1689,7 @@ function rosterColumn(
   matchup: Matchup,
   onPick?: (playerId: string) => void,
   teamName?: string,   // crystallized org name; absent => pickup lobby (Team_Handle)
+  onTeam?: (teamId: string) => void,
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
@@ -1654,10 +1728,17 @@ function rosterColumn(
   // Crystallized orgs show their real name; pickup lobbies get a distinct
   // "Team_Handle" label built from their highest-elo player (the de facto IGL).
   const isOrg = !!teamName;
+  const teamId = side === "CT" ? matchup.ctTeamId : matchup.tTeamId;
   const displayName = isOrg ? escapeHtml(teamName!) : `Team_${escapeHtml(shortName(captain))}`;
+  const clickable = isOrg && teamId && onTeam;
   header.innerHTML =
-    `<div class="umc-team-name${isOrg ? " org" : ""}">${displayName}${stackBadge}</div>` +
+    `<div class="umc-team-name${isOrg ? " org" : ""}${clickable ? " clickable" : ""}">${displayName}${stackBadge}</div>` +
     `<div class="umc-team-elo">Avg ${Math.round(avgElo)}</div>`;
+  if (clickable) {
+    const nameEl = header.querySelector(".umc-team-name") as HTMLElement;
+    nameEl.title = "View team";
+    nameEl.onclick = () => onTeam!(teamId!);
+  }
   col.appendChild(header);
 
   for (const p of players) {
@@ -1821,7 +1902,7 @@ function virtualTable<T>(
 
 // Persistent-team standings table. Sortable like the player tables; the name
 // cell carries the team's region and a roster preview (player handles).
-function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>): HTMLElement {
+function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (teamId: string) => void): HTMLElement {
   const winPct = (t: UniverseTeam) => {
     const g = t.wins + t.losses;
     return g > 0 ? (t.wins / g) * 100 : 0;
@@ -1885,7 +1966,7 @@ function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>): HTMLEleme
     },
   ];
   // Sort by Elo descending initially (index 2).
-  return virtualTable(teams, vcols, 2, -1);
+  return virtualTable(teams, vcols, 2, -1, onPick ? t => onPick(t.id) : undefined);
 }
 
 function playerTable(
@@ -2242,9 +2323,11 @@ const STAT_GROUPS: { label: string; keys: (keyof import("../domain/types.ts").Pl
 function playerPage(
   p: Player, u: Universe,
   onReplay: (day: number, matchIdx: number, startAtRound?: number, gameIdx?: number) => void,
+  onTeam?: (teamId: string) => void,
 ): HTMLElement {
   const root = document.createElement("div");
   root.className = "universe-player-page";
+  const team = u.teams?.find(t => t.playerIds.includes(p.id));
 
   const elo = Math.round(u.elos[p.id] ?? STARTING_ELO);
   // Career totals + clutch breakdown come from the running aggregate (lifetime).
@@ -2264,7 +2347,9 @@ function playerPage(
       <div>
         <div class="upp-name">${escapeHtml(p.name)}</div>
         <div class="upp-handle">"${escapeHtml(p.handle)}"</div>
-        <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}</div>
+        <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}` +
+          (team ? ` · <span class="upp-team-link clickable" data-tid="${team.id}">${escapeHtml(team.name)}</span>` : "") +
+        `</div>
       </div>
     </div>
     <div class="upp-headline-stats">
@@ -2281,6 +2366,10 @@ function playerPage(
       ` : ""}
     </div>
   `;
+  if (team && onTeam) {
+    const link = header.querySelector(".upp-team-link") as HTMLElement | null;
+    if (link) { link.title = "View team"; link.onclick = () => onTeam(team.id); }
+  }
   root.appendChild(header);
 
   // ----- Traits -----
@@ -2561,6 +2650,150 @@ interface GameLogEntry {
   // Full attempt list (won + lost) for opportunity tracking.
   clutchAttempts: { bucket: number; won: boolean; round: number | undefined }[];
   stats: import("./types.ts").PlayerMatchStats | null;
+}
+
+interface TeamPageHandlers {
+  onPlayer: (playerId: string) => void;
+  onReplay: (day: number, matchIdx: number, startAtRound?: number, gameIdx?: number) => void;
+}
+
+// Org page: identity + lifetime stats, roster, trophy cabinet, and recent match
+// history (with replay links), mirroring the player page's shape.
+function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "universe-team-page";
+  const playerById = new Map(u.players.map(p => [p.id, p] as const));
+  const games = team.wins + team.losses;
+  const winPct = games > 0 ? Math.round((team.wins / games) * 100) : 0;
+  const diff = team.roundsWon - team.roundsLost;
+  const streak = team.streak === 0 ? "—" : (team.streak > 0 ? `W${team.streak}` : `L${-team.streak}`);
+  const titles = (u.champions ?? []).filter(c => c.teamId === team.id);
+
+  // ----- Header -----
+  const header = document.createElement("div");
+  header.className = "utm-header";
+  header.innerHTML = `
+    <div class="utm-identity">
+      <div class="utm-crest">${titles.length > 0 ? "🏆" : "★"}</div>
+      <div>
+        <div class="utm-name">${escapeHtml(team.name)}</div>
+        <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · founded day ${team.foundedDay}` +
+          `${titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : ""}</div>
+      </div>
+    </div>
+    <div class="utm-headline-stats">
+      <div class="utm-hl"><div class="utm-hl-label">Elo</div><div class="utm-hl-val">${Math.round(team.elo)}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Record</div><div class="utm-hl-val">${team.wins}-${team.losses}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Win %</div><div class="utm-hl-val">${winPct}%</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Round diff</div><div class="utm-hl-val">${diff >= 0 ? "+" : ""}${diff}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Streak</div><div class="utm-hl-val" style="color:${team.streak > 0 ? "var(--good)" : team.streak < 0 ? "var(--bad)" : "inherit"}">${streak}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">This season</div><div class="utm-hl-val">${team.seasonWins ?? 0}-${team.seasonLosses ?? 0}</div></div>
+    </div>`;
+  root.appendChild(header);
+
+  // ----- Roster -----
+  const rosterSection = document.createElement("div");
+  rosterSection.className = "utm-section";
+  rosterSection.innerHTML = `<h3 class="utm-section-h">Roster</h3>`;
+  const roster = document.createElement("div");
+  roster.className = "utm-roster";
+  for (const id of team.playerIds) {
+    const p = playerById.get(id);
+    const row = document.createElement("div");
+    row.className = "utm-roster-row clickable-row";
+    if (p) {
+      row.innerHTML =
+        `<span class="utm-rr-flag">${flagEmoji(p.country)}</span>` +
+        `<span class="utm-rr-handle">${escapeHtml(p.handle)}</span>` +
+        `<span class="utm-rr-name">${escapeHtml(p.name)}</span>` +
+        `<span class="utm-rr-role">${escapeHtml(p.role)}</span>` +
+        `<span class="utm-rr-elo">${Math.round(u.elos[id] ?? STARTING_ELO)}</span>`;
+      row.onclick = () => h.onPlayer(id);
+    } else {
+      row.innerHTML = `<span class="utm-rr-handle">${escapeHtml(id)}</span><span class="utm-rr-name">(former member)</span>`;
+    }
+    roster.appendChild(row);
+  }
+  rosterSection.appendChild(roster);
+  root.appendChild(rosterSection);
+
+  // ----- Trophy cabinet -----
+  if (titles.length > 0) {
+    const sec = document.createElement("div");
+    sec.className = "utm-section";
+    sec.innerHTML = `<h3 class="utm-section-h">Trophy cabinet</h3>`;
+    const list = document.createElement("div");
+    list.className = "utm-trophies";
+    for (const t of [...titles].sort((a, b) => b.season - a.season)) {
+      const chip = document.createElement("div");
+      chip.className = "utm-trophy";
+      chip.innerHTML = `🏆 <b>Season ${t.season}</b> <span>${REGION_LABELS[t.region] ?? t.region}</span>`;
+      list.appendChild(chip);
+    }
+    sec.appendChild(list);
+    root.appendChild(sec);
+  }
+
+  // ----- Match history (recent window + today) -----
+  const sec = document.createElement("div");
+  sec.className = "utm-section";
+  sec.innerHTML = `<h3 class="utm-section-h">Match history</h3>`;
+  const days: { day: number; matchups: Matchup[] }[] = [...u.history];
+  if (u.pendingDay) days.push({ day: u.pendingDay.day, matchups: u.pendingDay.matchups });
+  const rows: HTMLElement[] = [];
+  for (let d = days.length - 1; d >= 0 && rows.length < 40; d--) {
+    const day = days[d];
+    day.matchups.forEach((m, idx) => {
+      if (m.status !== "completed") return;
+      const onCt = m.ctTeamId === team.id, onT = m.tTeamId === team.id;
+      if (!onCt && !onT) return;
+      const side: "CT" | "T" = onCt ? "CT" : "T";
+      const oppId = onCt ? m.tTeamId : m.ctTeamId;
+      const oppIds = onCt ? m.tPlayerIds : m.ctPlayerIds;
+      const oppName = orgNameOf(u, oppId)
+        ?? teamNameFor(oppIds.map(i => playerById.get(i)).filter((p): p is Player => !!p), u.elos);
+      const own = onCt ? m.ctScore ?? 0 : m.tScore ?? 0;
+      const opp = onCt ? m.tScore ?? 0 : m.ctScore ?? 0;
+      const won = m.winnerSide === side;
+      const poLabel = m.playoff ? playoffRoundLabel(m, u) : null;
+      const isSeries = !!m.games?.length;
+
+      const row = document.createElement("div");
+      row.className = "utm-mh-row";
+      row.innerHTML =
+        `<span class="utm-mh-day">D${day.day}</span>` +
+        `<span class="utm-mh-res ${won ? "win" : "loss"}">${won ? "W" : "L"}</span>` +
+        `<span class="utm-mh-score">${own}-${opp}</span>` +
+        `<span class="utm-mh-vs">vs</span>` +
+        `<span class="utm-mh-opp">${escapeHtml(oppName)}</span>` +
+        (poLabel ? `<span class="utm-mh-tag">${poLabel}</span>` : (isSeries ? `<span class="utm-mh-tag">Bo${m.bestOf}</span>` : ""));
+      const actions = document.createElement("span");
+      actions.className = "utm-mh-actions";
+      if (isSeries && m.games?.length) {
+        m.games.forEach((_g, gi) => {
+          actions.appendChild(btn(`G${gi + 1}`, "tiny", () => h.onReplay(day.day, idx, undefined, gi)));
+        });
+      } else if (m.seed !== undefined) {
+        actions.appendChild(btn("Replay", "tiny", () => h.onReplay(day.day, idx)));
+      }
+      row.appendChild(actions);
+      rows.push(row);
+    });
+  }
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "utm-mh-empty";
+    empty.textContent = "No recent matches in the history window.";
+    sec.appendChild(empty);
+  } else {
+    const list = document.createElement("div");
+    list.className = "utm-mh";
+    rows.forEach(r => list.appendChild(r));
+    sec.appendChild(list);
+  }
+  root.appendChild(sec);
+
+  return root;
 }
 
 // Rebuild every career total from scratch by replaying all known completed
