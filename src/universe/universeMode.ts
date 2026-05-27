@@ -9,8 +9,10 @@ import { decayRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
-  emptyCareer, clutchBucket, type SimState, type MatchupOutcome,
+  recordTeamResults, rollSeasonIfDue, compareSeasonStanding,
+  emptyCareer, clutchBucket, type SimState, type MatchupOutcome, type TeamContext,
 } from "./universeSim.ts";
+import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
 import {
@@ -18,8 +20,9 @@ import {
   saveUniverse, HISTORY_WINDOW,
 } from "./storage.ts";
 import {
-  PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats, type Universe,
+  PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE, SEASON_LENGTH,
+  type CareerStats, type Clutch, type CompletedDay, type Matchup, type PlayerMatchStats,
+  type Season, type SeasonChampion, type Universe, type UniverseTeam,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -28,7 +31,7 @@ import {
 // matches stay replayable — not the career totals.
 const HISTORY_DAYS = HISTORY_WINDOW;
 
-type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "career" | "settings" | "player" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "career" | "settings" | "player" | "replay";
 
 // In-progress configuration for the New Universe setup screen.
 interface UniverseSetup {
@@ -39,7 +42,7 @@ interface UniverseSetup {
 }
 
 // Screens that share the day-view tab bar.
-const DAY_TABS: Screen[] = ["matchups", "standings", "career", "settings"];
+const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "career", "settings"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -57,6 +60,9 @@ export class UniverseMode {
   // Which day the matchups board is showing. null = follow the live (current)
   // day; a number points at a past day held in the in-memory history window.
   private viewingDay: number | null = null;
+  // Teams tab view: per-region regular-season standings, or the flat all-time
+  // ladder across every team.
+  private teamsView: "season" | "alltime" = "season";
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -95,6 +101,7 @@ export class UniverseMode {
       case "matchups":  this.renderMatchups(body); break;
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
+      case "teams":     this.renderTeams(body); break;
       case "career":    this.renderCareer(body); break;
       case "settings":  this.renderSettings(body); break;
       case "player":    this.renderPlayer(body); break;
@@ -133,8 +140,8 @@ export class UniverseMode {
     const tPlayers  = m.tPlayerIds.map (id => u.players.find(p => p.id === id)!).filter(Boolean);
     const back = () => this.exitReplay();
     await observeMatch(body, {
-      ctName: teamNameFor(ctPlayers, u.elos),
-      tName:  teamNameFor(tPlayers,  u.elos),
+      ctName: teamNameFor(ctPlayers, u.elos, orgNameOf(u, m.ctTeamId)),
+      tName:  teamNameFor(tPlayers,  u.elos, orgNameOf(u, m.tTeamId)),
       ctPlayers, tPlayers,
       map,
       seed,
@@ -168,6 +175,7 @@ export class UniverseMode {
     const tabs: { key: Screen; label: string; show: boolean }[] = [
       { key: "matchups",  label: "Matchups",       show: hasPending },
       { key: "standings", label: "Player ratings", show: true },
+      { key: "teams",     label: "Teams",          show: true },
       { key: "career",    label: "Career stats",   show: true },
       { key: "settings",  label: "Settings",       show: true },
     ];
@@ -261,9 +269,10 @@ export class UniverseMode {
     const head = document.createElement("div");
     head.className = "uni-title-head";
     head.innerHTML =
-      `<div class="uni-overline">2D&nbsp;FPS&nbsp;Manager</div>` +
-      `<h1 class="uni-wordmark"><span class="uw-a">Universe</span><span class="uw-b">Mode</span></h1>` +
+      `<div class="uni-overline">Tactical Management Simulator</div>` +
+      `<h1 class="uni-wordmark"><span class="uw-a">2D&nbsp;FPS</span><span class="uw-b">Manager</span></h1>` +
       `<div class="uni-rule"></div>` +
+      `<div class="uni-mode-tag">Universe&nbsp;Mode</div>` +
       `<p class="uni-tagline">Spin up a living scene — hundreds of players across six regions, ` +
       `forming teams, building rivalries, and climbing the rankings one match day at a time.</p>`;
     inner.appendChild(head);
@@ -350,6 +359,7 @@ export class UniverseMode {
     const maps = s.maps.length > 0 ? s.maps : [deepCloneMap(defaultMap())];
 
     setSeed(Date.now());
+    resetTeamNames();
     const players: Player[] = [];
     for (const region of regions) {
       for (let i = 0; i < perRegion; i++) players.push(makePlayer(region));
@@ -367,6 +377,9 @@ export class UniverseMode {
       pendingDay: null,
       careers: {},
       maps: maps.map(deepCloneMap),
+      teams: [],
+      season: { number: 1, startDay: 1, length: SEASON_LENGTH },
+      champions: [],
     };
     this.setup = null;
     this.persist();
@@ -509,8 +522,16 @@ export class UniverseMode {
     // next day's matchups. The day view now always expects a pendingDay, so
     // backfill one before rendering.
     if (!u.pendingDay && u.history.length > 0) {
-      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+      u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
     }
+    // Reserve existing team names so freshly crystallized teams don't collide,
+    // and retire any legacy "Team X" org names (those now read as pickup labels).
+    if (u.teams?.length) {
+      const legacy = (n: string) => /^Team /.test(n);
+      reserveTeamNames(u.teams.filter(t => !legacy(t.name)).map(t => t.name));
+      for (const t of u.teams) if (legacy(t.name)) t.name = generateTeamName(Math.random);
+    }
+    this.ensureSeason(u); // lazy-init seasons for saves predating them
     this.universe = u;
     this.screen = u.pendingDay ? "matchups" : "players";
     this.render();
@@ -558,6 +579,28 @@ export class UniverseMode {
     };
   }
 
+  // Persistent-team context for matchup generation — ensures the registry exists
+  // and is keyed to the day the matchups belong to (for foundedDay/lastPlayed).
+  private teamCtx(u: Universe): TeamContext {
+    return { teams: (u.teams ??= []), day: u.day };
+  }
+
+  // Ensure season state exists (lazy init for new + pre-season saves). A fresh
+  // season starts on the current day so loaded universes don't crown a champion
+  // before any season games have been played.
+  private ensureSeason(u: Universe): Season {
+    u.champions ??= [];
+    return (u.season ??= { number: 1, startDay: u.day, length: SEASON_LENGTH });
+  }
+
+  // Fold a just-completed day into team + season standings, then roll the season
+  // over if the window closed. Called at each day-roll chokepoint.
+  private foldDayStandings(u: Universe, done: CompletedDay): void {
+    recordTeamResults(u.teams ??= [], done.matchups);
+    const season = this.ensureSeason(u);
+    rollSeasonIfDue(season, u.teams, u.champions!, done.day);
+  }
+
   // Simulate `nDays` days. Each day's matches are sharded across a worker pool
   // and run in parallel (every player plays one match per day, so they're
   // independent), then folded sequentially here. With roll=false, only the
@@ -574,7 +617,7 @@ export class UniverseMode {
     try {
       for (let i = 0; i < nDays; i++) {
         if (!u.pendingDay) {
-          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+          u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
         }
         const pending = u.pendingDay.matchups.filter(m => m.status !== "completed");
         if (pending.length > 0) {
@@ -588,6 +631,7 @@ export class UniverseMode {
         }
         if (!roll) break;
         const done: CompletedDay = { day: u.pendingDay.day, matchups: u.pendingDay.matchups };
+        this.foldDayStandings(u, done); // team + season standings, once per day
         u.history.push(done);
         completed.push(done);
         trimHistory(u);
@@ -598,7 +642,7 @@ export class UniverseMode {
         await nextFrame(); // let the overlay repaint between days
       }
       if (roll && !u.pendingDay) {
-        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+        u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
       }
     } finally {
       pool.terminate();
@@ -622,7 +666,7 @@ export class UniverseMode {
     if (!this.universe.pendingDay) {
       this.universe.pendingDay = {
         day: this.universe.day,
-        matchups: generateMatchups(this.universe.players, this.universe.elos, this.universe.maps?.length ?? 1),
+        matchups: generateMatchups(this.universe.players, this.universe.elos, this.universe.maps?.length ?? 1, this.teamCtx(this.universe)),
       };
       this.persist();
     }
@@ -678,6 +722,7 @@ export class UniverseMode {
 
     const playerById = new Map(u.players.map(p => [p.id, p] as const));
     const elos = u.elos;
+    const teamNameById = new Map((u.teams ?? []).map(t => [t.id, t.name] as const));
 
     // Top performers across all completed matches today. Updates as more
     // matches finish, so even a single sim'd match shows the top of the day.
@@ -723,7 +768,7 @@ export class UniverseMode {
 
       const teams = document.createElement("div");
       teams.className = "umc-teams";
-      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id)));
+      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.ctTeamId ? teamNameById.get(m.ctTeamId) : undefined));
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
@@ -735,7 +780,7 @@ export class UniverseMode {
         vs.textContent = "vs";
       }
       teams.appendChild(vs);
-      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id)));
+      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.tTeamId ? teamNameById.get(m.tTeamId) : undefined));
       card.appendChild(teams);
 
       const actions = document.createElement("div");
@@ -866,8 +911,8 @@ export class UniverseMode {
     for (const p of [...ctPlayers, ...tPlayers]) moods[p.id] = p.morale;
 
     await observeMatch(body, {
-      ctName: teamNameFor(ctPlayers, u.elos),
-      tName:  teamNameFor(tPlayers,  u.elos),
+      ctName: teamNameFor(ctPlayers, u.elos, orgNameOf(u, m.ctTeamId)),
+      tName:  teamNameFor(tPlayers,  u.elos, orgNameOf(u, m.tTeamId)),
       ctPlayers, tPlayers, map,
       seed: m.seed,
       onDone: (result) => {
@@ -912,12 +957,13 @@ export class UniverseMode {
     if (!this.universe || !this.universe.pendingDay) return;
     const u = this.universe;
     const done: CompletedDay = { day: u.pendingDay!.day, matchups: u.pendingDay!.matchups };
+    this.foldDayStandings(u, done); // team + season standings, once per day
     u.history.push(done);
     trimHistory(u);
     void appendDays(u.id, [done]); // archive the completed day (append-only)
     decayRelationships(u.players); // bonds fade day-to-day without upkeep
     u.day++;
-    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1) };
+    u.pendingDay = { day: u.day, matchups: generateMatchups(u.players, u.elos, u.maps?.length ?? 1, this.teamCtx(u)) };
     this.viewingDay = null;
     this.persist();
     this.screen = "matchups";
@@ -966,6 +1012,141 @@ export class UniverseMode {
     const u = this.universe;
     const table = playerTable(u.players, u.elos, /* showElo */ true, id => this.openPlayer(id));
     body.appendChild(table);
+  }
+
+  // ---- Teams standings screen ----
+
+  private renderTeams(body: HTMLElement) {
+    if (!this.universe) return;
+    const u = this.universe;
+    const teams = u.teams ?? [];
+    if (teams.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "universe-empty-note";
+      empty.textContent =
+        "No teams yet. A team forms when five friends queue together as a full stack — " +
+        "play out more days and tight-knit groups will crystallize into tracked orgs.";
+      body.appendChild(empty);
+      return;
+    }
+    const byId = new Map(u.players.map(p => [p.id, p] as const));
+    const season = this.ensureSeason(u);
+
+    // Season banner + day progress.
+    const banner = document.createElement("div");
+    banner.className = "uni-season-banner";
+    const seasonEnd = season.startDay + season.length - 1;
+    const dayInSeason = Math.min(season.length, u.day - season.startDay + 1);
+    banner.innerHTML =
+      `<span class="uss-title">Season ${season.number}</span>` +
+      `<span class="uss-progress">Day ${Math.max(1, dayInSeason)} of ${season.length}` +
+      ` · ends day ${seasonEnd}</span>`;
+    body.appendChild(banner);
+
+    // View toggle: per-region season standings vs all-time ladder.
+    const toggle = document.createElement("div");
+    toggle.className = "uni-seg-toggle";
+    const mk = (key: "season" | "alltime", label: string) => {
+      const b = document.createElement("button");
+      b.className = "uni-seg" + (this.teamsView === key ? " active" : "");
+      b.textContent = label;
+      b.onclick = () => { if (this.teamsView !== key) { this.teamsView = key; this.render(); } };
+      return b;
+    };
+    toggle.append(mk("season", "Season standings"), mk("alltime", "All-time ladder"));
+    body.appendChild(toggle);
+
+    if (this.teamsView === "alltime") {
+      body.appendChild(teamsTable(teams, byId));
+      return;
+    }
+
+    // Per-region regular-season standings.
+    const grid = document.createElement("div");
+    grid.className = "uni-standings-grid";
+    let anyPlayed = false;
+    for (const region of REGION_ORDER) {
+      const inRegion = teams
+        .filter(t => t.region === region && (t.seasonWins ?? 0) + (t.seasonLosses ?? 0) > 0)
+        .sort(compareSeasonStanding);
+      if (inRegion.length === 0) continue;
+      anyPlayed = true;
+      grid.appendChild(this.regionStandingsCard(region, inRegion, byId));
+    }
+    if (!anyPlayed) {
+      const note = document.createElement("div");
+      note.className = "universe-empty-note";
+      note.textContent = "No season games played yet — sim a day to populate the table.";
+      body.appendChild(note);
+    } else {
+      body.appendChild(grid);
+    }
+
+    // Champions history (most recent first).
+    const champs = u.champions ?? [];
+    if (champs.length > 0) body.appendChild(this.championsSection(champs));
+  }
+
+  // One region's regular-season standings card: ranked rows with W-L, round diff,
+  // and streak. The top row is highlighted as the current leader.
+  private regionStandingsCard(region: Region, teams: UniverseTeam[], byId: Map<string, Player>): HTMLElement {
+    const card = document.createElement("div");
+    card.className = "uni-standings-card";
+    const head = document.createElement("div");
+    head.className = "uni-standings-head";
+    head.textContent = REGION_LABELS[region] ?? region;
+    card.appendChild(head);
+
+    const table = document.createElement("table");
+    table.className = "uni-standings-table";
+    table.innerHTML =
+      `<thead><tr><th class="usc-rank">#</th><th class="usc-team">Team</th>` +
+      `<th>W-L</th><th>Rnd ±</th><th>Strk</th></tr></thead>`;
+    const tbody = document.createElement("tbody");
+    teams.forEach((t, i) => {
+      const tr = document.createElement("tr");
+      if (i === 0) tr.className = "usc-leader";
+      const w = t.seasonWins ?? 0, l = t.seasonLosses ?? 0;
+      const diff = (t.seasonRoundsWon ?? 0) - (t.seasonRoundsLost ?? 0);
+      const roster = t.playerIds.map(id => byId.get(id)?.handle ?? "?").join(", ");
+      const strk = t.streak === 0 ? "—" : (t.streak > 0 ? `W${t.streak}` : `L${-t.streak}`);
+      tr.innerHTML =
+        `<td class="usc-rank">${i + 1}</td>` +
+        `<td class="usc-team"><span class="pt-handle">${escapeHtml(t.name)}</span>` +
+        `<span class="pt-realname">${escapeHtml(roster)}</span></td>` +
+        `<td>${w}-${l}</td>` +
+        `<td class="${diff > 0 ? "usc-pos" : diff < 0 ? "usc-neg" : ""}">${diff > 0 ? "+" : ""}${diff}</td>` +
+        `<td class="${t.streak > 0 ? "usc-pos" : t.streak < 0 ? "usc-neg" : ""}">${strk}</td>`;
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    card.appendChild(table);
+    return card;
+  }
+
+  // Past season winners, grouped by season (most recent first).
+  private championsSection(champs: SeasonChampion[]): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "uni-champions";
+    const h = document.createElement("div");
+    h.className = "uni-champions-head";
+    h.textContent = "Champions";
+    wrap.appendChild(h);
+
+    const bySeason = new Map<number, SeasonChampion[]>();
+    for (const c of champs) (bySeason.get(c.season) ?? bySeason.set(c.season, []).get(c.season)!).push(c);
+    const seasons = [...bySeason.keys()].sort((a, b) => b - a);
+    for (const s of seasons) {
+      const row = document.createElement("div");
+      row.className = "uni-champions-row";
+      const items = (bySeason.get(s) ?? [])
+        .map(c => `<span class="ucr-item">${REGION_LABELS[c.region] ?? c.region}: ` +
+          `<b>${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span></span>`)
+        .join("");
+      row.innerHTML = `<span class="ucr-season">S${s}</span>${items}`;
+      wrap.appendChild(row);
+    }
+    return wrap;
   }
 
   // ---- Career stats screen ----
@@ -1187,10 +1368,12 @@ function mapPickerRow(onAdd: (m: GameMap) => void): HTMLElement {
   return addRow;
 }
 
-// Faceit-style team name: the highest-elo player in the lineup names the
-// team. Stable tiebreak by id so the name doesn't drift if elos happen to
-// tie. Mirrors rosterColumn's captain-pick logic used on the matchups grid.
-function teamNameFor(players: Player[], elos: Record<string, number>): string {
+// Team display name. A crystallized org uses its real name (`orgName`); a pickup
+// lobby gets a "Team_Handle" label built from its highest-elo player (the de
+// facto IGL), distinct from org names. Stable tiebreak by id so the pug label
+// doesn't drift if elos happen to tie. Mirrors rosterColumn's captain-pick.
+function teamNameFor(players: Player[], elos: Record<string, number>, orgName?: string): string {
+  if (orgName) return orgName;
   if (players.length === 0) return "Team";
   const captain = [...players].sort((a, b) => {
     const da = elos[a.id] ?? STARTING_ELO;
@@ -1198,7 +1381,13 @@ function teamNameFor(players: Player[], elos: Record<string, number>): string {
     if (db !== da) return db - da;
     return a.id.localeCompare(b.id);
   })[0];
-  return `Team ${shortName(captain)}`;
+  return `Team_${shortName(captain)}`;
+}
+
+// Resolve a matchup side's crystallized-org name (if any) from the universe.
+function orgNameOf(u: Universe, teamId: string | undefined): string | undefined {
+  if (!teamId) return undefined;
+  return u.teams?.find(t => t.id === teamId)?.name;
 }
 
 // Deep-clone a map so adding the same source twice doesn't share mutable
@@ -1227,6 +1416,7 @@ function rosterColumn(
   elos: Record<string, number>,
   matchup: Matchup,
   onPick?: (playerId: string) => void,
+  teamName?: string,   // crystallized org name; absent => pickup lobby (Team_Handle)
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
@@ -1262,8 +1452,12 @@ function rosterColumn(
   const stackBadge = stackSet.size >= 2
     ? `<span class="umc-stack-badge" title="${stackSet.size} players queued together">🔗${stackSet.size}</span>`
     : "";
+  // Crystallized orgs show their real name; pickup lobbies get a distinct
+  // "Team_Handle" label built from their highest-elo player (the de facto IGL).
+  const isOrg = !!teamName;
+  const displayName = isOrg ? escapeHtml(teamName!) : `Team_${escapeHtml(shortName(captain))}`;
   header.innerHTML =
-    `<div class="umc-team-name">Team ${escapeHtml(shortName(captain))}${stackBadge}</div>` +
+    `<div class="umc-team-name${isOrg ? " org" : ""}">${displayName}${stackBadge}</div>` +
     `<div class="umc-team-elo">Avg ${Math.round(avgElo)}</div>`;
   col.appendChild(header);
 
@@ -1424,6 +1618,75 @@ function virtualTable<T>(
   // so the initial visible range fills the real viewport height.
   requestAnimationFrame(renderWindow);
   return wrap;
+}
+
+// Persistent-team standings table. Sortable like the player tables; the name
+// cell carries the team's region and a roster preview (player handles).
+function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>): HTMLElement {
+  const winPct = (t: UniverseTeam) => {
+    const g = t.wins + t.losses;
+    return g > 0 ? (t.wins / g) * 100 : 0;
+  };
+  const streakLabel = (t: UniverseTeam) =>
+    t.streak === 0 ? "—" : (t.streak > 0 ? `W${t.streak}` : `L${-t.streak}`);
+
+  const vcols: VCol<UniverseTeam>[] = [
+    {
+      label: "Team", thClass: "pt-col-name",
+      cmp: (a, b) => a.name.localeCompare(b.name),
+      fill: (t, td) => {
+        const roster = t.playerIds.map(id => byId.get(id)?.handle ?? "?").join(", ");
+        td.innerHTML =
+          `<span class="pt-handle">${escapeHtml(t.name)}</span>` +
+          `<span class="pt-realname">${escapeHtml(roster)}</span>`;
+        td.className = "name-cell";
+      },
+    },
+    {
+      label: "Region",
+      cmp: (a, b) => a.region.localeCompare(b.region),
+      fill: (t, td) => { td.textContent = REGION_LABELS[t.region] ?? t.region; },
+    },
+    {
+      label: "Elo",
+      cmp: (a, b) => a.elo - b.elo,
+      fill: (t, td) => { td.textContent = String(Math.round(t.elo)); },
+    },
+    {
+      label: "W-L",
+      cmp: (a, b) => (a.wins - a.losses) - (b.wins - b.losses),
+      fill: (t, td) => { td.textContent = `${t.wins}-${t.losses}`; },
+    },
+    {
+      label: "Win%",
+      cmp: (a, b) => winPct(a) - winPct(b),
+      fill: (t, td) => {
+        const g = t.wins + t.losses;
+        td.textContent = g > 0 ? `${winPct(t).toFixed(0)}%` : "—";
+        if (g > 0) td.style.color = ratingColor(winPct(t));
+      },
+    },
+    {
+      label: "Rounds",
+      cmp: (a, b) => (a.roundsWon - a.roundsLost) - (b.roundsWon - b.roundsLost),
+      fill: (t, td) => { td.textContent = `${t.roundsWon}-${t.roundsLost}`; },
+    },
+    {
+      label: "Streak",
+      cmp: (a, b) => a.streak - b.streak,
+      fill: (t, td) => {
+        td.textContent = streakLabel(t);
+        if (t.streak !== 0) td.style.color = t.streak > 0 ? "var(--good)" : "var(--bad)";
+      },
+    },
+    {
+      label: "Founded",
+      cmp: (a, b) => a.foundedDay - b.foundedDay,
+      fill: (t, td) => { td.textContent = `Day ${t.foundedDay}`; },
+    },
+  ];
+  // Sort by Elo descending initially (index 2).
+  return virtualTable(teams, vcols, 2, -1);
 }
 
 function playerTable(
@@ -1615,8 +1878,8 @@ function showMatchStatsModal(m: Matchup, u: Universe) {
   // Series map veto, in order (ban/pick/decider per side).
   if (m.veto?.length) {
     const playersOf = (ids: string[]) => ids.map(id => u.players.find(p => p.id === id)).filter((p): p is Player => !!p);
-    const ctName = teamNameFor(playersOf(m.ctPlayerIds), u.elos);
-    const tName = teamNameFor(playersOf(m.tPlayerIds), u.elos);
+    const ctName = teamNameFor(playersOf(m.ctPlayerIds), u.elos, orgNameOf(u, m.ctTeamId));
+    const tName = teamNameFor(playersOf(m.tPlayerIds), u.elos, orgNameOf(u, m.tTeamId));
     const veto = document.createElement("div");
     veto.className = "ustats-veto";
     veto.innerHTML = m.veto.map(s => {
@@ -2005,7 +2268,8 @@ function playerPage(
         if (db !== da) return db - da;
         return a.id.localeCompare(b.id);
       })[0];
-      const oppLabel = oppCaptain ? `Team ${shortName(oppCaptain)}` : "—";
+      const oppLabel = orgNameOf(u, g.opponentTeamId)
+        ?? (oppCaptain ? `Team_${shortName(oppCaptain)}` : "—");
       const sideClass = g.side === "CT" ? "ct" : "t";
       const resultClass = g.won ? "good" : "bad";
       const s = g.stats;
@@ -2090,6 +2354,7 @@ interface GameLogEntry {
   oppScore: number;
   won: boolean;
   opponentIds: string[];
+  opponentTeamId?: string;   // set when the opponent was a crystallized org
   // Only successful clutches end up here — used for the 1vX/round chips.
   // `bucket` is the number of enemies faced (matches the career table); kills
   // is how many the clutcher actually got.
@@ -2192,6 +2457,7 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
       if (!onCt && !onT) return;
       const side: "CT" | "T" = onCt ? "CT" : "T";
       const opponentIds = onCt ? m.tPlayerIds : m.ctPlayerIds;
+      const opponentTeamId = onCt ? m.tTeamId : m.ctTeamId;
       const clutchWonOf = (c: { won?: boolean }) => c.won ?? true; // legacy = won
 
       // Emit one log row per game. A Bo1 contributes a single row; a series
@@ -2207,7 +2473,7 @@ function buildGameLog(playerId: string, u: Universe): GameLogEntry[] {
           ownScore: onCt ? ctScore : tScore,
           oppScore: onCt ? tScore : ctScore,
           won: (onCt && winnerSide === "CT") || (onT && winnerSide === "T"),
-          opponentIds,
+          opponentIds, opponentTeamId,
           clutches: mine.filter(clutchWonOf).map(c => ({ bucket: clutchBucket(c), kills: c.kills, round: c.round })),
           clutchAttempts: mine.map(c => ({ bucket: clutchBucket(c), won: clutchWonOf(c), round: c.round })),
           stats,

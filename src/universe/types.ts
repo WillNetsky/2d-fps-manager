@@ -32,6 +32,67 @@ export interface Universe {
   // Legacy single-map field — kept for back-compat with universes saved
   // before the rotation pool existed. On load it's migrated into maps[0].
   map?: GameMap;
+  // Persistent named teams. A team crystallizes when a full 5-man friend-stack
+  // forms (see crystallizeTeams) and then carries its identity, roster, elo, and
+  // win/loss record across days — the foundation for standings and tournaments.
+  // Absent on saves predating persistent teams; created lazily on the next sim.
+  teams?: UniverseTeam[];
+  // Current competitive season. Each season is a fixed window of days; team
+  // season records accrue within it and reset at rollover. Absent on saves
+  // predating seasons; initialized lazily (season 1 starting on the current day).
+  season?: Season;
+  // Bounded log of past season winners per region (most recent last). Powers the
+  // champions history and, later, playoff seeding. Trimmed to CHAMPIONS_LOG_MAX.
+  champions?: SeasonChampion[];
+}
+
+// A competitive season: a fixed-length window of days. Regular-season standings
+// are the teams' season records (see UniverseTeam.season*); at day
+// startDay+length the season rolls over — champions are recorded and counters
+// reset. The unit Phase 3 playoffs will seed from.
+export interface Season {
+  number: number;                           // 1-based season index
+  startDay: number;                         // day the season began (inclusive)
+  length: number;                           // days per season
+}
+
+// One region's winner for one completed season — the top of that region's
+// regular-season table at rollover.
+export interface SeasonChampion {
+  season: number;
+  region: Region;
+  teamId: string;
+  teamName: string;
+  wins: number;
+  losses: number;
+}
+
+// A persistent, named team: a full 5-man friend-stack that has crystallized into
+// a tracked org. Identity is stable across days via `id`; `rosterKey` (sorted
+// player ids) is how a re-formed identical stack is matched back to its team.
+export interface UniverseTeam {
+  id: string;
+  name: string;
+  region: Region;
+  playerIds: string[];                      // current 5-man roster
+  rosterKey: string;                        // sorted playerIds joined — identity match
+  elo: number;                              // team elo (avg of roster at last update)
+  foundedDay: number;
+  lastPlayedDay: number;
+  // Lifetime team record (matches/series won, not individual rounds).
+  wins: number;
+  losses: number;
+  roundsWon: number;
+  roundsLost: number;
+  // Current win/loss streak: positive = consecutive wins, negative = losses.
+  streak: number;
+  // Current-season record — same tallies as above but reset at each season
+  // rollover. Drives the regular-season standings table. Absent on teams from
+  // saves predating seasons; treated as 0 until they next play.
+  seasonWins?: number;
+  seasonLosses?: number;
+  seasonRoundsWon?: number;
+  seasonRoundsLost?: number;
 }
 
 export interface PendingDay {
@@ -65,6 +126,11 @@ export interface Matchup {
   // Friend-stacks (player-id groups of 2+ that queued together) present in this
   // lobby — one per team at most. Used to mark grouped players on the board.
   parties?: string[][];
+  // Persistent-team ids for each side, set when that side fielded a full
+  // crystallized 5-man (see UniverseTeam). Absent for pickup/scrim lobbies whose
+  // sides aren't tracked orgs. A matchup with both set is a ranked team result.
+  ctTeamId?: string;
+  tTeamId?: string;
   // Series length: 1 (or absent) = single match, 3 = Bo3, 5 = Bo5. A series is
   // the same two teams playing multiple games. For a series, the matchup's
   // top-level winnerSide / ctScore / tScore hold the SERIES result (games won,
@@ -150,6 +216,12 @@ export interface CareerStats {
   clutchWins: number[];                     // length 5
   clutchAttempts: number[];                 // length 5
 }
+
+// Days per competitive season. A season is the regular-season window whose final
+// standings (later) seed playoffs. 30 days ≈ a meaty but finite campaign.
+export const SEASON_LENGTH = 30;
+// Cap on the champions log so season history doesn't grow without bound.
+export const CHAMPIONS_LOG_MAX = 120;
 
 export const STARTING_ELO = 1000;
 // Default players per region on the New Universe screen (the user can dial this

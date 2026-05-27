@@ -850,7 +850,22 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   height: 4px; width: 88px; margin-top: 20px; background: var(--accent);
   box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-.uni-tagline { margin: 16px 0 0; max-width: 46ch; font-size: 14px; line-height: 1.6; color: var(--muted); }
+/* Universe Mode demoted to a broadcast "now playing" mode chip with a live dot. */
+.uni-mode-tag {
+  display: inline-flex; align-items: center; gap: 9px; margin-top: 20px;
+  padding: 6px 14px 6px 12px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  font-family: var(--font-display); text-transform: uppercase;
+  font-size: 12.5px; letter-spacing: .22em; color: var(--text);
+}
+.uni-mode-tag::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 85%, transparent);
+  animation: uni-mode-pulse 2.4s ease-in-out infinite;
+}
+@keyframes uni-mode-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.uni-tagline { margin: 18px 0 0; max-width: 46ch; font-size: 14px; line-height: 1.6; color: var(--muted); }
 .uni-title-actions .universe-btn.big {
   font-family: var(--font-display); font-size: 16px; letter-spacing: .07em; text-transform: uppercase;
   padding: 13px 28px;
@@ -867,7 +882,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-title-load .ul-name { font-family: var(--font-display); font-size: 14px; letter-spacing: .02em; }
 .uni-title-load .ul-meta { font-family: var(--font-mono); }
 @media (prefers-reduced-motion: reduce) {
-  .uni-title::before, .uni-title-head, .uni-title-actions, .uni-title-load { animation: none; }
+  .uni-title::before, .uni-title-head, .uni-title-actions, .uni-title-load, .uni-mode-tag::before { animation: none; }
 }
 
 /* New Universe setup form */
@@ -890,6 +905,66 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .universe-region-check input { accent-color: var(--accent); }
 .universe-setup-summary { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .universe-setup-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* Empty-state note (e.g. Teams tab before any team has crystallized). */
+.universe-empty-note {
+  max-width: 46ch;
+  margin: 2.5rem auto;
+  text-align: center;
+  line-height: 1.55;
+  color: var(--muted, #8a93a6);
+  font-size: 0.95rem;
+}
+
+/* Season standings (Teams tab) */
+.uni-season-banner {
+  display: flex; align-items: baseline; gap: 0.75rem;
+  padding: 0.6rem 0.2rem 0.9rem;
+}
+.uni-season-banner .uss-title { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.02em; }
+.uni-season-banner .uss-progress { color: var(--muted, #8a93a6); font-size: 0.85rem; }
+
+/* Segmented toggle (Season standings / All-time ladder) */
+.uni-seg-toggle { display: inline-flex; gap: 0; margin-bottom: 1rem; border-radius: 6px; overflow: hidden; border: 1px solid var(--border, #2a3142); }
+.uni-seg {
+  background: transparent; border: 0; color: var(--muted, #8a93a6);
+  padding: 0.4rem 0.9rem; font: inherit; font-size: 0.85rem; cursor: pointer;
+}
+.uni-seg + .uni-seg { border-left: 1px solid var(--border, #2a3142); }
+.uni-seg.active { background: var(--accent, #3b6ea5); color: #fff; }
+
+.uni-standings-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 1rem;
+}
+.uni-standings-card { border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: hidden; }
+.uni-standings-head {
+  padding: 0.5rem 0.75rem; font-weight: 600; font-size: 0.9rem;
+  background: var(--panel, #1a1f2b); border-bottom: 1px solid var(--border, #2a3142);
+}
+.uni-standings-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.uni-standings-table th {
+  text-align: right; padding: 0.35rem 0.6rem; color: var(--muted, #8a93a6);
+  font-weight: 500; font-size: 0.75rem; border-bottom: 1px solid var(--border, #2a3142);
+}
+.uni-standings-table th.usc-rank, .uni-standings-table th.usc-team { text-align: left; }
+.uni-standings-table td { text-align: right; padding: 0.4rem 0.6rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.uni-standings-table td.usc-rank { text-align: left; color: var(--muted, #8a93a6); width: 2ch; }
+.uni-standings-table td.usc-team { text-align: left; }
+.uni-standings-table .usc-team .pt-handle { display: block; font-weight: 600; }
+.uni-standings-table .usc-team .pt-realname { display: block; color: var(--muted, #8a93a6); font-size: 0.72rem; }
+.uni-standings-table tr.usc-leader { background: rgba(59,110,165,0.12); }
+.uni-standings-table .usc-pos { color: var(--good, #5fce7e); }
+.uni-standings-table .usc-neg { color: var(--bad, #e06c6c); }
+
+.uni-champions { margin-top: 1.5rem; }
+.uni-champions-head { font-weight: 600; margin-bottom: 0.5rem; }
+.uni-champions-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem;
+  padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.85rem;
+}
+.uni-champions-row .ucr-season { font-weight: 700; color: var(--muted, #8a93a6); min-width: 3ch; }
+.uni-champions-row .ucr-rec { color: var(--muted, #8a93a6); }
 
 /* Player table */
 .universe-player-table-wrap { width: 100%; }
@@ -1265,6 +1340,9 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .umc-roster.ct .umc-team-name { color: var(--ct); }
 .umc-roster.t  .umc-team-name { color: var(--t); }
 .umc-team-name { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pickup-lobby labels (Team_Handle) read as utilitarian; crystallized orgs pop. */
+.umc-team-name:not(.org) { font-family: var(--font-mono, monospace); font-weight: 500; opacity: .85; }
+.umc-team-name.org { font-weight: 700; }
 .umc-team-elo { font-size: 10px; color: var(--muted); font-family: var(--font-mono); }
 .umc-roster.ct .umc-roster-row { border-left: 2px solid var(--ct); }
 .umc-roster.t  .umc-roster-row { border-left: 2px solid var(--t); }

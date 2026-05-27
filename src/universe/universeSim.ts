@@ -11,9 +11,11 @@ import { applyMatchElo } from "./elo.ts";
 import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
-  STARTING_ELO, TEAM_SIZE,
-  type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats, type VetoStep,
+  STARTING_ELO, TEAM_SIZE, CHAMPIONS_LOG_MAX,
+  type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
+  type Season, type SeasonChampion, type UniverseTeam, type VetoStep,
 } from "./types.ts";
+import { generateTeamName } from "../domain/teamNames.ts";
 
 // The mutable slice of a Universe the simulation reads and writes. Everything
 // here is plain data (structured-cloneable), so it crosses the worker boundary
@@ -266,7 +268,49 @@ export function simOneMatchup(state: SimState, m: Matchup, byId?: Map<string, Pl
 // Because teammates bond every time they play, the same parties tend to re-form
 // day after day — emergent, self-reinforcing rosters.
 
-export function generateMatchups(players: Player[], elos: Record<string, number>, mapCount: number): Matchup[] {
+// Optional persistent-team context. When supplied, generateMatchups crystallizes
+// full 5-man friend-stacks into tracked teams and tags each matchup side with its
+// team id — the bridge from emergent rosters to standings/tournaments.
+export interface TeamContext {
+  teams: UniverseTeam[];
+  day: number;
+}
+
+// Look up (or create) the persistent team for a full 5-man stack, identified by
+// its sorted roster. On a hit we refresh the team's roster order, elo, and
+// last-played day; on a miss we mint a new named team. Returns its stable id.
+export function crystallizeTeam(
+  ctx: TeamContext, region: Region, playerIds: string[], elos: Record<string, number>,
+): string {
+  const sorted = [...playerIds].sort();
+  const rosterKey = sorted.join(",");
+  const elo = Math.round(playerIds.reduce((s, id) => s + (elos[id] ?? STARTING_ELO), 0) / playerIds.length);
+  let team = ctx.teams.find(t => t.rosterKey === rosterKey);
+  if (!team) {
+    team = {
+      id: `t${ctx.teams.length}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
+      name: generateTeamName(Math.random),
+      region,
+      playerIds: [...playerIds],
+      rosterKey,
+      elo,
+      foundedDay: ctx.day,
+      lastPlayedDay: ctx.day,
+      wins: 0, losses: 0, roundsWon: 0, roundsLost: 0, streak: 0,
+    };
+    ctx.teams.push(team);
+  } else {
+    team.playerIds = [...playerIds];
+    team.elo = elo;
+    team.lastPlayedDay = ctx.day;
+    team.region = region;
+  }
+  return team.id;
+}
+
+export function generateMatchups(
+  players: Player[], elos: Record<string, number>, mapCount: number, teamCtx?: TeamContext,
+): Matchup[] {
   const pool = Math.max(1, mapCount);
   const eloOf = (p: Player) => elos[p.id] ?? STARTING_ELO;
   const avgElo = (team: Player[]) => team.reduce((s, p) => s + eloOf(p), 0) / team.length;
@@ -308,6 +352,12 @@ export function generateMatchups(players: Player[], elos: Record<string, number>
       // Surface the friend-stacks (2+ that queued together) in this lobby.
       const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
       const series = pi === 0 && topIsSeries;
+      // A side that fielded a full 5-man clique is a tracked org — crystallize it
+      // and tag the matchup so its result folds into the team's standings.
+      const ctTeamId = teamCtx && ct.partyIds.length === TEAM_SIZE
+        ? crystallizeTeam(teamCtx, region, ct.players.map(p => p.id), elos) : undefined;
+      const tTeamId = teamCtx && t.partyIds.length === TEAM_SIZE
+        ? crystallizeTeam(teamCtx, region, t.players.map(p => p.id), elos) : undefined;
       matchups.push({
         id: `m${idx++}`,
         ctPlayerIds: ct.players.map(p => p.id),
@@ -318,6 +368,8 @@ export function generateMatchups(players: Player[], elos: Record<string, number>
         ...(series ? { bestOf: 3 as const } : { seed: newSeed(), mapIndex: Math.floor(Math.random() * pool) }),
         region,
         ...(parties.length > 0 ? { parties } : {}),
+        ...(ctTeamId ? { ctTeamId } : {}),
+        ...(tTeamId ? { tTeamId } : {}),
       });
     });
   }
@@ -407,6 +459,86 @@ function avgOf(team: Player[], eloOf: (p: Player) => number): number {
 // entire history to show a player's career. Each completed matchup is folded
 // in exactly once (when it's simmed/played out), which lets us trim old days
 // from history without losing any career figures.
+
+// Fold a completed day's matchups into persistent-team standings. Only matchups
+// with BOTH sides tagged as tracked orgs (ctTeamId + tTeamId) count — pickup and
+// scrim lobbies don't move the table. Must be called exactly once per matchup
+// (at day roll-over), mirroring how careers are folded. `ctScore`/`tScore` hold
+// the match (or series) result, so round diff uses them directly.
+export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[]): void {
+  const byId = new Map(teams.map(t => [t.id, t] as const));
+  for (const m of matchups) {
+    if (m.status !== "completed" || !m.ctTeamId || !m.tTeamId) continue;
+    if (m.ctScore === undefined || m.tScore === undefined || !m.winnerSide) continue;
+    const ct = byId.get(m.ctTeamId), t = byId.get(m.tTeamId);
+    if (!ct || !t) continue;
+    const ctWon = m.winnerSide === "CT";
+    ct.roundsWon += m.ctScore; ct.roundsLost += m.tScore;
+    t.roundsWon += m.tScore; t.roundsLost += m.ctScore;
+    if (ctWon) { ct.wins++; t.losses++; } else { ct.losses++; t.wins++; }
+    ct.streak = ctWon ? Math.max(1, ct.streak + 1) : Math.min(-1, ct.streak - 1);
+    t.streak = ctWon ? Math.min(-1, t.streak - 1) : Math.max(1, t.streak + 1);
+    // Mirror into the current-season tallies (reset each season rollover).
+    ct.seasonRoundsWon = (ct.seasonRoundsWon ?? 0) + m.ctScore;
+    ct.seasonRoundsLost = (ct.seasonRoundsLost ?? 0) + m.tScore;
+    t.seasonRoundsWon = (t.seasonRoundsWon ?? 0) + m.tScore;
+    t.seasonRoundsLost = (t.seasonRoundsLost ?? 0) + m.ctScore;
+    if (ctWon) {
+      ct.seasonWins = (ct.seasonWins ?? 0) + 1;
+      t.seasonLosses = (t.seasonLosses ?? 0) + 1;
+    } else {
+      ct.seasonLosses = (ct.seasonLosses ?? 0) + 1;
+      t.seasonWins = (t.seasonWins ?? 0) + 1;
+    }
+  }
+}
+
+// Compare two teams for regular-season standing: more season wins first, then
+// better season round differential, then name (stable). Highest-ranked first.
+export function compareSeasonStanding(a: UniverseTeam, b: UniverseTeam): number {
+  const aw = a.seasonWins ?? 0, bw = b.seasonWins ?? 0;
+  if (aw !== bw) return bw - aw;
+  const ad = (a.seasonRoundsWon ?? 0) - (a.seasonRoundsLost ?? 0);
+  const bd = (b.seasonRoundsWon ?? 0) - (b.seasonRoundsLost ?? 0);
+  if (ad !== bd) return bd - ad;
+  return a.name.localeCompare(b.name);
+}
+
+// Roll the season over if the current day is the last of the window. Records the
+// top team of each region (by season standing, must have played) into the
+// champions log, then resets every team's season tallies and advances the
+// season. `day` is the day that just completed. No-op if the season isn't due.
+// Returns the champions crowned this rollover (empty if none / not due).
+export function rollSeasonIfDue(
+  season: Season, teams: UniverseTeam[], champions: SeasonChampion[], day: number,
+): SeasonChampion[] {
+  if (day < season.startDay + season.length - 1) return [];
+
+  // Crown each region's regular-season leader (one that actually played).
+  const byRegion = new Map<Region, UniverseTeam[]>();
+  for (const t of teams) (byRegion.get(t.region) ?? byRegion.set(t.region, []).get(t.region)!).push(t);
+  const crowned: SeasonChampion[] = [];
+  for (const region of REGION_ORDER) {
+    const inRegion = (byRegion.get(region) ?? []).filter(t => (t.seasonWins ?? 0) + (t.seasonLosses ?? 0) > 0);
+    if (inRegion.length === 0) continue;
+    inRegion.sort(compareSeasonStanding);
+    const champ = inRegion[0];
+    crowned.push({
+      season: season.number, region, teamId: champ.id, teamName: champ.name,
+      wins: champ.seasonWins ?? 0, losses: champ.seasonLosses ?? 0,
+    });
+  }
+  champions.push(...crowned);
+  if (champions.length > CHAMPIONS_LOG_MAX) champions.splice(0, champions.length - CHAMPIONS_LOG_MAX);
+
+  // Reset season tallies and advance to the next season.
+  for (const t of teams) {
+    t.seasonWins = 0; t.seasonLosses = 0; t.seasonRoundsWon = 0; t.seasonRoundsLost = 0;
+  }
+  season.number += 1;
+  season.startDay = day + 1;
+  return crowned;
+}
 
 export function emptyCareer(): CareerStats {
   return {
