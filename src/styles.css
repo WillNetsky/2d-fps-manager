@@ -1204,22 +1204,37 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .upp-raw summary { cursor: pointer; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
 .upp-raw pre { font-size: 11px; max-height: 400px; overflow: auto; margin-top: 8px; }
 
-/* Match replay: round timeline */
+/* Match replay: round navigation row (Prev | dots | Next) */
 .universe-match-timeline {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; align-self: stretch;
+}
+.umt-nav {
+  flex-shrink: 0; background: var(--panel); border: 1px solid var(--line);
+  color: var(--text); border-radius: 4px; padding: 6px 12px; cursor: pointer;
+  font-size: 12px; font-family: inherit; line-height: 1.4; white-space: nowrap;
+}
+.umt-nav:hover { border-color: var(--accent); color: var(--accent); }
+.umt-dots {
   display: flex; align-items: center; justify-content: center; gap: 4px;
   padding: 8px 12px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 4px;
-  flex-wrap: wrap; width: 100%; align-self: stretch;
+  flex-wrap: wrap; flex: 1;
 }
 .umt-dot {
   width: 24px; height: 24px; border-radius: 50%;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   font-size: 10px; font-weight: 600; cursor: pointer; padding: 0;
-  font-family: inherit; line-height: 1;
+  font-family: inherit; line-height: 1; transition: transform 0.1s ease;
 }
 .umt-dot.ct-win { background: var(--ct); border-color: var(--ct); color: #fff; }
 .umt-dot.t-win  { background: var(--t);  border-color: var(--t);  color: #fff; }
-.umt-dot.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Currently-playing round: scaled up with an accent ring + glow so it reads at a glance. */
+.umt-dot.active {
+  transform: scale(1.3); font-weight: 800; z-index: 1; position: relative;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 8px var(--accent);
+}
 .umt-half {
   display: inline-block; width: 1px; height: 20px;
   background: var(--line); margin: 0 4px;

@@ -48,10 +48,39 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
   hud.className = "universe-match-hud";
   host.appendChild(hud);
 
-  // Replay-only: the round timeline (1..N circles colored by winner side).
-  const timelineEl = document.createElement("div");
-  timelineEl.className = "universe-match-timeline";
-  if (opts.isReplay) host.appendChild(timelineEl);
+  // Replay-only: round navigation row — Prev | round dots | Next, kept together
+  // so moving between rounds sits right with the round display (not buried in the
+  // bottom control bar).
+  const timelineEl = document.createElement("div"); // the round dots
+  timelineEl.className = "umt-dots";
+  if (opts.isReplay) {
+    const timelineRow = document.createElement("div");
+    timelineRow.className = "universe-match-timeline";
+
+    const prevBtn = document.createElement("button");
+    prevBtn.className = "umt-nav";
+    prevBtn.textContent = "⏮ Prev";
+    prevBtn.title = "Previous round";
+    prevBtn.onclick = () => { paused = false; jumpToRound(roundNumber - 1); };
+
+    const nextBtn = document.createElement("button");
+    nextBtn.className = "umt-nav";
+    nextBtn.textContent = "Next ⏭";
+    nextBtn.title = "Next round (or resume a paused round)";
+    nextBtn.onclick = () => {
+      // First click on a fresh paused round → resume it; otherwise advance.
+      if (sim && !sim.finished && paused) {
+        paused = false;
+        simInterval = window.setInterval(tickRound, 50);
+        return;
+      }
+      paused = false;
+      jumpToRound(roundNumber + 1);
+    };
+
+    timelineRow.append(prevBtn, timelineEl, nextBtn);
+    host.appendChild(timelineRow);
+  }
 
   // Stage row: left team panel | canvas | right team panel.
   const stage = document.createElement("div");
@@ -96,34 +125,6 @@ export async function observeMatch(host: HTMLElement, opts: ObserveMatchOptions)
     speedBtn.textContent = `${simSpeed}×`;
   };
   controls.appendChild(speedBtn);
-
-  // Replay-only prev / next round buttons.
-  if (opts.isReplay) {
-    const prevBtn = document.createElement("button");
-    prevBtn.className = "speed-btn";
-    prevBtn.textContent = "⏮ Prev";
-    prevBtn.onclick = () => {
-      paused = false;
-      jumpToRound(roundNumber - 1);
-    };
-    controls.appendChild(prevBtn);
-
-    const nextBtn = document.createElement("button");
-    nextBtn.className = "speed-btn";
-    nextBtn.textContent = "Next ⏭";
-    nextBtn.onclick = () => {
-      // First click on a fresh paused round → resume that round.
-      // Otherwise advance to the next round.
-      if (sim && !sim.finished && paused) {
-        paused = false;
-        simInterval = window.setInterval(tickRound, 50);
-        return;
-      }
-      paused = false;
-      jumpToRound(roundNumber + 1);
-    };
-    controls.appendChild(nextBtn);
-  }
 
   const skipBtn = document.createElement("button");
   skipBtn.className = "speed-btn";
