@@ -541,19 +541,91 @@ export class RoundSim {
   }
 
   private scheduleSmokes() {
+    const ts = this.map.tileSize;
     const usedTiles = new Set<string>();
     for (const a of this.agents) {
       if (!a.utility.includes("smoke")) continue;
+      // Prefer smoking a real chokepoint on the agent's path. On open maps with
+      // no chokes, fall back to a sightline smoke that cuts the long open line
+      // between the agent's objective and the enemy approach.
+      let spot: Vec2 | null = null;
+      let tileKey: string | null = null;
       const choke = this.pickChokeForAgent(a, "in", usedTiles);
-      if (!choke) continue;
-      const spot = this.tileCenter(choke.tile);
-      usedTiles.add(`${choke.tile.x},${choke.tile.y}`);
+      if (choke) {
+        spot = this.tileCenter(choke.tile);
+        tileKey = `${choke.tile.x},${choke.tile.y}`;
+      } else {
+        spot = this.pickSightlineSmoke(a, usedTiles);
+        if (spot) tileKey = `${Math.floor(spot.x / ts)},${Math.floor(spot.y / ts)}`;
+      }
+      if (!spot || !tileKey) continue;
+      usedTiles.add(tileKey);
       this.smokeQueue.push({
         thrower: a.playerId,
         spot,
         throwAt: 1000 + this.rng() * 2000,
       });
     }
+  }
+
+  // Fallback smoke for chokeless (open) maps: cut the long open angle the agent
+  // is exposed along toward enemy territory. Cast rays from the objective; keep
+  // the ones that run far and head into enemy-ward space (by BFS distance), then
+  // smoke partway down one of them. Successive smokers take different angles
+  // (longest first) so they fan across the open flanks instead of stacking.
+  private pickSightlineSmoke(a: Agent, usedTiles: Set<string>): Vec2 | null {
+    const objective = this.agentSiteWorldPos(a);
+    if (!objective) return null;
+    const ts = this.map.tileSize, W = this.map.width, H = this.map.height;
+    const enemyDist = a.side === "CT" ? this.mapAnalysis.tDist : this.mapAnalysis.ctDist;
+    const objTx = Math.floor(objective.x / ts), objTy = Math.floor(objective.y / ts);
+    const objEnemyD = enemyDist[objTy * W + objTx];
+    if (!isFinite(objEnemyD)) return null;
+
+    const RAYS = 24, MAXR = ts * 22, STEP = ts * 0.5, MIN_LEN = ts * 6;
+    const cands: { len: number; dirx: number; diry: number }[] = [];
+    for (let i = 0; i < RAYS; i++) {
+      const ang = (i / RAYS) * Math.PI * 2;
+      const ux = Math.cos(ang), uy = Math.sin(ang);
+      let len = 0, lastTx = objTx, lastTy = objTy;
+      for (let d = STEP; d <= MAXR; d += STEP) {
+        const tx = Math.floor((objective.x + ux * d) / ts);
+        const ty = Math.floor((objective.y + uy * d) / ts);
+        if (tx < 0 || ty < 0 || tx >= W || ty >= H || this.map.walls[ty * W + tx]) break;
+        len = d; lastTx = tx; lastTy = ty;
+      }
+      if (len < MIN_LEN) continue;
+      const endD = enemyDist[lastTy * W + lastTx];
+      if (!isFinite(endD) || endD >= objEnemyD) continue; // ray must head toward the enemy
+      cands.push({ len, dirx: ux, diry: uy });
+    }
+    if (!cands.length) return null;
+    cands.sort((p, q) => q.len - p.len);
+    const pick = cands[this.smokeQueue.length % cands.length];
+
+    // Smoke partway down the chosen sightline (closer in than its far end).
+    const sd = Math.min(ts * 6, pick.len * 0.55);
+    const want = { x: objective.x + pick.dirx * sd, y: objective.y + pick.diry * sd };
+    return this.nearestOpenSmokeTile(want, usedTiles);
+  }
+
+  // Nearest open, unused tile center to `want` (small ring search outward).
+  private nearestOpenSmokeTile(want: Vec2, usedTiles: Set<string>): Vec2 | null {
+    const ts = this.map.tileSize, W = this.map.width, H = this.map.height;
+    const cx = Math.floor(want.x / ts), cy = Math.floor(want.y / ts);
+    for (let r = 0; r <= 3; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // ring at radius r
+          const x = cx + dx, y = cy + dy;
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          if (this.map.walls[y * W + x]) continue;
+          if (usedTiles.has(`${x},${y}`)) continue;
+          return this.tileCenter({ x, y });
+        }
+      }
+    }
+    return null;
   }
 
   tick(): void {
