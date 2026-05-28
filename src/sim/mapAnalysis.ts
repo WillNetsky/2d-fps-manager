@@ -31,6 +31,48 @@ export interface MapAnalysis {
 const N4: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const N8: [number, number][] = [...N4, [1, 1], [-1, 1], [1, -1], [-1, -1]];
 
+// A real chokepoint is a passage whose removal separates the areas it joins.
+// Treat the candidate tile as a wall and BFS from one open neighbor: if every
+// other open neighbor reconnects within `maxSteps`, the tile is just a corner /
+// redundant gap (not a meaningful bottleneck). If some neighbor needs a long way
+// around (or can't reconnect at all nearby), it's a genuine choke. `maxSteps` is
+// the "is there a short way around?" radius — corners reconnect in ~2-4 tiles,
+// real lanes detour far further.
+function isBottleneck(map: GameMap, tile: Vec2, maxSteps = 12): boolean {
+  const W = map.width, H = map.height;
+  const opens: Vec2[] = [];
+  for (const [dx, dy] of N4) {
+    const nx = tile.x + dx, ny = tile.y + dy;
+    if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+    if (!map.walls[ny * W + nx]) opens.push({ x: nx, y: ny });
+  }
+  if (opens.length < 2) return false; // dead-end: nothing to separate
+
+  const blocked = tile.y * W + tile.x;
+  const seen = new Set<number>([blocked]);
+  const start = opens[0];
+  seen.add(start.y * W + start.x);
+  const targets = new Set(opens.slice(1).map(o => o.y * W + o.x));
+  let frontier: Vec2[] = [start];
+  for (let step = 0; step < maxSteps && frontier.length; step++) {
+    const next: Vec2[] = [];
+    for (const c of frontier) {
+      for (const [dx, dy] of N4) {
+        const nx = c.x + dx, ny = c.y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const ni = ny * W + nx;
+        if (seen.has(ni) || map.walls[ni]) continue;
+        seen.add(ni);
+        targets.delete(ni);
+        next.push({ x: nx, y: ny });
+      }
+    }
+    if (targets.size === 0) return false; // neighbors reconnect quickly → corner
+    frontier = next;
+  }
+  return targets.size > 0; // some neighbor only reachable the long way → choke
+}
+
 export function analyzeMap(map: GameMap): MapAnalysis {
   const W = map.width, H = map.height;
   const ctDist = bfs(map, map.ctSpawns);
@@ -52,6 +94,12 @@ export function analyzeMap(map: GameMap): MapAnalysis {
         else if (map.walls[ny * W + nx]) wallCount++;
       }
       if (wallCount < 5) continue;
+
+      // Reject dead-end nooks and open-area corners: a real choke is a passage,
+      // so removing it must actually separate its open neighbors. A corner's
+      // neighbors reconnect in a step or two and so don't qualify — which stops
+      // agents from smoking and holding worthless map corners.
+      if (!isBottleneck(map, { x, y })) continue;
 
       // Find the open 4-neighbors and pick which is "toward CT" vs "toward T".
       let ctSide: Vec2 | null = null, tSide: Vec2 | null = null;
