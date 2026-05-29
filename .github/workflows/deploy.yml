@@ -5,6 +5,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Run bundled JS actions on Node 24 (becomes the default June 2026). Covers
+# actions/* still declaring node20, including upload-artifact used internally
+# by upload-pages-artifact.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 # Allow the GITHUB_TOKEN to deploy to Pages.
 permissions:
   contents: read
