@@ -12,8 +12,9 @@ import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
   STARTING_ELO, TEAM_SIZE, CHAMPIONS_LOG_MAX,
+  GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE,
   type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
-  type Season, type SeasonChampion, type UniverseTeam, type VetoStep,
+  type ProvisionalStack, type Season, type SeasonChampion, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 import { generateTeamName } from "../domain/teamNames.ts";
 
@@ -268,17 +269,22 @@ export function simOneMatchup(state: SimState, m: Matchup, byId?: Map<string, Pl
 // Because teammates bond every time they play, the same parties tend to re-form
 // day after day — emergent, self-reinforcing rosters.
 
-// Optional persistent-team context. When supplied, generateMatchups crystallizes
-// full 5-man friend-stacks into tracked teams and tags each matchup side with its
-// team id — the bridge from emergent rosters to standings/tournaments.
+// Optional persistent-team context. When supplied, generateMatchups routes full
+// 5-man friend-stacks through the stack→org pipeline: recurring cliques accrue
+// commitment in `stacks` and, once they clear the gate, crystallize into tracked
+// `teams` whose matchup sides are tagged — the bridge from emergent rosters to
+// standings/tournaments. `byId` resolves roster ambition for the gate.
 export interface TeamContext {
   teams: UniverseTeam[];
+  stacks: ProvisionalStack[];
+  byId: Map<string, Player>;
   day: number;
 }
 
 // Look up (or create) the persistent team for a full 5-man stack, identified by
 // its sorted roster. On a hit we refresh the team's roster order, elo, and
-// last-played day; on a miss we mint a new named team. Returns its stable id.
+// last-played day; on a miss we mint a new named org (tier "org") and record its
+// founding lineup. Returns its stable id.
 export function crystallizeTeam(
   ctx: TeamContext, region: Region, playerIds: string[], elos: Record<string, number>,
 ): string {
@@ -291,8 +297,11 @@ export function crystallizeTeam(
       id: `t${ctx.teams.length}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
       name: generateTeamName(Math.random),
       region,
+      country: ctx.byId.get(captainOf(playerIds, elos))?.country,
       playerIds: [...playerIds],
       rosterKey,
+      tier: "org",
+      rosterHistory: [{ day: ctx.day, playerIds: [...playerIds], note: "Founded" }],
       elo,
       foundedDay: ctx.day,
       lastPlayedDay: ctx.day,
@@ -306,6 +315,61 @@ export function crystallizeTeam(
     team.region = region;
   }
   return team.id;
+}
+
+// The de facto captain of a roster: the highest-elo player (stable tiebreak by
+// id). Used as the org founder, so the org takes their nationality.
+export function captainOf(playerIds: string[], elos: Record<string, number>): string {
+  return [...playerIds].sort((a, b) => {
+    const d = (elos[b] ?? STARTING_ELO) - (elos[a] ?? STARTING_ELO);
+    return d !== 0 ? d : a.localeCompare(b);
+  })[0];
+}
+
+// Number of "driven" players (ambition >= DRIVEN_AMBITION) on a roster — the
+// core that pushes a casual clique to take itself seriously.
+function drivenCore(playerIds: string[], byId: Map<string, Player>): number {
+  let n = 0;
+  for (const id of playerIds) {
+    if ((byId.get(id)?.ambition ?? 0) >= DRIVEN_AMBITION) n++;
+  }
+  return n;
+}
+
+// Resolve a full-5 friend clique to a tracked-org id, or undefined if it isn't
+// (yet) an org. Already-crystallized rosters reuse their org. Otherwise the
+// clique accrues commitment as a ProvisionalStack and only promotes — minting
+// the org — once it clears the games-together + driven-core gate. Un-promoted
+// cliques return undefined and play out as ordinary pickup lobbies.
+export function resolveOrgSide(
+  ctx: TeamContext, region: Region, playerIds: string[], elos: Record<string, number>,
+): string | undefined {
+  const rosterKey = [...playerIds].sort().join(",");
+  if (ctx.teams.some(t => t.rosterKey === rosterKey)) {
+    return crystallizeTeam(ctx, region, playerIds, elos); // existing org — refresh + reuse
+  }
+
+  let stack = ctx.stacks.find(s => s.rosterKey === rosterKey);
+  if (!stack) {
+    stack = {
+      rosterKey, region, playerIds: [...playerIds],
+      gamesTogether: 0, firstSeenDay: ctx.day, lastSeenDay: ctx.day,
+    };
+    ctx.stacks.push(stack);
+  }
+  stack.gamesTogether++;
+  stack.lastSeenDay = ctx.day;
+  stack.playerIds = [...playerIds];
+  stack.region = region;
+
+  const ready = stack.gamesTogether >= GAMES_TO_ORG
+    && drivenCore(playerIds, ctx.byId) >= DRIVEN_CORE_SIZE;
+  if (!ready) return undefined;
+
+  // Promote: crystallize the org and retire the provisional record.
+  const teamId = crystallizeTeam(ctx, region, playerIds, elos);
+  ctx.stacks.splice(ctx.stacks.indexOf(stack), 1);
+  return teamId;
 }
 
 export function generateMatchups(
@@ -352,12 +416,13 @@ export function generateMatchups(
       // Surface the friend-stacks (2+ that queued together) in this lobby.
       const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
       const series = pi === 0 && topIsSeries;
-      // A side that fielded a full 5-man clique is a tracked org — crystallize it
-      // and tag the matchup so its result folds into the team's standings.
+      // A side that fielded a full 5-man clique enters the stack→org pipeline:
+      // it's tagged (and its result folds into standings) only once it has
+      // promoted to a tracked org; until then it plays as a pickup lobby.
       const ctTeamId = teamCtx && ct.partyIds.length === TEAM_SIZE
-        ? crystallizeTeam(teamCtx, region, ct.players.map(p => p.id), elos) : undefined;
+        ? resolveOrgSide(teamCtx, region, ct.players.map(p => p.id), elos) : undefined;
       const tTeamId = teamCtx && t.partyIds.length === TEAM_SIZE
-        ? crystallizeTeam(teamCtx, region, t.players.map(p => p.id), elos) : undefined;
+        ? resolveOrgSide(teamCtx, region, t.players.map(p => p.id), elos) : undefined;
       matchups.push({
         id: `m${idx++}`,
         ctPlayerIds: ct.players.map(p => p.id),

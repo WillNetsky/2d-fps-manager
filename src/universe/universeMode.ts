@@ -10,9 +10,10 @@ import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
   recordTeamResults, compareSeasonStanding, rankedTeamsByRegion, runVeto,
-  emptyCareer, clutchBucket, type SimState, type MatchupOutcome, type TeamContext,
+  emptyCareer, clutchBucket, captainOf, type SimState, type MatchupOutcome, type TeamContext,
 } from "./universeSim.ts";
 import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
+import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES } from "./finance.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -416,9 +417,11 @@ export class UniverseMode {
       careers: {},
       maps: maps.map(deepCloneMap),
       teams: [],
+      stacks: [],
       season: { number: 1, startDay: 1, length: SEASON_LENGTH },
       champions: [],
     };
+    recomputePlayerValues(this.universe);
     this.setup = null;
     this.persist();
     this.screen = "players";
@@ -563,7 +566,17 @@ export class UniverseMode {
       reserveTeamNames(u.teams.filter(t => !legacy(t.name)).map(t => t.name));
       for (const t of u.teams) if (legacy(t.name)) t.name = generateTeamName(Math.random);
     }
+    // Tiers/roster history postdate the original orgs: every existing tracked team
+    // was a crystallized org, so backfill that tier and a founding lineup entry.
+    u.stacks ??= [];
+    const playerById = new Map(u.players.map(p => [p.id, p] as const));
+    for (const t of u.teams ?? []) {
+      t.tier ??= "org";
+      t.rosterHistory ??= [{ day: t.foundedDay, playerIds: [...t.playerIds], note: "Founded" }];
+      t.country ??= playerById.get(captainOf(t.playerIds, u.elos))?.country;
+    }
     this.ensureSeason(u); // lazy-init seasons for saves predating them
+    recomputePlayerValues(u); // backfill/refresh market values (incl. pre-economy saves)
     // Older saves may have rolled a day into history without generating the
     // next day's matchups. The day view now always expects a pendingDay, so
     // backfill one (phase-aware) before rendering.
@@ -620,7 +633,12 @@ export class UniverseMode {
   // Persistent-team context for matchup generation — ensures the registry exists
   // and is keyed to the day the matchups belong to (for foundedDay/lastPlayed).
   private teamCtx(u: Universe): TeamContext {
-    return { teams: (u.teams ??= []), day: u.day };
+    return {
+      teams: (u.teams ??= []),
+      stacks: (u.stacks ??= []),
+      byId: new Map(u.players.map(p => [p.id, p] as const)),
+      day: u.day,
+    };
   }
 
   // Ensure season state exists (lazy init for new + pre-season saves). A fresh
@@ -656,6 +674,8 @@ export class UniverseMode {
     const inPlayoffs = season.phase === "playoffs";
     // Lifetime team records always update; season standings freeze during playoffs.
     recordTeamResults(u.teams, done.matchups, /* foldSeason */ !inPlayoffs);
+    // Elo/form/age have settled for the day — refresh market values.
+    recomputePlayerValues(u);
 
     if (!inPlayoffs) {
       // Regular season: start the playoffs the day the window closes.
@@ -692,9 +712,17 @@ export class UniverseMode {
         entry.regularSeasonLeaderId = leader.id;
         entry.regularSeasonLeaderName = leader.name;
       }
+      entry.prize = PLAYOFF_PRIZES.champion;
       champions.push(entry);
     }
     if (champions.length > CHAMPIONS_LOG_MAX) champions.splice(0, champions.length - CHAMPIONS_LOG_MAX);
+    // Pay out prize money to every team by its finish in each region's bracket.
+    for (const rp of u.playoffs?.regions ?? []) {
+      for (const [teamId, amt] of regionPayouts(rp)) {
+        const t = byId.get(teamId);
+        if (t) t.earnings = (t.earnings ?? 0) + amt;
+      }
+    }
     u.playoffs = null;
     this.startNextSeason(u, day);
   }
@@ -1330,7 +1358,7 @@ export class UniverseMode {
       const strk = t.streak === 0 ? "—" : (t.streak > 0 ? `W${t.streak}` : `L${-t.streak}`);
       tr.innerHTML =
         `<td class="usc-rank">${i + 1}</td>` +
-        `<td class="usc-team"><span class="pt-handle">${escapeHtml(t.name)}</span>` +
+        `<td class="usc-team"><span class="pt-handle">${t.country ? `${flagEmoji(t.country)} ` : ""}${escapeHtml(t.name)}</span>` +
         `<span class="pt-realname">${escapeHtml(roster)}</span></td>` +
         `<td>${w}-${l}</td>` +
         `<td class="${diff > 0 ? "usc-pos" : diff < 0 ? "usc-neg" : ""}">${diff > 0 ? "+" : ""}${diff}</td>` +
@@ -1362,6 +1390,7 @@ export class UniverseMode {
       const items = (bySeason.get(s) ?? [])
         .map(c => `<span class="ucr-item">${REGION_LABELS[c.region] ?? c.region}: ` +
           `<b class="clickable" data-tid="${c.teamId}">🏆 ${escapeHtml(c.teamName)}</b> <span class="ucr-rec">(${c.wins}-${c.losses})</span>` +
+          (c.prize ? ` <span class="ucr-prize">${formatMoney(c.prize)}</span>` : "") +
           (c.regularSeasonLeaderName
             ? ` <span class="ucr-rs">RS #1: ${c.regularSeasonLeaderId
                 ? `<span class="clickable" data-tid="${c.regularSeasonLeaderId}">${escapeHtml(c.regularSeasonLeaderName)}</span>`
@@ -1856,7 +1885,7 @@ function rosterColumn(
   return col;
 }
 
-type SortKey = "name" | "country" | "age" | "role" | "elo" | "aim" | "mechanical" | "cognitive" | "mental" | "utility" | "leader" | "overall";
+type SortKey = "name" | "country" | "age" | "role" | "elo" | "value" | "aim" | "mechanical" | "cognitive" | "mental" | "utility" | "leader" | "overall";
 
 const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Player, elo: number) => number | string }[] = [
   { key: "name",       label: "Name",      getter: (p) => p.handle },
@@ -1864,6 +1893,7 @@ const COLUMNS: { key: SortKey; label: string; needsElo?: boolean; getter: (p: Pl
   { key: "age",        label: "Age",       getter: (p) => p.age },
   { key: "role",       label: "Role",      getter: (p) => p.role },
   { key: "elo",        label: "Elo", needsElo: true, getter: (_p, e) => Math.round(e) },
+  { key: "value",      label: "Value",     getter: (p) => p.value ?? 0 },
   { key: "aim",        label: "Aim",       getter: (p) => avgStats(p, ["accuracy", "crosshairPlacement", "tapping", "flickAim", "sprayControl"]) },
   { key: "mechanical", label: "Mech",      getter: (p) => avgStats(p, ["reflexes", "handSpeed", "movement", "counterStrafe", "jiggle"]) },
   { key: "cognitive",  label: "Mind",      getter: (p) => avgStats(p, ["mapAwareness", "positioning", "gameSense", "timing", "adaptability"]) },
@@ -2005,7 +2035,7 @@ function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (
       fill: (t, td) => {
         const roster = t.playerIds.map(id => byId.get(id)?.handle ?? "?").join(", ");
         td.innerHTML =
-          `<span class="pt-handle">${escapeHtml(t.name)}</span>` +
+          `<span class="pt-handle">${t.country ? `${flagEmoji(t.country)} ` : ""}${escapeHtml(t.name)}</span>` +
           `<span class="pt-realname">${escapeHtml(roster)}</span>`;
         td.className = "name-cell";
       },
@@ -2048,6 +2078,14 @@ function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (
       },
     },
     {
+      label: "Earnings",
+      cmp: (a, b) => (a.earnings ?? 0) - (b.earnings ?? 0),
+      fill: (t, td) => {
+        td.textContent = (t.earnings ?? 0) > 0 ? formatMoney(t.earnings!) : "—";
+        if ((t.earnings ?? 0) > 0) td.style.color = "var(--accent)";
+      },
+    },
+    {
       label: "Founded",
       cmp: (a, b) => a.foundedDay - b.foundedDay,
       fill: (t, td) => { td.textContent = `Day ${t.foundedDay}`; },
@@ -2083,10 +2121,12 @@ function playerTable(
         td.innerHTML = `<span class="pt-handle">${escapeHtml(p.handle)}</span>` +
           `<span class="pt-realname">${escapeHtml(p.name)}</span>`;
         td.className = "name-cell";
+      } else if (col.key === "value") {
+        td.textContent = formatMoney(typeof v === "number" ? v : 0);
       } else {
         td.textContent = typeof v === "number" ? String(Math.round(v)) : String(v);
       }
-      if (typeof v === "number" && col.key !== "elo" && col.key !== "age") {
+      if (typeof v === "number" && col.key !== "elo" && col.key !== "age" && col.key !== "value") {
         td.style.color = ratingColor(v);
       }
     },
@@ -2479,8 +2519,9 @@ function playerPage(
   const dyn = document.createElement("div");
   dyn.className = "upp-dyn";
   dyn.innerHTML = `
-    <div class="upp-dyn-item"><span>Money</span><b>$${p.money}</b></div>
+    <div class="upp-dyn-item"><span>Market value</span><b>${formatMoney(p.value ?? 0)}</b></div>
     <div class="upp-dyn-item"><span>Form</span><b style="color:${ratingColor(p.morale)}" title="${Math.round(p.morale)}/100 morale">${formLabel(p.morale)}</b></div>
+    <div class="upp-dyn-item"><span>Buy bank</span><b>$${p.money}</b></div>
     <div class="upp-dyn-item"><span>Values</span><b title="${p.ambition ?? 50}/100 ambition">${valuesLabel(p.ambition ?? 50)}</b></div>
     <div class="upp-dyn-item"><span>CT assignment</span><b>${p.ctAssignment}</b></div>
   `;
@@ -2764,7 +2805,7 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     <div class="utm-identity">
       <div class="utm-crest">${titles.length > 0 ? "🏆" : "★"}</div>
       <div>
-        <div class="utm-name">${escapeHtml(team.name)}</div>
+        <div class="utm-name">${team.country ? `${flagEmoji(team.country)} ` : ""}${escapeHtml(team.name)}</div>
         <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · founded day ${team.foundedDay}` +
           `${titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : ""}</div>
       </div>
@@ -2776,6 +2817,7 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
       <div class="utm-hl"><div class="utm-hl-label">Round diff</div><div class="utm-hl-val">${diff >= 0 ? "+" : ""}${diff}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Streak</div><div class="utm-hl-val" style="color:${team.streak > 0 ? "var(--good)" : team.streak < 0 ? "var(--bad)" : "inherit"}">${streak}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">This season</div><div class="utm-hl-val">${team.seasonWins ?? 0}-${team.seasonLosses ?? 0}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Earnings</div><div class="utm-hl-val">${formatMoney(team.earnings ?? 0)}</div></div>
     </div>`;
   root.appendChild(header);
 
@@ -2820,6 +2862,29 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     }
     sec.appendChild(list);
     root.appendChild(sec);
+  }
+
+  // ----- Roster history (founding lineup + later changes) -----
+  const history = team.rosterHistory
+    ?? [{ day: team.foundedDay, playerIds: team.playerIds, note: "Founded" }];
+  if (history.length > 0) {
+    const rh = document.createElement("div");
+    rh.className = "utm-section";
+    rh.innerHTML = `<h3 class="utm-section-h">Roster history</h3>`;
+    const list = document.createElement("div");
+    list.className = "utm-roster-history";
+    for (const e of [...history].reverse()) {
+      const handles = e.playerIds.map(id => playerById.get(id)?.handle ?? "?").join(", ");
+      const row = document.createElement("div");
+      row.className = "utm-rh-row";
+      row.innerHTML =
+        `<span class="utm-rh-day">Day ${e.day}</span>` +
+        `<span class="utm-rh-note">${escapeHtml(e.note)}</span>` +
+        `<span class="utm-rh-roster">${escapeHtml(handles)}</span>`;
+      list.appendChild(row);
+    }
+    rh.appendChild(list);
+    root.appendChild(rh);
   }
 
   // ----- Match history (recent window + today) -----

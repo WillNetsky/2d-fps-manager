@@ -1023,6 +1023,12 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .utm-trophies { display: flex; flex-wrap: wrap; gap: .5rem; }
 .utm-trophy { border: 1px solid var(--accent, #e8b34a); border-radius: 999px; padding: .25rem .7rem; font-size: .82rem; }
 .utm-trophy span { color: var(--muted, #8a93a6); }
+.utm-roster-history { display: flex; flex-direction: column; border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: hidden; }
+.utm-rh-row { display: flex; align-items: baseline; gap: .6rem; padding: .4rem .75rem; font-size: .85rem; }
+.utm-rh-row + .utm-rh-row { border-top: 1px solid rgba(255,255,255,.05); }
+.utm-rh-day { color: var(--muted, #8a93a6); min-width: 5ch; }
+.utm-rh-note { font-weight: 600; min-width: 7ch; }
+.utm-rh-roster { color: var(--muted, #8a93a6); }
 .utm-mh { display: flex; flex-direction: column; border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: hidden; }
 .utm-mh-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .75rem; font-size: .85rem; }
 .utm-mh-row + .utm-mh-row { border-top: 1px solid rgba(255,255,255,.05); }
@@ -1052,6 +1058,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .uni-champions-row .ucr-season { font-weight: 700; color: var(--muted, #8a93a6); min-width: 3ch; }
 .uni-champions-row .ucr-rec { color: var(--muted, #8a93a6); }
+.uni-champions-row .ucr-prize { color: var(--accent, #ffb454); font-weight: 600; }
 
 /* Player table */
 .universe-player-table-wrap { width: 100%; }

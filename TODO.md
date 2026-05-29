@@ -30,8 +30,8 @@
 - [x] Kill display in the top right
 - [x] Timeline kill lines color coded by team
 - [x] "Replay" displayed on top when its replaying "Live" when live
-- [ ] Buttons for moving between rounds are stuck behind the main menu button
-- [ ] Highlight the circle of the currently playing round
+- [x] Buttons for moving between rounds are stuck behind the main menu button
+- [x] Highlight the circle of the currently playing round
 
 ## Map Editor
 - [x] Abillity to create new maps, edit saved maps
@@ -41,6 +41,12 @@
 ## Universe
 - [x] Pool of players
 - [x] They play casual games (that are tracked) and skill up from them
+- [ ] Professional Teams 
+- [x] Tournament prize money
+- [x] Player's value money
+- [ ] Something to spend money on (better equipment? buy a team?) — deferred until a user-controlled team exists
+- [ ] Player pages should show their handle before their real names
+- [ ] Player pages relationship display should show "Handle" Real Name
 
 ## Issues
 - [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing

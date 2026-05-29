@@ -81,6 +81,9 @@ export interface Player {
 
   // Dynamic state — updated round to round.
   money: number;       // per-player bank
+  // Market value in dollars, derived from elo/age/form. Recomputed once per sim
+  // day (see finance.recomputePlayerValues); absent until first computed.
+  value?: number;
   mood: number;        // 0-100, drifts based on outcomes
   morale: number;      // 0-100, longer-term
   // Relationships keyed by other player id (-100 to 100).

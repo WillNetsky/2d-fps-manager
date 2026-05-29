@@ -44,6 +44,10 @@ export interface Universe {
   // Bounded log of past season winners per region (most recent last). Powers the
   // champions history and, later, playoff seeding. Trimmed to CHAMPIONS_LOG_MAX.
   champions?: SeasonChampion[];
+  // Recurring full-5 friend cliques accruing commitment toward org status. A
+  // stack is promoted out of this list into `teams` once it clears the gate.
+  // Absent on saves predating the stack→org phase; created lazily.
+  stacks?: ProvisionalStack[];
   // Active end-of-season playoffs, present only while season.phase === "playoffs".
   // Cleared back to null/undefined when the playoffs finish and the next regular
   // season begins.
@@ -125,6 +129,8 @@ export interface SeasonChampion {
   // differs from the playoff champion. Display only.
   regularSeasonLeaderId?: string;
   regularSeasonLeaderName?: string;
+  // Prize money the champion took for the title (display only).
+  prize?: number;
 }
 
 // Links a playoff matchup back to its place in the tournament so results advance
@@ -135,6 +141,36 @@ export interface PlayoffMatchTag {
   slot: number;                             // pairing/match index within the round
 }
 
+// How serious a tracked team is, climbing the competitive ladder:
+//  - "stack": a recurring full-5 friend clique that hasn't earned org status yet
+//             (tracked only as a ProvisionalStack, never as a UniverseTeam).
+//  - "org":   crystallized, named, counts in standings; the level UniverseTeam
+//             records start at today.
+//  - "pro":   an org that pays its players (reserved for a later milestone).
+export type TeamTier = "stack" | "org" | "pro";
+
+// One lineup the org fielded, recorded when the roster changes. The first entry
+// is the founding five; later entries capture signings/releases. Lets an org's
+// identity outlive any particular roster.
+export interface RosterHistoryEntry {
+  day: number;
+  playerIds: string[];
+  note: string;                             // e.g. "Founded", "Signed …", "Released …"
+}
+
+// A recurring full-5 friend clique that is accruing the commitment needed to
+// become an org, but hasn't promoted yet (see GAMES_TO_ORG / driven-core gate in
+// universeSim). Plays as a pickup lobby until it crystallizes. Keyed by the same
+// sorted-roster `rosterKey` an org uses, so the two phases line up.
+export interface ProvisionalStack {
+  rosterKey: string;                        // sorted player ids
+  region: Region;
+  playerIds: string[];                      // last-seen roster order
+  gamesTogether: number;                    // days this exact five has stacked
+  firstSeenDay: number;
+  lastSeenDay: number;
+}
+
 // A persistent, named team: a full 5-man friend-stack that has crystallized into
 // a tracked org. Identity is stable across days via `id`; `rosterKey` (sorted
 // player ids) is how a re-formed identical stack is matched back to its team.
@@ -142,8 +178,18 @@ export interface UniverseTeam {
   id: string;
   name: string;
   region: Region;
+  // Country of origin — the founding captain's nationality (ISO-3166 alpha-2).
+  // Fixed at crystallization; survives roster changes. Absent on saves predating
+  // org nationality; backfilled from the current captain on load.
+  country?: string;
   playerIds: string[];                      // current 5-man roster
   rosterKey: string;                        // sorted playerIds joined — identity match
+  // Competitive tier. Absent on saves predating tiers; treated as "org" (every
+  // tracked team used to be a crystallized org).
+  tier?: TeamTier;
+  // Lineups over time, oldest first. Absent on pre-tier saves; backfilled with a
+  // single "Founded" entry on load.
+  rosterHistory?: RosterHistoryEntry[];
   elo: number;                              // team elo (avg of roster at last update)
   foundedDay: number;
   lastPlayedDay: number;
@@ -154,6 +200,10 @@ export interface UniverseTeam {
   roundsLost: number;
   // Current win/loss streak: positive = consecutive wins, negative = losses.
   streak: number;
+  // Lifetime playoff prize money won, in dollars. Accrues when each season's
+  // playoffs finish (see finance.regionPayouts). Absent on saves predating the
+  // economy; treated as 0 until the team next cashes.
+  earnings?: number;
   // Current-season record — same tallies as above but reset at each season
   // rollover. Drives the regular-season standings table. Absent on teams from
   // saves predating seasons; treated as 0 until they next play.
@@ -301,6 +351,14 @@ export const CHAMPIONS_LOG_MAX = 120;
 export const SWISS_FIELD = 16;
 export const SWISS_TARGET = 3;
 export const BRACKET_FIELD = 8;
+
+// Stack→org promotion gate. A recurring full-5 clique becomes a named org once
+// it has stacked together at least GAMES_TO_ORG times AND carries a driven core
+// of at least DRIVEN_CORE_SIZE players whose ambition clears DRIVEN_AMBITION.
+// Low-ambition "for fun" cliques never clear the bar — they just keep stacking.
+export const GAMES_TO_ORG = 3;
+export const DRIVEN_AMBITION = 70;
+export const DRIVEN_CORE_SIZE = 2;
 
 export const STARTING_ELO = 1000;
 // Default players per region on the New Universe screen (the user can dial this
