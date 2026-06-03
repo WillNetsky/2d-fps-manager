@@ -15,6 +15,9 @@ import {
 import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
 import { yearOf, eventInvitees, freeAgentContenders, compareRanking, rankingPointsFor } from "./circuit.ts";
 import { runSeasonLifecycle } from "./lifecycle.ts";
+import { buildNews, type NewsCategory } from "./news.ts";
+import { buildStorylines } from "./storylines.ts";
+import { hltvRating1 } from "./rating.ts";
 import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES } from "./finance.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
@@ -36,7 +39,7 @@ import {
 // matches stay replayable — not the career totals.
 const HISTORY_DAYS = HISTORY_WINDOW;
 
-type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "career" | "settings" | "player" | "team" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "news" | "career" | "settings" | "player" | "team" | "replay";
 
 // In-progress configuration for the New Universe setup screen.
 interface UniverseSetup {
@@ -60,7 +63,7 @@ interface SeriesPlay {
 }
 
 // Screens that share the day-view tab bar.
-const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "career", "settings"];
+const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "news", "career", "settings"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -89,6 +92,10 @@ export class UniverseMode {
 
   // Players tab view: the active pool, or retired players (the hall of fame).
   private playersView: "active" | "retired" = "active";
+
+  // News tab filters (firehose feed; filters keep it usable).
+  private newsCat: NewsCategory | "all" = "all";
+  private newsRegion: Region | "all" = "all";
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -128,6 +135,7 @@ export class UniverseMode {
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
       case "teams":     this.renderTeams(body); break;
+      case "news":      this.renderNews(body); break;
       case "career":    this.renderCareer(body); break;
       case "settings":  this.renderSettings(body); break;
       case "player":    this.renderPlayer(body); break;
@@ -203,6 +211,7 @@ export class UniverseMode {
       { key: "matchups",  label: "Matchups",       show: hasPending },
       { key: "standings", label: "Player ratings", show: true },
       { key: "teams",     label: "Teams",          show: true },
+      { key: "news",      label: "News",           show: true },
       { key: "career",    label: "Career stats",   show: true },
       { key: "settings",  label: "Settings",       show: true },
     ];
@@ -1610,6 +1619,138 @@ export class UniverseMode {
   private renderCareer(body: HTMLElement) {
     if (!this.universe) return;
     body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id)));
+  }
+
+  // ---- News feed ----
+
+  // A firehose of derived stories (trophies, results, roster moves, retirements)
+  // with category + region filters. Derived on render from existing universe data
+  // (see news.ts) — no separate persisted log.
+  private renderNews(body: HTMLElement) {
+    if (!this.universe) return;
+    const u = this.universe;
+    const NEWS_RENDER_CAP = 300;
+
+    const wrap = document.createElement("div");
+    wrap.className = "uni-news";
+    // One delegated handler for every clickable chip (storylines + feed).
+    wrap.addEventListener("click", (e) => {
+      const el = (e.target as HTMLElement).closest("[data-tid],[data-pid]") as HTMLElement | null;
+      if (el?.dataset.tid) this.openTeam(el.dataset.tid);
+      else if (el?.dataset.pid) this.openPlayer(el.dataset.pid);
+    });
+
+    // --- Featured storylines (curated, ongoing threads; respects region) ---
+    const stories = buildStorylines(u, { region: this.newsRegion, limit: 6 });
+    if (stories.length > 0) {
+      const sec = document.createElement("div");
+      sec.className = "uni-stories";
+      const h = document.createElement("div");
+      h.className = "uni-stories-head";
+      h.textContent = "Storylines";
+      sec.appendChild(h);
+      const grid = document.createElement("div");
+      grid.className = "uni-stories-grid";
+      const teamName = (id: string) => u.teams?.find(t => t.id === id)?.name ?? "team";
+      const playerName = (id: string) => u.players.find(p => p.id === id)?.handle ?? "player";
+      for (const s of stories) {
+        const chips = [
+          ...s.teamIds.map(id => `<button class="uni-news-chip" data-tid="${id}">${escapeHtml(teamName(id))}</button>`),
+          ...s.playerIds.map(id => `<button class="uni-news-chip ucp-player" data-pid="${id}">${escapeHtml(playerName(id))}</button>`),
+        ].join("");
+        const card = document.createElement("div");
+        card.className = `uni-story uni-story-${s.kind}`;
+        card.innerHTML =
+          `<div class="uni-story-title">${escapeHtml(s.title)}</div>` +
+          `<div class="uni-story-detail">${escapeHtml(s.detail)}</div>` +
+          (chips ? `<div class="uni-news-chips">${chips}</div>` : "");
+        grid.appendChild(card);
+      }
+      sec.appendChild(grid);
+      wrap.appendChild(sec);
+    }
+
+    // --- Filter bars ---
+    const filters = document.createElement("div");
+    filters.className = "uni-news-filters";
+    const segment = (
+      label: string, options: { key: string; label: string }[],
+      current: string, onPick: (key: string) => void,
+    ) => {
+      const row = document.createElement("div");
+      row.className = "uni-news-seg";
+      const lab = document.createElement("span");
+      lab.className = "uni-news-seg-label";
+      lab.textContent = label;
+      row.appendChild(lab);
+      for (const o of options) {
+        const b = document.createElement("button");
+        b.className = "uni-seg" + (current === o.key ? " active" : "");
+        b.textContent = o.label;
+        b.onclick = () => { if (current !== o.key) { onPick(o.key); this.render(); } };
+        row.appendChild(b);
+      }
+      return row;
+    };
+    filters.appendChild(segment("Type", [
+      { key: "all", label: "All" }, { key: "trophy", label: "Trophies" },
+      { key: "match", label: "Results" }, { key: "roster", label: "Roster" },
+      { key: "career", label: "Careers" },
+    ], this.newsCat, k => { this.newsCat = k as NewsCategory | "all"; }));
+    filters.appendChild(segment("Region", [
+      { key: "all", label: "All" },
+      ...REGION_ORDER.map(r => ({ key: r, label: REGION_LABELS[r] ?? r })),
+    ], this.newsRegion, k => { this.newsRegion = k as Region | "all"; }));
+    wrap.appendChild(filters);
+
+    // --- Feed ---
+    const items = buildNews(u, {
+      category: this.newsCat,
+      region: this.newsRegion,
+      limit: NEWS_RENDER_CAP + 1,
+    });
+
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "universe-empty-note";
+      empty.textContent = "No news yet — play out some days and the scene will start making headlines.";
+      wrap.appendChild(empty);
+      body.appendChild(wrap);
+      return;
+    }
+
+    const teamName = (id: string) => u.teams?.find(t => t.id === id)?.name ?? "team";
+    const playerName = (id: string) => u.players.find(p => p.id === id)?.handle ?? "player";
+
+    const list = document.createElement("div");
+    list.className = "uni-news-list";
+    for (const it of items.slice(0, NEWS_RENDER_CAP)) {
+      const row = document.createElement("div");
+      row.className = `uni-news-row uni-news-${it.category}`;
+      const tag = it.tag ? `<span class="uni-news-tag">${escapeHtml(it.tag)}</span>` : "";
+      const region = it.region ? `<span class="uni-news-region">${REGION_LABELS[it.region] ?? it.region}</span>` : "";
+      // Clickable chips for every involved org/player (jump to their page).
+      const chips = [
+        ...it.teamIds.map(id => `<button class="uni-news-chip" data-tid="${id}">${escapeHtml(teamName(id))}</button>`),
+        ...it.playerIds.map(id => `<button class="uni-news-chip ucp-player" data-pid="${id}">${escapeHtml(playerName(id))}</button>`),
+      ].join("");
+      row.innerHTML =
+        `<span class="uni-news-day">D${it.day}</span>` +
+        `<div class="uni-news-body">` +
+          `<div class="uni-news-head">${tag}<span class="uni-news-text">${escapeHtml(it.headline)}</span>${region}</div>` +
+          (chips ? `<div class="uni-news-chips">${chips}</div>` : "") +
+        `</div>`;
+      list.appendChild(row);
+    }
+    wrap.appendChild(list);
+
+    if (items.length > NEWS_RENDER_CAP) {
+      const more = document.createElement("div");
+      more.className = "uni-news-more";
+      more.textContent = `Showing the ${NEWS_RENDER_CAP} most recent — narrow the filters to see more.`;
+      wrap.appendChild(more);
+    }
+    body.appendChild(wrap);
   }
 
   // ---- Settings screen ----
@@ -3259,17 +3400,6 @@ function careerClutchBuckets(c: CareerStats): ClutchBucketStats[] {
 
 function careerOf(u: Universe, id: string): CareerStats {
   return u.careers?.[id] ?? emptyCareer();
-}
-
-// HLTV 1.0 rating from per-match stats. Constants are the league averages used
-// in the original formula. Returns 0 if the player did not play any rounds.
-function hltvRating1(s: import("./types.ts").PlayerMatchStats): number {
-  const R = s.roundsPlayed;
-  if (R <= 0) return 0;
-  const kr = (s.kills / R) / 0.679;
-  const sr = ((R - s.deaths) / R) / 0.317;
-  const mkr = (s.k1 + 4 * s.k2 + 9 * s.k3 + 16 * s.k4 + 25 * s.k5) / R / 1.277;
-  return (kr + 0.7 * sr + mkr) / 2.7;
 }
 
 // Per-player stats for a matchup: a Bo1's own stats, or a series' games summed
