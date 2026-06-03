@@ -916,7 +916,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 0.95rem;
 }
 
-/* Season standings (Teams tab) */
+/* Circuit / world ranking (Teams tab) */
 .uni-season-banner {
   display: flex; align-items: baseline; gap: 0.75rem;
   padding: 0.6rem 0.2rem 0.9rem;
@@ -924,7 +924,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-season-banner .uss-title { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.02em; }
 .uni-season-banner .uss-progress { color: var(--muted, #8a93a6); font-size: 0.85rem; }
 
-/* Segmented toggle (Season standings / All-time ladder) */
+/* Segmented toggle (World ranking / All-time ladder) */
 .uni-seg-toggle { display: inline-flex; gap: 0; margin-bottom: 1rem; border-radius: 6px; overflow: hidden; border: 1px solid var(--border, #2a3142); }
 .uni-seg {
   background: transparent; border: 0; color: var(--muted, #8a93a6);
@@ -954,6 +954,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-standings-table .usc-team .pt-handle { display: block; font-weight: 600; }
 .uni-standings-table .usc-team .pt-realname { display: block; color: var(--muted, #8a93a6); font-size: 0.72rem; }
 .uni-standings-table tr.usc-leader { background: rgba(59,110,165,0.12); }
+.uni-standings-table td.usc-pts { font-weight: 700; font-variant-numeric: tabular-nums; }
 .uni-standings-table .usc-pos { color: var(--good, #5fce7e); }
 .uni-standings-table .usc-neg { color: var(--bad, #e06c6c); }
 
@@ -1051,6 +1052,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .upp-team-link { color: var(--accent, #e8b34a); }
 .upp-team-link.clickable { cursor: pointer; }
 .upp-team-link.clickable:hover { text-decoration: underline; }
+.upp-retired { color: var(--bad, #d9534f); font-weight: 600; }
 .uni-champions-head { font-weight: 600; margin-bottom: 0.5rem; }
 .uni-champions-row {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem;
@@ -1203,6 +1205,34 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .upp-gl-result { font-weight: 700; }
 .upp-gl-result.good { color: var(--good); }
 .upp-gl-result.bad  { color: var(--bad); }
+
+.upp-teamhist, .upp-seasons {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
+}
+.upp-th-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center;
+  font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--line);
+}
+.upp-th-row:last-child { border-bottom: none; }
+.upp-th-name { font-weight: 600; }
+.upp-th-region {
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px;
+}
+.upp-th-span { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.upp-th-current {
+  color: var(--good); font-weight: 700; font-size: 10px; letter-spacing: 0.05em; margin-left: 4px;
+}
+.upp-season-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.upp-season-table th, .upp-season-table td {
+  text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line);
+}
+.upp-season-table th {
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+  font-size: 11px; font-weight: 500;
+}
+.upp-season-table tbody tr:last-child td { border-bottom: none; }
 
 .upp-raw {
   background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px;
@@ -1757,6 +1787,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .upp-clutch-label { font-family: var(--font-display); letter-spacing: 0.06em; }
 .upp-clutch-val { font-family: var(--font-score); font-weight: 400; font-size: 24px; font-variant-numeric: tabular-nums; }
 .upp-gl-stat, .upp-gl-rating { font-family: var(--font-mono); }
+.upp-th-span, .upp-season-table td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 /* ---- Observe-match HUD → center scorebug ---- */
 .universe-match-hud {

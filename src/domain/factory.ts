@@ -123,6 +123,23 @@ function rollTraits(role: Role): Trait[] {
 }
 
 let playerCounter = 0;
+
+// Advance the id counter past every `pN` already present in `players`. The
+// counter is module state that resets to 0 on page load, but a universe loaded
+// from storage carries players minted in an earlier session — without this, the
+// next youth intake would re-issue p1, p2, … and collide with existing ids
+// (two players sharing an id desync the Map-based roster lookups from the
+// find-based player pages). Call after loading or creating a universe, before
+// any further makePlayer.
+export function reservePlayerIds(players: Array<{ id: string }>): void {
+  let max = playerCounter;
+  for (const p of players) {
+    const m = /^p(\d+)$/.exec(p.id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  playerCounter = max;
+}
+
 // Pass `region` to draw the player's nationality from that region only — used
 // to seed a guaranteed headcount per competitive region. Omit for a globally
 // weighted pick.

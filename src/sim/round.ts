@@ -129,6 +129,73 @@ export interface RoundSnapshot {
   tickShots: TickShot[];
 }
 
+// ---- Precomputed wall visibility (PVS) -------------------------------------
+//
+// LOS is the sim's hottest path (~390k calls/match), but wall occlusion is a
+// pure function of the static map, and every match in a batch runs on the SAME
+// map object. So we precompute, once per map, a tile→tile wall-visibility bitset
+// (center-to-center): bit (i*N + j) is set iff tile i has a clear wall-LOS to
+// tile j. hasLineOfSight then decomposes exactly as `wallClear && smokeClear` —
+// a single bit test for the static part, and the dynamic smoke walk only runs
+// when smokes are actually out. Built lazily and cached per map object (shared
+// across every match on that map, in every worker). ~60KB for a 693-tile map.
+//
+// NOTE: wall LOS is now tile-resolution (center-to-center) rather than the old
+// per-pixel ray, so results can differ at grazing wall corners. The old ray
+// already floored endpoints to tiles, so the shift is small — but it does change
+// sim outcomes and invalidates seed-exact reproduction of pre-change replays.
+const visCache = new WeakMap<GameMap, Uint8Array>();
+
+// Is the center-to-center ray between tiles i and j free of wall tiles? Walks
+// the grid (Amanatides–Woo) over the cells strictly between the endpoints.
+function centerRayClear(map: GameMap, i: number, j: number): boolean {
+  const W = map.width, ts = map.tileSize;
+  const ax = (i % W + 0.5) * ts, ay = ((i / W) | 0) * ts + ts * 0.5;
+  const bx = (j % W + 0.5) * ts, by = ((j / W) | 0) * ts + ts * 0.5;
+  let tx = i % W, ty = (i / W) | 0;
+  const ex = j % W, ey = (j / W) | 0;
+  const dx = bx - ax, dy = by - ay;
+  const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+  const invDx = dx !== 0 ? 1 / dx : Infinity;
+  const invDy = dy !== 0 ? 1 / dy : Infinity;
+  let tMaxX = dx !== 0 ? ((tx + (stepX > 0 ? 1 : 0)) * ts - ax) * invDx : Infinity;
+  let tMaxY = dy !== 0 ? ((ty + (stepY > 0 ? 1 : 0)) * ts - ay) * invDy : Infinity;
+  const tDeltaX = dx !== 0 ? Math.abs(ts * invDx) : Infinity;
+  const tDeltaY = dy !== 0 ? Math.abs(ts * invDy) : Infinity;
+  const H = map.height;
+  let safety = (W + H) * 2;
+  while (safety-- > 0) {
+    if (tx === ex && ty === ey) return true;
+    if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
+    else               { ty += stepY; tMaxY += tDeltaY; }
+    if (tx < 0 || ty < 0 || tx >= W || ty >= H) return false;
+    if (tx === ex && ty === ey) return true; // reached target before testing it as wall
+    if (map.walls[ty * W + tx]) return false;
+  }
+  return true;
+}
+
+// Build (or fetch) the wall-visibility bitset for a map. Symmetric; wall tiles
+// see nothing. O(N²) one-time per map, amortized over every match on it.
+function tileVisibility(map: GameMap): Uint8Array {
+  const cached = visCache.get(map);
+  if (cached) return cached;
+  const W = map.width, H = map.height, N = W * H;
+  const bits = new Uint8Array(Math.ceil((N * N) / 8));
+  const set = (a: number) => { bits[a >> 3] |= 1 << (a & 7); };
+  for (let i = 0; i < N; i++) {
+    if (map.walls[i]) continue;
+    set(i * N + i); // a tile sees itself
+    for (let j = i + 1; j < N; j++) {
+      if (map.walls[j]) continue;
+      if (centerRayClear(map, i, j)) { set(i * N + j); set(j * N + i); }
+    }
+  }
+  visCache.set(map, bits);
+  return bits;
+}
+
 export class RoundSim {
   agents: Agent[] = [];
   smokes: Smoke[] = [];
@@ -146,8 +213,12 @@ export class RoundSim {
   result: RoundResult | null = null;
   // Per-tick shots, drained by renderer each frame.
   tickShots: TickShot[] = [];
-  // Per-tick snapshots — used for replay after the round ends.
+  // Per-tick snapshots — used for replay after the round ends. Building one
+  // every tick allocates a deep copy of all agents/grenades/effects, which
+  // dominates headless-sim time, so it's opt-in (off for the universe batch
+  // sim and observe's fast-forward sub-sims, which never read snapshots).
   snapshots: RoundSnapshot[] = [];
+  captureSnapshots = false;
 
   bombCarrier: string | null = null;
   bombDropped: Vec2 | null = null;
@@ -163,6 +234,19 @@ export class RoundSim {
 
   private rng: () => number;
   private players: PlayerLookup;
+  // Precomputed wall-visibility bitset for this.map (tile i can see tile j).
+  private vis: Uint8Array;
+  // Per-tick agent→agent visibility matrix (indexed by Agent.idx). Agent
+  // positions only change in move(), so within one position-epoch every
+  // hasLineOfSight(viewer, target) is constant — but updateIntel, think's
+  // threat/composure checks, and acquireTarget each re-sweep the same pairs.
+  // canSee() computes each ordered pair at most once per epoch and caches it,
+  // invalidated by bumpVis() at tick start and again after move(). Generation-
+  // stamped so invalidation is O(1) (no array fill). Exact — same result as a
+  // direct hasLineOfSight call at that moment.
+  private losGen!: Int32Array;
+  private losVal!: Uint8Array;
+  private visGen = 0;
   private ctThreatFocus: Vec2;
   private tThreatFocus: Vec2;
   private mapAnalysis: MapAnalysis;
@@ -185,6 +269,13 @@ export class RoundSim {
     CT: [],
     T: [],
   };
+  // Most-recent LOS-ping time per side per enemy id — an O(1) replacement for
+  // scanning the radar trail to rate-limit pings (LOS_REFRESH_MS). Equivalent
+  // because any ping inside that window is still well within its TTL.
+  private lastLosPing: Record<Side, Record<string, number>> = { CT: {}, T: {} };
+  // Bombsite world-centers, precomputed once (static for the round) so
+  // nearestSiteId doesn't re-derive them on every radar ping.
+  private siteCenters: { id: SiteId; c: Vec2 }[] = [];
   tStrategy: TStrategy;
   ctSetup: { A: number; B: number; mid: number };
   intel: Record<Side, SideIntel> = {
@@ -213,6 +304,8 @@ export class RoundSim {
       s = (s * 1664525 + 1013904223) >>> 0;
       return s / 0x1_0000_0000;
     };
+    this.vis = tileVisibility(map);
+    this.siteCenters = map.bombsites.map(s => ({ id: s.id, c: worldCenterOfTile(s.center, map) }));
     const all = [...ct.players, ...tSide.players];
     this.players = (id) => all.find(p => p.id === id);
     // Each side's "hold" direction is toward the opposite spawn centroid.
@@ -222,6 +315,10 @@ export class RoundSim {
     this.tStrategy = this.pickTStrategy();
     this.ctSetup = this.pickCtSetup();
     this.spawnAgents();
+    // Visibility matrix sized to the (fixed-for-the-round) agent count.
+    const n2 = this.agents.length * this.agents.length;
+    this.losGen = new Int32Array(n2).fill(-1);
+    this.losVal = new Uint8Array(n2);
     this.assignBombCarrier();
     this.assignSites();
     this.scheduleSmokes();
@@ -401,6 +498,7 @@ export class RoundSim {
       const sy = (spawn.y + 0.5) * this.map.tileSize;
       const w = WEAPONS[loadout.weapon];
       return {
+        idx: 0, // assigned after both sides are pushed (see below)
         playerId: p.id,
         side,
         pos: { x: sx, y: sy },
@@ -443,6 +541,8 @@ export class RoundSim {
     };
     this.ct.players.forEach((p, i) => this.agents.push(make(p, "CT", this.map.ctSpawns[i % this.map.ctSpawns.length])));
     this.tSide.players.forEach((p, i) => this.agents.push(make(p, "T", this.map.tSpawns[i % this.map.tSpawns.length])));
+    // Stable per-round slot, keying the per-tick visibility matrix.
+    this.agents.forEach((a, i) => { a.idx = i; });
   }
 
   // Chokes worth smoking for this agent.
@@ -631,6 +731,7 @@ export class RoundSim {
   tick(): void {
     if (this.finished) return;
     this.t += TICK_MS;
+    this.bumpVis(); // new epoch: invalidate last tick's post-move sightlines
     this.tickShots.length = 0;
     this.tickFlashes.length = 0;
     this.tickHEs.length = 0;
@@ -645,6 +746,7 @@ export class RoundSim {
     for (const a of this.agents) if (a.alive) this.think(a);
     for (const a of this.agents) if (a.alive) this.tickPeek(a);
     for (const a of this.agents) if (a.alive) this.move(a);
+    this.bumpVis(); // positions changed: sightlines from here use post-move coords
     this.checkPickups();
     for (const a of this.agents) if (a.alive) this.updateLook(a);
     for (const a of this.agents) if (a.alive) this.applyFacing(a);
@@ -654,7 +756,7 @@ export class RoundSim {
     this.tradeMarks = this.tradeMarks.filter(m => m.expiresAt > this.t);
 
     this.tickBomb();
-    this.captureSnapshot();
+    if (this.captureSnapshots) this.captureSnapshot();
     this.checkEnd();
   }
 
@@ -699,81 +801,74 @@ export class RoundSim {
 
   // ---- Intel / shared radar ----
   private updateIntel() {
-    // Expire radar pings whose source TTL has elapsed. Older pings stay on
-    // the radar until then, so the team's perception is the *trail* of pings
-    // rather than a single current pin per enemy.
+    const HEAR_SQ = HEARING_RANGE * HEARING_RANGE;
+
+    // Expire radar pings whose source TTL has elapsed (in-place compaction so
+    // we don't allocate two fresh arrays every tick). Older pings stay until
+    // then — the team's perception is the *trail* of pings, not a single pin.
     for (const side of ["CT", "T"] as const) {
-      this.perceived[side] = this.perceived[side].filter(p => {
+      const arr = this.perceived[side];
+      let w = 0;
+      for (let r = 0; r < arr.length; r++) {
+        const p = arr[r];
         const ttl = p.source === "los" ? RADAR_TTL_LOS_MS : RADAR_TTL_SOUND_MS;
-        return this.t - p.at <= ttl;
-      });
+        if (this.t - p.at <= ttl) arr[w++] = arr[r];
+      }
+      arr.length = w;
     }
 
-    // LOS sightings: append a fresh ping for each visible enemy, but
-    // rate-limit so we don't add an entry every tick (would explode the trail
-    // size). One LOS ping per enemy per LOS_REFRESH_MS is plenty to recover
-    // the trail's shape.
+    // One agent×enemy pass folding both intel sources:
+    //  - LOS sightings → a radar ping, rate-limited to one per enemy per
+    //    LOS_REFRESH_MS (O(1) via lastLosPing instead of scanning the trail).
+    //  - Sound → a delayed, noisy callout for each *running* enemy in earshot.
+    // Per-viewer comms values are hoisted out of the inner loop. The rng draw
+    // order is unchanged (only the sound branch draws), so outcomes are exact.
     for (const a of this.agents) {
       if (!a.alive) continue;
+      const side = a.side;
+      const trail = this.perceived[side];
+      const lastLos = this.lastLosPing[side];
+      const comm = this.players(a.playerId)?.stats.communication ?? 50;
+      const t01 = clamp((comm - 30) / 55, 0, 1);
+      const delay = COMMS_DELAY_MAX_MS - (COMMS_DELAY_MAX_MS - COMMS_DELAY_MIN_MS) * t01;
+      const noiseR = COMMS_NOISE_MAX_PX - (COMMS_NOISE_MAX_PX - COMMS_NOISE_MIN_PX) * t01;
       for (const e of this.agents) {
-        if (!e.alive || e.side === a.side) continue;
-        if (!this.hasLineOfSight(a.pos, e.pos)) continue;
-        const trail = this.perceived[a.side];
-        const recent = trail.some(p =>
-          p.enemyId === e.playerId && p.source === "los" && this.t - p.at < LOS_REFRESH_MS
-        );
-        if (!recent) {
-          trail.push({
-            pos: { x: e.pos.x, y: e.pos.y },
-            at: this.t,
-            source: "los",
-            enemyId: e.playerId,
+        if (!e.alive || e.side === side) continue;
+        if (this.canSee(a, e)) {
+          if (this.t - (lastLos[e.playerId] ?? -Infinity) >= LOS_REFRESH_MS) {
+            trail.push({ pos: { x: e.pos.x, y: e.pos.y }, at: this.t, source: "los", enemyId: e.playerId });
+            lastLos[e.playerId] = this.t;
+          }
+          if (e.playerId === this.bombCarrier) {
+            // Bomb-carrier sighting gets the dedicated bombSeenAt flag the
+            // rotation logic checks separately.
+            this.intel[side][this.nearestSiteId(e.pos)].bombSeenAt = this.t;
+          }
+        }
+        if (e.moveMode === "run" && distSq(a.pos, e.pos) <= HEAR_SQ) {
+          const r = Math.sqrt(this.rng()) * noiseR;   // uniform disc
+          const theta = this.rng() * Math.PI * 2;
+          this.commsCalls.push({
+            side, enemyId: e.playerId,
+            pos: { x: e.pos.x + Math.cos(theta) * r, y: e.pos.y + Math.sin(theta) * r },
+            arrivesAt: this.t + delay,
           });
         }
-        if (e.playerId === this.bombCarrier) {
-          // Bomb-carrier sighting still gets the dedicated bombSeenAt flag
-          // that the rotation logic checks separately.
-          this.intel[a.side][this.nearestSiteId(e.pos)].bombSeenAt = this.t;
-        }
       }
     }
 
-    // Sound: any agent who hears a running enemy queues a delayed callout
-    // carrying their *guess* at the enemy's position. Higher communication
-    // → smaller guess offset and shorter delay.
-    for (const a of this.agents) {
-      if (!a.alive) continue;
-      for (const e of this.agents) {
-        if (!e.alive || e.side === a.side || e.moveMode !== "run") continue;
-        if (dist(a.pos, e.pos) > HEARING_RANGE) continue;
-        const comm = this.players(a.playerId)?.stats.communication ?? 50;
-        const t01 = clamp((comm - 30) / 55, 0, 1);
-        const delay = COMMS_DELAY_MAX_MS - (COMMS_DELAY_MAX_MS - COMMS_DELAY_MIN_MS) * t01;
-        const noiseR = COMMS_NOISE_MAX_PX - (COMMS_NOISE_MAX_PX - COMMS_NOISE_MIN_PX) * t01;
-        const r = Math.sqrt(this.rng()) * noiseR;     // uniform disc
-        const theta = this.rng() * Math.PI * 2;
-        this.commsCalls.push({
-          side: a.side,
-          enemyId: e.playerId,
-          pos: { x: e.pos.x + Math.cos(theta) * r, y: e.pos.y + Math.sin(theta) * r },
-          arrivesAt: this.t + delay,
-        });
+    // Drain landed callouts onto the radar (in-place compaction of the pending
+    // queue). Sound pings stack alongside LOS pings — the trail is everywhere
+    // the team thinks an enemy has been, not just the most-recent pin.
+    const cc = this.commsCalls;
+    if (cc.length > 0) {
+      let w = 0;
+      for (let r = 0; r < cc.length; r++) {
+        const c = cc[r];
+        if (c.arrivesAt > this.t) { cc[w++] = c; continue; }
+        this.perceived[c.side].push({ pos: c.pos, at: c.arrivesAt, source: "sound", enemyId: c.enemyId });
       }
-    }
-
-    // Drain landed callouts onto the radar. Each landing call appends its
-    // own ping — sound pings stack alongside LOS pings, so the team's
-    // perception is a *trail* of everywhere they think an enemy has been,
-    // not a single most-recent pin.
-    if (this.commsCalls.length > 0) {
-      const stillPending: typeof this.commsCalls = [];
-      for (const c of this.commsCalls) {
-        if (c.arrivesAt > this.t) { stillPending.push(c); continue; }
-        this.perceived[c.side].push({
-          pos: c.pos, at: c.arrivesAt, source: "sound", enemyId: c.enemyId,
-        });
-      }
-      this.commsCalls = stillPending;
+      cc.length = w;
     }
   }
 
@@ -795,9 +890,8 @@ export class RoundSim {
 
   private nearestSiteId(pos: Vec2): SiteId {
     let best: SiteId = "A"; let bd = Infinity;
-    for (const s of this.map.bombsites) {
-      const c = worldCenterOfTile(s.center, this.map);
-      const d = dist(c, pos);
+    for (const s of this.siteCenters) {
+      const d = distSq(s.c, pos); // squared — only the ordering matters
       if (d < bd) { bd = d; best = s.id; }
     }
     return best;
@@ -838,7 +932,7 @@ export class RoundSim {
     for (const a of this.agents) {
       if (!a.alive) continue;
       const dx = f.pos.x - a.pos.x, dy = f.pos.y - a.pos.y;
-      const d = Math.hypot(dx, dy);
+      const d = Math.sqrt(dx * dx + dy * dy);
       if (d > FLASH_RANGE) continue;
       if (!this.hasLineOfSight(a.pos, f.pos)) continue;
       const flashDir = Math.atan2(dy, dx);
@@ -896,7 +990,7 @@ export class RoundSim {
           const world = this.tileCenter({ x: cx, y: cy });
           let score = 0;
           if (!this.hasLineOfSight(world, flashPos)) score += 100;
-          score += Math.hypot(world.x - flashPos.x, world.y - flashPos.y) / ts;
+          score += dist(world, flashPos) / ts;
           score -= r * 0.5; // mild preference for closer tiles
           if (!best || score > best.score) best = { tile: world, score };
         }
@@ -929,7 +1023,7 @@ export class RoundSim {
       const m = this.molotovs[i];
       const extinguished = this.smokes.some(s => {
         const dx = m.pos.x - s.pos.x, dy = m.pos.y - s.pos.y;
-        const d = Math.hypot(dx, dy);
+        const d = Math.sqrt(dx * dx + dy * dy);
         return d < m.radius + s.radius * 0.6;
       });
       if (extinguished || this.t >= m.expiresAt) {
@@ -1000,7 +1094,7 @@ export class RoundSim {
         // Punch a hole in any nearby smoke for a brief moment.
         for (const sm of this.smokes) {
           const dx = sm.pos.x - he.pos.x, dy = sm.pos.y - he.pos.y;
-          const d = Math.hypot(dx, dy);
+          const d = Math.sqrt(dx * dx + dy * dy);
           if (d < sm.radius + HE_HOLE_RADIUS) {
             this.smokeHoles.push({
               pos: { x: he.pos.x, y: he.pos.y },
@@ -1022,7 +1116,7 @@ export class RoundSim {
       if (!a.alive) continue;
       if (a.side === he.side) continue; // no friendly fire
       const dx = a.pos.x - he.pos.x, dy = a.pos.y - he.pos.y;
-      const d = Math.hypot(dx, dy);
+      const d = Math.sqrt(dx * dx + dy * dy);
       if (d > HE_RADIUS) continue;
       if (!this.hasLineOfSight(a.pos, he.pos)) continue; // walls block damage
       let dmg = HE_MAX_DAMAGE * (1 - d / HE_RADIUS);
@@ -1720,7 +1814,7 @@ export class RoundSim {
     const wp = a.path[0];
     const dx = wp.x - a.pos.x;
     const dy = wp.y - a.pos.y;
-    const d = Math.hypot(dx, dy);
+    const d = Math.sqrt(dx * dx + dy * dy);
     if (d < speed) {
       a.pos.x = wp.x; a.pos.y = wp.y;
       a.path.shift();
@@ -1992,15 +2086,16 @@ export class RoundSim {
     let visibleEnemies = 0;
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
-      if (!this.hasLineOfSight(a.pos, e.pos)) continue;
+      if (!this.canSee(a, e)) continue;
       visibleEnemies++;
     }
     // Nearby allies — low-composure players want closer support to feel safe.
     const allyRange = 240 + (80 - stats.composure) * 0.8;
+    const allyRangeSq = allyRange * allyRange;
     let nearbyAllies = 0;
     for (const al of this.agents) {
       if (!al.alive || al.side !== a.side || al.playerId === a.playerId) continue;
-      if (dist(a.pos, al.pos) < allyRange) nearbyAllies++;
+      if (distSq(a.pos, al.pos) < allyRangeSq) nearbyAllies++;
     }
 
     // Tilt-prone players (rolled at round start from low composure) retreat
@@ -2036,7 +2131,7 @@ export class RoundSim {
       this.setGoal(a, { x: enemy.pos.x, y: enemy.pos.y });
     } else if (stance === "disengage") {
       const dx = a.pos.x - enemy.pos.x, dy = a.pos.y - enemy.pos.y;
-      const dd = Math.hypot(dx, dy) || 1;
+      const dd = Math.sqrt(dx * dx + dy * dy) || 1;
       const goal: Vec2 = { x: a.pos.x + (dx / dd) * 220, y: a.pos.y + (dy / dd) * 220 };
       this.setGoal(a, goal);
     } else {
@@ -2053,7 +2148,7 @@ export class RoundSim {
       if (e.moveMode !== "run") continue;
       const d = dist(a.pos, e.pos);
       if (d > HEARING_RANGE) continue;
-      if (this.hasLineOfSight(a.pos, e.pos)) continue; // direct LOS handled by acquireTarget
+      if (this.canSee(a, e)) continue; // direct LOS handled by acquireTarget
       if (this.wallOnLine(a.pos, e.pos)) continue;    // walls block bullets even through smoke
       if (!this.smokeOnLine(a.pos, e.pos)) continue;
       return e;
@@ -2094,7 +2189,7 @@ export class RoundSim {
   }
 
   private smokeOnLine(p1: Vec2, p2: Vec2): boolean {
-    const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const d = dist(p1, p2);
     const steps = Math.ceil(d / 10);
     for (let i = 1; i < steps; i++) {
       const tt = i / steps;
@@ -2160,7 +2255,7 @@ export class RoundSim {
 
     for (const e of this.agents) {
       if (!e.alive || e.side === a.side) continue;
-      if (!this.hasLineOfSight(a.pos, e.pos)) continue;
+      if (!this.canSee(a, e)) continue;
       const d = dist(a.pos, e.pos);
       visibleEnemies.push({ e, d });
       a.lastSeen[e.playerId] = this.t;
@@ -2193,28 +2288,54 @@ export class RoundSim {
     return best;
   }
 
+  // Invalidate the per-tick visibility matrix. Called at tick start and after
+  // move() — the only two points where agent positions change within a tick.
+  private bumpVis(): void { this.visGen++; }
+
+  // Does viewer have line of sight to target? Cached per position-epoch in the
+  // visibility matrix, so the same ordered pair is raycast at most once between
+  // bumpVis() calls. Equivalent to hasLineOfSight(viewer.pos, target.pos).
+  private canSee(viewer: Agent, target: Agent): boolean {
+    const i = viewer.idx * this.agents.length + target.idx;
+    if (this.losGen[i] === this.visGen) return this.losVal[i] === 1;
+    const r = this.hasLineOfSight(viewer.pos, target.pos);
+    this.losGen[i] = this.visGen;
+    this.losVal[i] = r ? 1 : 0;
+    return r;
+  }
+
   private hasLineOfSight(a: Vec2, b: Vec2): boolean {
-    // Grid traversal (Amanatides–Woo) — visits every tile the segment touches.
-    const ts = this.map.tileSize;
-    const W = this.map.width, H = this.map.height;
-    let tx = Math.floor(a.x / ts);
-    let ty = Math.floor(a.y / ts);
-    const ex = Math.floor(b.x / ts);
-    const ey = Math.floor(b.y / ts);
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
+    // Static wall occlusion is a precomputed tile→tile bit test (see PVS above).
+    const ts = this.map.tileSize, W = this.map.width, H = this.map.height;
+    const ax = Math.floor(a.x / ts), ay = Math.floor(a.y / ts);
+    const bx = Math.floor(b.x / ts), by = Math.floor(b.y / ts);
+    if (ax < 0 || ay < 0 || ax >= W || ay >= H || bx < 0 || by < 0 || bx >= W || by >= H) return false;
+    const N = W * H;
+    const idx = (ay * W + ax) * N + (by * W + bx);
+    if ((this.vis[idx >> 3] & (1 << (idx & 7))) === 0) return false; // wall-blocked
+    // Clear of walls — visible unless a smoke cuts the line (the only dynamic part).
+    if (this.smokes.length === 0) return true;
+    return this.smokeClear(a, b);
+  }
+
+  // True if no active smoke blocks the segment a→b. Walks the tiles along the
+  // segment (Amanatides–Woo) sampling smoke at each tile entry; HE-punched
+  // smokeHoles reopen the line. Only called when smokes are actually out.
+  private smokeClear(a: Vec2, b: Vec2): boolean {
+    const ts = this.map.tileSize, W = this.map.width, H = this.map.height;
+    let tx = Math.floor(a.x / ts), ty = Math.floor(a.y / ts);
+    const ex = Math.floor(b.x / ts), ey = Math.floor(b.y / ts);
+    const dx = b.x - a.x, dy = b.y - a.y;
     const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
     const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
     const invDx = dx !== 0 ? 1 / dx : Infinity;
     const invDy = dy !== 0 ? 1 / dy : Infinity;
-    const nextBoundaryX = (tx + (stepX > 0 ? 1 : 0)) * ts;
-    const nextBoundaryY = (ty + (stepY > 0 ? 1 : 0)) * ts;
-    let tMaxX = dx !== 0 ? (nextBoundaryX - a.x) * invDx : Infinity;
-    let tMaxY = dy !== 0 ? (nextBoundaryY - a.y) * invDy : Infinity;
+    let tMaxX = dx !== 0 ? ((tx + (stepX > 0 ? 1 : 0)) * ts - a.x) * invDx : Infinity;
+    let tMaxY = dy !== 0 ? ((ty + (stepY > 0 ? 1 : 0)) * ts - a.y) * invDy : Infinity;
     const tDeltaX = dx !== 0 ? Math.abs(ts * invDx) : Infinity;
     const tDeltaY = dy !== 0 ? Math.abs(ts * invDy) : Infinity;
 
-    const checkSmoke = (px: number, py: number): boolean => {
+    const smokeAt = (px: number, py: number): boolean => {
       for (const sm of this.smokes) {
         const sdx = px - sm.pos.x, sdy = py - sm.pos.y;
         if (sdx * sdx + sdy * sdy >= sm.radius * sm.radius) continue;
@@ -2223,28 +2344,20 @@ export class RoundSim {
           const hdx = px - h.pos.x, hdy = py - h.pos.y;
           if (hdx * hdx + hdy * hdy < h.radius * h.radius) { inHole = true; break; }
         }
-        if (!inHole) return true; // blocked by smoke
+        if (!inHole) return true;
       }
       return false;
     };
 
-    // Walk tiles along the segment. Bail if we hit a wall or smoke.
     let safety = (W + H) * 2;
     while (safety-- > 0) {
-      if (tx < 0 || ty < 0 || tx >= W || ty >= H) return false;
-      // Skip the start tile (shooter/eye is inside it).
-      if (!(tx === Math.floor(a.x / ts) && ty === Math.floor(a.y / ts))) {
-        if (this.map.walls[ty * W + tx]) return false;
-      }
-      // Sample point near the entry into this tile for smoke check.
       const tAlong = Math.min(tMaxX, tMaxY);
       const px = a.x + dx * Math.min(1, Math.max(0, tAlong));
       const py = a.y + dy * Math.min(1, Math.max(0, tAlong));
-      if (checkSmoke(px, py)) return false;
-
+      if (smokeAt(px, py)) return false;
       if (tx === ex && ty === ey) return true;
       if (tMaxX < tMaxY) { tx += stepX; tMaxX += tDeltaX; }
-      else                { ty += stepY; tMaxY += tDeltaY; }
+      else               { ty += stepY; tMaxY += tDeltaY; }
     }
     return true;
   }
@@ -2326,7 +2439,8 @@ export class RoundSim {
   }
 
   private enemiesNearby(a: Agent, range: number): boolean {
-    return this.agents.some(e => e.alive && e.side !== a.side && dist(e.pos, a.pos) < range);
+    const rangeSq = range * range;
+    return this.agents.some(e => e.alive && e.side !== a.side && distSq(e.pos, a.pos) < rangeSq);
   }
 
   private checkEnd() {
@@ -2387,7 +2501,11 @@ export class RoundSim {
   }
 }
 
-function dist(a: Vec2, b: Vec2) { return Math.hypot(a.x - b.x, a.y - b.y); }
+// Euclidean distance. Math.hypot is ~3–5× slower (it guards against over/underflow
+// we never hit at our coordinate scale), so use the plain form — it's the single
+// most-called helper in the sim. For pure threshold checks prefer distSq (no sqrt).
+function dist(a: Vec2, b: Vec2) { const dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
+function distSq(a: Vec2, b: Vec2) { const dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy; }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 function worldCenterOfTile(t: Vec2, map: GameMap): Vec2 {
   return { x: (t.x + 0.5) * map.tileSize, y: (t.y + 0.5) * map.tileSize };

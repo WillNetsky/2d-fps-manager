@@ -18,12 +18,23 @@ export const PLAYOFF_PRIZES = {
   swiss: 5_000,          // eliminated in the Swiss stage, never reached bracket
 } as const;
 
-// Prize money owed to each team in one region's finished playoff, keyed by team
-// id. A team appears once, at its best (and only) finish. Call only after the
-// region's bracket has fully resolved.
-export function regionPayouts(rp: RegionPlayoff): Map<string, number> {
+// Per-placement amounts (money or ranking points) — same tier shape so the same
+// bracket-walk distributes either.
+export interface PlacementTiers {
+  champion: number;
+  runnerUp: number;
+  semifinal: number;
+  quarterfinal: number;
+  bracket: number;   // earlier bracket exit
+  swiss: number;     // cut in the Swiss stage
+}
+
+// Amount owed to each team in one region's finished tournament, keyed by team id,
+// for the given tier table. A team appears once, at its best (and only) finish.
+// Call only after the region's bracket has fully resolved.
+export function placementPayouts(rp: RegionPlayoff, tiers: PlacementTiers): Map<string, number> {
   const out = new Map<string, number>();
-  if (rp.championTeamId) out.set(rp.championTeamId, PLAYOFF_PRIZES.champion);
+  if (rp.championTeamId) out.set(rp.championTeamId, tiers.champion);
 
   if (rp.bracket.length > 0) {
     const finalRound = Math.max(...rp.bracket.map(m => m.round));
@@ -33,20 +44,25 @@ export function regionPayouts(rp: RegionPlayoff): Map<string, number> {
       if (!loser || out.has(loser)) continue;
       const fromEnd = finalRound - m.round; // 0 = final, 1 = semis, 2 = QFs
       out.set(loser,
-        fromEnd === 0 ? PLAYOFF_PRIZES.runnerUp
-        : fromEnd === 1 ? PLAYOFF_PRIZES.semifinal
-        : fromEnd === 2 ? PLAYOFF_PRIZES.quarterfinal
-        : PLAYOFF_PRIZES.bracket);
+        fromEnd === 0 ? tiers.runnerUp
+        : fromEnd === 1 ? tiers.semifinal
+        : fromEnd === 2 ? tiers.quarterfinal
+        : tiers.bracket);
     }
   }
 
   // Teams cut in the Swiss stage never reached the bracket.
   for (const e of rp.entrants) {
     if (e.status === "eliminated" && !out.has(e.teamId)) {
-      out.set(e.teamId, PLAYOFF_PRIZES.swiss);
+      out.set(e.teamId, tiers.swiss);
     }
   }
   return out;
+}
+
+// Prize money owed to each team in one region's finished tournament.
+export function regionPayouts(rp: RegionPlayoff): Map<string, number> {
+  return placementPayouts(rp, PLAYOFF_PRIZES);
 }
 
 // ---- player market value ---------------------------------------------------

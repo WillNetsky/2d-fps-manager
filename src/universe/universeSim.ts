@@ -11,10 +11,10 @@ import { applyMatchElo } from "./elo.ts";
 import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
-  STARTING_ELO, TEAM_SIZE, CHAMPIONS_LOG_MAX,
+  STARTING_ELO, TEAM_SIZE, RECRUIT_BOND,
   GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE,
   type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
-  type ProvisionalStack, type Season, type SeasonChampion, type UniverseTeam, type VetoStep,
+  type ProvisionalStack, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 import { generateTeamName } from "../domain/teamNames.ts";
 
@@ -29,6 +29,13 @@ export interface SimState {
   maps: GameMap[];
   pendingDay: PendingDay | null;
   day: number;
+  // Current calendar year, and the per-year career buckets to fold into
+  // alongside lifetime `careers`. Both optional so a SimState can be built
+  // without period tracking (older call sites / tests); when present, every
+  // folded match also accrues into yearStats[period]. Kept up to date by the
+  // caller across a multi-day run so each day attributes to its own year.
+  period?: number;
+  yearStats?: Record<number, Record<string, CareerStats>>;
 }
 
 export function newSeed(): number {
@@ -198,6 +205,14 @@ export function teamMapComfort(playerIds: string[], byId: Map<string, Player>, m
   return n > 0 ? sum / n : MAP_COMFORT_NEUTRAL;
 }
 
+// Fold a completed matchup into the current year's per-player bucket, mirroring
+// the lifetime `careers` fold. No-op unless the caller is tracking the period.
+function recordPeriodCareers(state: SimState, m: Matchup): void {
+  if (state.period === undefined || !state.yearStats) return;
+  const bucket = state.yearStats[state.period] ??= {};
+  recordMatchupCareers(bucket, m);
+}
+
 // Fold one game's result into elo, chemistry, form, career totals, and map
 // comfort. Per the per-game model, each game of a series folds like a Bo1.
 function foldGame(state: SimState, ctIds: string[], tIds: string[], g: GameResult, byId: Map<string, Player>): number {
@@ -208,11 +223,13 @@ function foldGame(state: SimState, ctIds: string[], tIds: string[], g: GameResul
   applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: g.playerStats }, byId);
   recordMapComfort(byId, ctIds, tIds, state.maps[g.mapIndex]?.name, g.winnerSide);
   // Per-game career fold: a game looks like a completed Bo1 match for tallying.
-  recordMatchupCareers(state.careers, {
+  const asMatch: Matchup = {
     id: "", status: "completed", ctPlayerIds: ctIds, tPlayerIds: tIds,
     ctScore: g.ctScore, tScore: g.tScore, winnerSide: g.winnerSide,
     clutches: g.clutches, playerStats: g.playerStats,
-  });
+  };
+  recordMatchupCareers(state.careers, asMatch);
+  recordPeriodCareers(state, asMatch);
   return delta;
 }
 
@@ -250,6 +267,7 @@ export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId
   applyMatchForm(state.players, { winnerIds: winners, loserIds: losers, stats: o.playerStats! }, byId);
   recordMapComfort(byId, m.ctPlayerIds, m.tPlayerIds, state.maps[m.mapIndex ?? 0]?.name, o.winnerSide);
   recordMatchupCareers(state.careers, m);
+  recordPeriodCareers(state, m);
 }
 
 // Simulate + fold one matchup on the current thread. Used for the single-match
@@ -313,6 +331,12 @@ export function crystallizeTeam(
     team.elo = elo;
     team.lastPlayedDay = ctx.day;
     team.region = region;
+    // The exact clique re-formed: revive a disbanded org rather than minting a
+    // new identity, and reopen its roster history.
+    if (team.disbandedDay !== undefined) {
+      team.disbandedDay = undefined;
+      (team.rosterHistory ??= []).push({ day: ctx.day, playerIds: [...playerIds], note: "Re-formed" });
+    }
   }
   return team.id;
 }
@@ -374,14 +398,17 @@ export function resolveOrgSide(
 
 export function generateMatchups(
   players: Player[], elos: Record<string, number>, mapCount: number, teamCtx?: TeamContext,
+  excludeIds?: Set<string>,
 ): Matchup[] {
   const pool = Math.max(1, mapCount);
   const eloOf = (p: Player) => elos[p.id] ?? STARTING_ELO;
-  const avgElo = (team: Player[]) => team.reduce((s, p) => s + eloOf(p), 0) / team.length;
 
   // Partition the pool by competitive region — players only see their own scene.
+  // Retired players stay in the pool (for their pages/careers) but never matchmake.
+  // Players already committed to an active tournament sit out the daily ladder.
   const byRegion = new Map<Region, Player[]>();
   for (const p of players) {
+    if (p.retired || excludeIds?.has(p.id)) continue;
     const r = regionOf(p.country);
     (byRegion.get(r) ?? byRegion.set(r, []).get(r)!).push(p);
   }
@@ -393,35 +420,32 @@ export function generateMatchups(
     const inRegion = byRegion.get(region);
     if (!inRegion || inRegion.length < TEAM_SIZE * 2) continue; // can't field a lobby
 
-    const teams = formTeams(inRegion, eloOf);
-    // Pair adjacent teams by Elo so each matchup is between similar-strength
-    // 5-stacks. An odd team out sits the day.
-    teams.sort((a, b) => avgElo(b.players) - avgElo(a.players));
-    const pairings = [];
-    for (let i = 0; i + 1 < teams.length; i += 2) {
-      const a = teams[i], b = teams[i + 1];
-      pairings.push({ a, b, elo: (avgElo(a.players) + avgElo(b.players)) / 2 });
-    }
+    const teams = formTeams(inRegion, eloOf, !!teamCtx);
+    // Pair teams by stack composition first, Elo second: a 3+2 lobby faces
+    // another 3+2 (or a 2+2+1), a premade five faces a premade, solos face solos
+    // — so a stacked side never stomps five randoms. Odd teams out sit the day.
+    const pairings = pairTeams(teams, eloOf);
 
-    // The region's top pairing plays a Bo3 "tournament" series — but only when
-    // it's STRICTLY stronger than the runner-up (a tie at the top means no clear
+    // The strongest pairing plays a Bo3 "tournament" series — but only when it's
+    // STRICTLY stronger than the runner-up (a tie at the top means no clear
     // headliner, so everyone plays Bo1) and the rotation has ≥3 maps for a
     // distinct map each game.
+    pairings.sort((a, b) => b.elo - a.elo);
     const topIsSeries = pairings.length >= 2 && pairings[0].elo > pairings[1].elo && pool >= 3;
 
     pairings.forEach((pr, pi) => {
       const aStartsCt = Math.random() < 0.5;
       const ct = aStartsCt ? pr.a : pr.b;
       const t  = aStartsCt ? pr.b : pr.a;
-      // Surface the friend-stacks (2+ that queued together) in this lobby.
-      const parties = [ct.partyIds, t.partyIds].filter(p => p.length >= 2);
+      // Surface every friend-stack (2+ that queued together) in this lobby.
+      const parties = [...ct.parties, ...t.parties];
       const series = pi === 0 && topIsSeries;
-      // A side that fielded a full 5-man clique enters the stack→org pipeline:
+      // A side that fielded a full premade five enters the stack→org pipeline:
       // it's tagged (and its result folds into standings) only once it has
       // promoted to a tracked org; until then it plays as a pickup lobby.
-      const ctTeamId = teamCtx && ct.partyIds.length === TEAM_SIZE
+      const ctTeamId = teamCtx && ct.parties.some(p => p.length === TEAM_SIZE)
         ? resolveOrgSide(teamCtx, region, ct.players.map(p => p.id), elos) : undefined;
-      const tTeamId = teamCtx && t.partyIds.length === TEAM_SIZE
+      const tTeamId = teamCtx && t.parties.some(p => p.length === TEAM_SIZE)
         ? resolveOrgSide(teamCtx, region, t.players.map(p => p.id), elos) : undefined;
       matchups.push({
         id: `m${idx++}`,
@@ -441,24 +465,42 @@ export function generateMatchups(
   return matchups;
 }
 
-// A formed 5-player team plus the friend-stack that seeded it (player ids of
-// the 2+ clique that queued together; empty for teams built purely from solos).
-interface FormedTeam { players: Player[]; partyIds: string[]; }
+// A formed 5-player team plus the friend-stacks that seeded it (each a clique of
+// 2+ players who queued together; empty for teams built purely from solos). A
+// team can carry more than one stack, e.g. a 3+2 or 2+2+1 lobby.
+interface FormedTeam { players: Player[]; parties: string[][]; }
 
-// Build full 5-player teams out of a region's players, keeping friends together.
+// Two partial stacks are only merged into one lineup when their average Elo is
+// within this band, so grouping friends never builds a wildly mismatched five.
+const STACK_ELO_BAND = 300;
+
+// Build full 5-player teams out of a region's players, keeping friends together
+// and grouping similar-size stacks so the lobby can later be matched against an
+// equally stacked one.
 //  1. Grow friendship cliques: anchor on the highest-Elo unassigned player and
 //     repeatedly pull in their strongest available friend (bond >= threshold).
-//  2. Fill each multi-player party up to 5 with the nearest-Elo solo players.
-//  3. Chunk any leftover solos into Elo-banded teams of 5.
-// Players who don't fit a full team sit out the day.
-function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): FormedTeam[] {
+//  2. Premade five-stacks stand as their own teams.
+//  3. Compose partial stacks into fives, preferring to pair a trio and a duo
+//     (3+2) or stack two duos (2+2+1) of similar Elo before topping up with the
+//     nearest-Elo solos.
+//  4. Chunk any leftover solos into Elo-banded teams of 5.
+// Players who can't fill a team sit out the day.
+//
+// When `recruit5th` is set (the persistent-team universe mode), a friendship
+// clique that stalls one short of five with a driven member actively recruits
+// its top-up solo INTO the party and seeds a bond — see step 3 — so the
+// completed five re-forms the next day and can pursue org status. This mutates
+// the recruit's and clique's relationships, so it's gated to that mode only.
+function formTeams(
+  regionPlayers: Player[], eloOf: (p: Player) => number, recruit5th = false,
+): FormedTeam[] {
   const byEloDesc = [...regionPlayers].sort(
     (a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id),
   );
   const used = new Set<string>();
 
   // 1. Friendship cliques.
-  const parties: Player[][] = [];
+  const cliques: Player[][] = [];
   for (const anchor of byEloDesc) {
     if (used.has(anchor.id)) continue;
     used.add(anchor.id);
@@ -477,39 +519,73 @@ function formTeams(regionPlayers: Player[], eloOf: (p: Player) => number): Forme
       used.add(best.id);
       party.push(best);
     }
-    parties.push(party);
+    cliques.push(party);
   }
 
-  const solos = parties
-    .filter(p => p.length === 1)
-    .map(p => p[0])
+  const avg = (g: Player[]) => avgOf(g, eloOf);
+  const premades = cliques.filter(c => c.length === TEAM_SIZE);
+  const stacks = cliques.filter(c => c.length >= 2 && c.length < TEAM_SIZE).sort((a, b) => avg(b) - avg(a));
+  const solos = cliques.filter(c => c.length === 1).map(c => c[0])
     .sort((a, b) => eloOf(b) - eloOf(a) || a.id.localeCompare(b.id));
-  const groups = parties
-    .filter(p => p.length >= 2)
-    .sort((a, b) => avgOf(b, eloOf) - avgOf(a, eloOf));
 
   const teams: FormedTeam[] = [];
 
-  // 2. Fill each real party up to 5 with the nearest-Elo solos. The original
-  //    clique members are the team's friend-stack.
-  for (const g of groups) {
-    const team = [...g];
-    const target = avgOf(g, eloOf);
-    while (team.length < TEAM_SIZE && solos.length > 0) {
+  // 2. Premade five-stacks stand as their own teams.
+  for (const p of premades) teams.push({ players: p, parties: [p.map(x => x.id)] });
+
+  // 3. Compose partial stacks into fives, grouping similar-Elo stacks first.
+  while (stacks.length > 0) {
+    const anchor = stacks.shift()!;
+    const members = [...anchor];
+    const parts: Player[][] = [anchor];
+    const target = avg(anchor);
+    // Pull in compatible stacks (closest Elo within the band) before any solos,
+    // so a free trio joins a duo (3+2) and duos stack up (2+2+1).
+    for (let need = TEAM_SIZE - members.length; need > 0; need = TEAM_SIZE - members.length) {
+      let bi = -1, bd = Infinity;
+      for (let i = 0; i < stacks.length; i++) {
+        if (stacks[i].length > need) continue;
+        const d = Math.abs(avg(stacks[i]) - target);
+        if (d < bd && d <= STACK_ELO_BAND) { bd = d; bi = i; }
+      }
+      if (bi < 0) break;
+      const s = stacks.splice(bi, 1)[0];
+      members.push(...s); parts.push(s);
+    }
+    // A 4-clique with at least one driven member recruits its fifth: the top-up
+    // solo joins the clique's party (not just filler) and a bond is seeded, so
+    // the completed five re-forms next day and accrues toward org status.
+    const recruiting = recruit5th
+      && anchor.length === TEAM_SIZE - 1   // the clique itself is four (not a 2+2)
+      && parts.length === 1
+      && members.length === TEAM_SIZE - 1
+      && anchor.some(p => p.ambition >= DRIVEN_AMBITION);
+
+    // Top up with the nearest-Elo solos.
+    while (members.length < TEAM_SIZE && solos.length > 0) {
       let bi = 0, bd = Infinity;
       for (let i = 0; i < solos.length; i++) {
         const d = Math.abs(eloOf(solos[i]) - target);
         if (d < bd) { bd = d; bi = i; }
       }
-      team.push(solos.splice(bi, 1)[0]);
+      const recruit = solos.splice(bi, 1)[0];
+      members.push(recruit);
+      if (recruiting) {
+        anchor.push(recruit); // promote the recruit into the party (parts[0] is anchor)
+        for (const m of anchor) {
+          if (m.id === recruit.id) continue;
+          recruit.relationships[m.id] = Math.max(recruit.relationships[m.id] ?? 0, RECRUIT_BOND);
+          m.relationships[recruit.id] = Math.max(m.relationships[recruit.id] ?? 0, RECRUIT_BOND);
+        }
+      }
     }
-    if (team.length === TEAM_SIZE) teams.push({ players: team, partyIds: g.map(p => p.id) });
-    // Under-filled (ran out of solos): party sits the day.
+    if (members.length === TEAM_SIZE) teams.push({ players: members, parties: parts.map(g => g.map(x => x.id)) });
+    // Under-filled (ran out of fitting stacks and solos): the stack sits the day.
   }
 
-  // 3. Elo-banded teams from the remaining solos — no friend-stack.
+  // 4. Elo-banded teams from the remaining solos — no friend-stack.
   for (let i = 0; i + TEAM_SIZE <= solos.length; i += TEAM_SIZE) {
-    teams.push({ players: solos.slice(i, i + TEAM_SIZE), partyIds: [] });
+    teams.push({ players: solos.slice(i, i + TEAM_SIZE), parties: [] });
   }
 
   return teams;
@@ -519,22 +595,60 @@ function avgOf(team: Player[], eloOf: (p: Player) => number): number {
   return team.reduce((s, p) => s + eloOf(p), 0) / team.length;
 }
 
+// A lobby's stack makeup, used to match like against like:
+//  premade — a full five-stack;  heavy — a trio+ or two-plus duos (3+2, 2+2+1,
+//  4+1);  light — a single duo (2+1+1+1);  solo — five randoms.
+type StackClass = "premade" | "heavy" | "light" | "solo";
+function stackClass(parties: string[][]): StackClass {
+  if (parties.some(p => p.length >= TEAM_SIZE)) return "premade";
+  const big = parties.filter(p => p.length >= 2);
+  if (big.some(p => p.length >= 3) || big.length >= 2) return "heavy";
+  if (big.length === 1) return "light";
+  return "solo";
+}
+const CLASS_ORDER: StackClass[] = ["premade", "heavy", "light", "solo"];
+
+// Pair teams into matches, matching stack composition first and Elo second:
+// within each stack class, sort by Elo and pair adjacent. The odd team out of
+// each class spills into a cross-class pool paired by Elo, so a leftover 3+2 can
+// still get a game (against the nearest 2+2+1 / duo) rather than sitting idle.
+function pairTeams(
+  teams: FormedTeam[], eloOf: (p: Player) => number,
+): { a: FormedTeam; b: FormedTeam; elo: number }[] {
+  const elo = (t: FormedTeam) => avgOf(t.players, eloOf);
+  const mk = (a: FormedTeam, b: FormedTeam) => ({ a, b, elo: (elo(a) + elo(b)) / 2 });
+  const byClass = new Map<StackClass, FormedTeam[]>();
+  for (const t of teams) {
+    const c = stackClass(t.parties);
+    (byClass.get(c) ?? byClass.set(c, []).get(c)!).push(t);
+  }
+  const pairings: { a: FormedTeam; b: FormedTeam; elo: number }[] = [];
+  const leftovers: FormedTeam[] = [];
+  for (const c of CLASS_ORDER) {
+    const list = (byClass.get(c) ?? []).sort((a, b) => elo(b) - elo(a));
+    let i = 0;
+    for (; i + 1 < list.length; i += 2) pairings.push(mk(list[i], list[i + 1]));
+    if (i < list.length) leftovers.push(list[i]);
+  }
+  // Cross-class fallback for the odd teams out, nearest Elo together.
+  leftovers.sort((a, b) => elo(b) - elo(a));
+  for (let i = 0; i + 1 < leftovers.length; i += 2) pairings.push(mk(leftovers[i], leftovers[i + 1]));
+  return pairings;
+}
+
 // ---- Career aggregates ----------------------------------------------------
 // Lifetime totals are accumulated incrementally so we never have to replay the
 // entire history to show a player's career. Each completed matchup is folded
 // in exactly once (when it's simmed/played out), which lets us trim old days
 // from history without losing any career figures.
 
-// Fold a completed day's matchups into persistent-team standings. Only matchups
+// Fold a completed day's matchups into persistent-team records. Only matchups
 // with BOTH sides tagged as tracked orgs (ctTeamId + tTeamId) count — pickup and
-// scrim lobbies don't move the table. Must be called exactly once per matchup
+// scrim lobbies don't move team records. Must be called exactly once per matchup
 // (at day roll-over), mirroring how careers are folded. `ctScore`/`tScore` hold
-// the match (or series) result, so round diff uses them directly.
-//
-// `foldSeason` controls whether the current-season tallies move too. Regular-
-// season days fold both lifetime and season records; playoff days fold only
-// lifetime (season standings are frozen — they already seeded the bracket).
-export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[], foldSeason = true): void {
+// the match (or series) result, so round diff uses them directly. Covers both
+// ladder games and tournament games (any tagged org-vs-org result).
+export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[]): void {
   const byId = new Map(teams.map(t => [t.id, t] as const));
   for (const m of matchups) {
     if (m.status !== "completed" || !m.ctTeamId || !m.tTeamId) continue;
@@ -547,80 +661,7 @@ export function recordTeamResults(teams: UniverseTeam[], matchups: Matchup[], fo
     if (ctWon) { ct.wins++; t.losses++; } else { ct.losses++; t.wins++; }
     ct.streak = ctWon ? Math.max(1, ct.streak + 1) : Math.min(-1, ct.streak - 1);
     t.streak = ctWon ? Math.min(-1, t.streak - 1) : Math.max(1, t.streak + 1);
-    if (!foldSeason) continue;
-    // Mirror into the current-season tallies (reset each season rollover).
-    ct.seasonRoundsWon = (ct.seasonRoundsWon ?? 0) + m.ctScore;
-    ct.seasonRoundsLost = (ct.seasonRoundsLost ?? 0) + m.tScore;
-    t.seasonRoundsWon = (t.seasonRoundsWon ?? 0) + m.tScore;
-    t.seasonRoundsLost = (t.seasonRoundsLost ?? 0) + m.ctScore;
-    if (ctWon) {
-      ct.seasonWins = (ct.seasonWins ?? 0) + 1;
-      t.seasonLosses = (t.seasonLosses ?? 0) + 1;
-    } else {
-      ct.seasonLosses = (ct.seasonLosses ?? 0) + 1;
-      t.seasonWins = (t.seasonWins ?? 0) + 1;
-    }
   }
-}
-
-// Teams grouped by region and sorted best-first by regular-season standing,
-// limited to those that actually played. The input to playoff seeding and the
-// regular-season standings table.
-export function rankedTeamsByRegion(teams: UniverseTeam[]): Map<Region, UniverseTeam[]> {
-  const byRegion = new Map<Region, UniverseTeam[]>();
-  for (const t of teams) {
-    if ((t.seasonWins ?? 0) + (t.seasonLosses ?? 0) === 0) continue;
-    (byRegion.get(t.region) ?? byRegion.set(t.region, []).get(t.region)!).push(t);
-  }
-  for (const list of byRegion.values()) list.sort(compareSeasonStanding);
-  return byRegion;
-}
-
-// Compare two teams for regular-season standing: more season wins first, then
-// better season round differential, then name (stable). Highest-ranked first.
-export function compareSeasonStanding(a: UniverseTeam, b: UniverseTeam): number {
-  const aw = a.seasonWins ?? 0, bw = b.seasonWins ?? 0;
-  if (aw !== bw) return bw - aw;
-  const ad = (a.seasonRoundsWon ?? 0) - (a.seasonRoundsLost ?? 0);
-  const bd = (b.seasonRoundsWon ?? 0) - (b.seasonRoundsLost ?? 0);
-  if (ad !== bd) return bd - ad;
-  return a.name.localeCompare(b.name);
-}
-
-// Roll the season over if the current day is the last of the window. Records the
-// top team of each region (by season standing, must have played) into the
-// champions log, then resets every team's season tallies and advances the
-// season. `day` is the day that just completed. No-op if the season isn't due.
-// Returns the champions crowned this rollover (empty if none / not due).
-export function rollSeasonIfDue(
-  season: Season, teams: UniverseTeam[], champions: SeasonChampion[], day: number,
-): SeasonChampion[] {
-  if (day < season.startDay + season.length - 1) return [];
-
-  // Crown each region's regular-season leader (one that actually played).
-  const byRegion = new Map<Region, UniverseTeam[]>();
-  for (const t of teams) (byRegion.get(t.region) ?? byRegion.set(t.region, []).get(t.region)!).push(t);
-  const crowned: SeasonChampion[] = [];
-  for (const region of REGION_ORDER) {
-    const inRegion = (byRegion.get(region) ?? []).filter(t => (t.seasonWins ?? 0) + (t.seasonLosses ?? 0) > 0);
-    if (inRegion.length === 0) continue;
-    inRegion.sort(compareSeasonStanding);
-    const champ = inRegion[0];
-    crowned.push({
-      season: season.number, region, teamId: champ.id, teamName: champ.name,
-      wins: champ.seasonWins ?? 0, losses: champ.seasonLosses ?? 0,
-    });
-  }
-  champions.push(...crowned);
-  if (champions.length > CHAMPIONS_LOG_MAX) champions.splice(0, champions.length - CHAMPIONS_LOG_MAX);
-
-  // Reset season tallies and advance to the next season.
-  for (const t of teams) {
-    t.seasonWins = 0; t.seasonLosses = 0; t.seasonRoundsWon = 0; t.seasonRoundsLost = 0;
-  }
-  season.number += 1;
-  season.startDay = day + 1;
-  return crowned;
 }
 
 export function emptyCareer(): CareerStats {

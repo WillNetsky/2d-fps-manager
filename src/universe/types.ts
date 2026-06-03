@@ -37,32 +37,58 @@ export interface Universe {
   // win/loss record across days — the foundation for standings and tournaments.
   // Absent on saves predating persistent teams; created lazily on the next sim.
   teams?: UniverseTeam[];
-  // Current competitive season. Each season is a fixed window of days; team
-  // season records accrue within it and reset at rollover. Absent on saves
-  // predating seasons; initialized lazily (season 1 starting on the current day).
-  season?: Season;
-  // Bounded log of past season winners per region (most recent last). Powers the
-  // champions history and, later, playoff seeding. Trimmed to CHAMPIONS_LOG_MAX.
-  champions?: SeasonChampion[];
   // Recurring full-5 friend cliques accruing commitment toward org status. A
   // stack is promoted out of this list into `teams` once it clears the gate.
   // Absent on saves predating the stack→org phase; created lazily.
   stacks?: ProvisionalStack[];
-  // Active end-of-season playoffs, present only while season.phase === "playoffs".
-  // Cleared back to null/undefined when the playoffs finish and the next regular
-  // season begins.
+  // The tournament currently running, if any (reuses the bracket engine that used
+  // to drive end-of-season playoffs). Null/absent between events. Seeded by world
+  // ranking, runs concurrently with the daily ladder, and pays out prize money +
+  // ranking points when it finishes.
   playoffs?: PlayoffState | null;
+  // Tournament-circuit scheduler: counts down to the next event and tracks the
+  // calendar so the world ages between events. Absent on saves predating the
+  // circuit; created lazily.
+  circuit?: Circuit;
+  // Log of past tournament winners (most recent last), bounded to TITLES_LOG_MAX.
+  // The trophy record that replaced per-season champions.
+  titles?: TournamentTitle[];
+  // Per-year per-player career aggregates: calendar year -> playerId -> totals.
+  // Parallels `careers` (lifetime) but bucketed by year (a pure function of the
+  // day, so it backfills cleanly from history) for the player page's year-by-year
+  // breakdown. Trimmed to YEAR_STATS_KEEP most-recent years to stay bounded.
+  yearStats?: Record<number, Record<string, CareerStats>>;
 }
 
-// Which part of the season calendar we're in. Regular season builds standings;
-// playoffs are the dedicated knockout days that crown the champion.
-export type SeasonPhase = "regular" | "playoffs";
+// Tournament-circuit scheduler. A tournament starts when `daysUntilNext` reaches
+// zero (and none is running), then `EVENT_INTERVAL_DAYS` is set again on finish.
+// Player aging/retirement runs once per calendar year, deferred until no event is
+// in progress so a bracket's rosters never change mid-tournament.
+export interface Circuit {
+  nextEventId: number;        // monotonic id for naming events
+  daysUntilNext: number;      // days until the next tournament starts
+  lastLifecycleYear: number;  // last calendar year the world aged through
+}
 
-// End-of-season playoffs across every region that qualified. Each region runs its
-// own bracket; a playoff "day" plays one round from every region still going.
+// One completed tournament's headline result — the trophy-cabinet record.
+export interface TournamentTitle {
+  eventId: number;
+  name: string;               // e.g. "EU Circuit #3"
+  region: Region;
+  day: number;                // day the final concluded
+  championTeamId: string;
+  championName: string;
+  runnerUpTeamId?: string;
+  runnerUpName?: string;
+  prize: number;              // champion's prize money (display only)
+}
+
+// One running tournament across every region that fielded a bracket. Each region
+// runs its own bracket; a tournament "day" plays one round from every region
+// still going. The same engine that used to drive end-of-season playoffs.
 export interface PlayoffState {
-  season: number;                           // the season these playoffs decide
-  day: number;                              // 1-based playoff day index
+  season: number;                           // the event id this tournament is
+  day: number;                              // 1-based tournament day index
   regions: RegionPlayoff[];
 }
 
@@ -102,35 +128,6 @@ export interface BracketMatch {
   winnerTeamId?: string;
   // The matchup id (within the playoff day) that decided this match, for replay.
   matchupId?: string;
-}
-
-// A competitive season: a fixed-length window of days. Regular-season standings
-// are the teams' season records (see UniverseTeam.season*); at day
-// startDay+length the season rolls over — champions are recorded and counters
-// reset. The unit Phase 3 playoffs will seed from.
-export interface Season {
-  number: number;                           // 1-based season index
-  startDay: number;                         // day the regular season began (inclusive)
-  length: number;                           // regular-season days per season
-  phase?: SeasonPhase;                      // "regular" (default) | "playoffs"
-}
-
-// One region's winner for one completed season. With playoffs, the champion is
-// the team that won the region's knockout bracket; the regular-season leader is
-// recorded separately as the #1 seed / regular-season title holder.
-export interface SeasonChampion {
-  season: number;
-  region: Region;
-  teamId: string;
-  teamName: string;
-  wins: number;                             // record shown next to the title
-  losses: number;
-  // Regular-season leader (top seed) when playoffs decided the title and it
-  // differs from the playoff champion. Display only.
-  regularSeasonLeaderId?: string;
-  regularSeasonLeaderName?: string;
-  // Prize money the champion took for the title (display only).
-  prize?: number;
 }
 
 // Links a playoff matchup back to its place in the tournament so results advance
@@ -200,17 +197,19 @@ export interface UniverseTeam {
   roundsLost: number;
   // Current win/loss streak: positive = consecutive wins, negative = losses.
   streak: number;
-  // Lifetime playoff prize money won, in dollars. Accrues when each season's
-  // playoffs finish (see finance.regionPayouts). Absent on saves predating the
-  // economy; treated as 0 until the team next cashes.
+  // Lifetime tournament prize money won, in dollars. Accrues when each event
+  // finishes (see finance.regionPayouts). Absent on saves predating the economy;
+  // treated as 0 until the team next cashes.
   earnings?: number;
-  // Current-season record — same tallies as above but reset at each season
-  // rollover. Drives the regular-season standings table. Absent on teams from
-  // saves predating seasons; treated as 0 until they next play.
-  seasonWins?: number;
-  seasonLosses?: number;
-  seasonRoundsWon?: number;
-  seasonRoundsLost?: number;
+  // World-ranking points. Awarded by tournament placement and decayed by
+  // RANKING_DECAY at each new event, so the ranking reflects recent form. Absent
+  // on saves predating the circuit; treated as 0. The basis for the ranking table.
+  rankingPoints?: number;
+  // Day the org disbanded: set once its clique has fully decayed (no two members
+  // still bonded) AND it has sat idle past DISBAND_IDLE_DAYS. A disbanded org is
+  // frozen — excluded from invitees, rankings, and "current team" lookups — but
+  // kept for history/links (titles, past results). Absent while active.
+  disbandedDay?: number;
 }
 
 export interface PendingDay {
@@ -338,11 +337,25 @@ export interface CareerStats {
   clutchAttempts: number[];                 // length 5
 }
 
-// Days per competitive season. A season is the regular-season window whose final
-// standings (later) seed playoffs. 30 days ≈ a meaty but finite campaign.
-export const SEASON_LENGTH = 30;
-// Cap on the champions log so season history doesn't grow without bound.
-export const CHAMPIONS_LOG_MAX = 120;
+// ---- Tournament circuit ----------------------------------------------------
+// Days in a calendar year. The world ages once per year (aging/retirement/youth)
+// and the player page buckets stats by year. ~4 events per year at the default
+// interval.
+export const YEAR_LENGTH = 56;
+// Days between tournaments (the scheduler's reset value after each event).
+export const EVENT_INTERVAL_DAYS = 14;
+// Teams invited to a regional tournament, by world ranking. 8 → a clean
+// single-elimination bracket through the existing engine (no Swiss stage).
+export const INVITE_FIELD = 8;
+// Ranking points decay applied to every team when a new event starts, so the
+// world ranking reflects recent results and inactive teams fade.
+export const RANKING_DECAY = 0.8;
+// Cap on the trophy log so circuit history doesn't grow without bound.
+export const TITLES_LOG_MAX = 200;
+// How many most-recent years of per-player breakdown to retain in
+// `Universe.yearStats`. Older years drop from the per-year view (their games are
+// still counted in lifetime `careers`), keeping core storage bounded.
+export const YEAR_STATS_KEEP = 12;
 
 // Playoff sizing. A region with >= SWISS_FIELD ranked teams runs a Swiss stage
 // (SWISS_TARGET wins to advance / losses to drop) that cuts to BRACKET_FIELD,
@@ -359,6 +372,22 @@ export const BRACKET_FIELD = 8;
 export const GAMES_TO_ORG = 3;
 export const DRIVEN_AMBITION = 70;
 export const DRIVEN_CORE_SIZE = 2;
+
+// A friendship clique that stalls one short of a full five (4 players) with at
+// least one driven member will recruit the nearest-Elo solo as its fifth and
+// seed a bond, so the completed five re-forms and can pursue org status. The
+// seeded bond clears FRIEND_THRESHOLD with margin so it survives a day's decay.
+export const RECRUIT_BOND = 55;
+
+// Tournament free-agent grouping: when seeding an event, the strongest players
+// not on an org may band into a fresh contender — but only if their roster Elo
+// would out-seed an already-qualified team by this margin (so we add genuine
+// title threats, not field padding). Seeded with bonds so the team can persist.
+export const FA_CONTENDER_MARGIN = 25;
+
+// Org dissolution: an org disbands once it has sat idle this many days AND no two
+// of its current members are still bonded (the clique has fully decayed).
+export const DISBAND_IDLE_DAYS = 84; // ~1.5 seasons without a game
 
 export const STARTING_ELO = 1000;
 // Default players per region on the New Universe screen (the user can dial this

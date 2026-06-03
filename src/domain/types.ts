@@ -94,6 +94,12 @@ export interface Player {
   // emergent map comfort: a team's preference for a map (used by the series
   // veto) is the aggregate of its players' comfort here. Absent until played.
   mapStats?: Record<string, { played: number; won: number }>;
+
+  // Career lifecycle. A player ages one year per season; once retired they stay
+  // in the pool (so player pages, careers, and team history survive) but are
+  // excluded from matchmaking. Absent on saves predating the lifecycle system.
+  retired?: boolean;
+  retiredDay?: number; // day index they retired on (for the player page)
 }
 
 export type WeaponId =
@@ -197,6 +203,9 @@ export type SiteAssignment = "A" | "B" | "mid";
 
 // A single agent in the sim — bound to a Player but with runtime state.
 export interface Agent {
+  // Stable 0-based slot in RoundSim.agents for the whole round. Keys the
+  // per-tick visibility matrix (see RoundSim.canSee).
+  idx: number;
   playerId: string;
   side: Side;
   pos: Vec2;

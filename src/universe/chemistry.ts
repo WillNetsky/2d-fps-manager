@@ -27,6 +27,18 @@ function clampRel(v: number): number {
   return Math.max(MIN_REL, Math.min(MAX_REL, v));
 }
 
+// Seed a mutual bond of at least `bond` between every pair in `group`, so a
+// freshly-assembled lineup (a recruited fifth, a tournament free-agent team)
+// re-forms as a clique in matchmaking. Never lowers an existing stronger bond.
+export function seedCliqueBonds(group: Player[], bond: number): void {
+  for (const a of group) {
+    for (const b of group) {
+      if (a.id === b.id) continue;
+      a.relationships[b.id] = clampRel(Math.max(a.relationships[b.id] ?? 0, bond));
+    }
+  }
+}
+
 type Stat = {
   kills: number; deaths: number; assists: number;
   damage: number; roundsPlayed: number;
