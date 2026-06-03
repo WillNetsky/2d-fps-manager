@@ -26,6 +26,9 @@ export interface SimState {
   players: Player[];
   elos: Record<string, number>;
   careers: Record<string, CareerStats>;
+  // Optional parallel aggregate that only accrues playoff matches (mirrors
+  // `careers`). When present, every folded tournament game also folds here.
+  eventCareers?: Record<string, CareerStats>;
   maps: GameMap[];
   pendingDay: PendingDay | null;
   day: number;
@@ -252,6 +255,9 @@ export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId
     for (const g of o.games) foldGame(state, m.ctPlayerIds, m.tPlayerIds, g, byId);
     const net = winnerIds.reduce((s, id, i) => s + ((state.elos[id] ?? STARTING_ELO) - pre[i]), 0) / winnerIds.length;
     m.eloDelta = Math.round(net);
+    // Tournament series fold into the event-only aggregate too (per game, via the
+    // games array recordMatchupCareers walks).
+    if (m.playoff && state.eventCareers) recordMatchupCareers(state.eventCareers, m);
     return;
   }
 
@@ -268,6 +274,7 @@ export function foldOutcome(state: SimState, m: Matchup, o: MatchupOutcome, byId
   recordMapComfort(byId, m.ctPlayerIds, m.tPlayerIds, state.maps[m.mapIndex ?? 0]?.name, o.winnerSide);
   recordMatchupCareers(state.careers, m);
   recordPeriodCareers(state, m);
+  if (m.playoff && state.eventCareers) recordMatchupCareers(state.eventCareers, m);
 }
 
 // Simulate + fold one matchup on the current thread. Used for the single-match

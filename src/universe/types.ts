@@ -25,6 +25,12 @@ export interface Universe {
   // once, so career figures survive history trimming. Absent on pre-aggregate
   // saves; rebuilt from history on load.
   careers?: Record<string, CareerStats>;
+  // Parallel lifetime aggregate counting ONLY tournament (playoff) matches, so
+  // the career screen can filter to event games. Folded alongside `careers` at
+  // sim time. Absent on saves predating it; backfilled from the retained history
+  // window on load (older events outside the window can't be reconstructed) and
+  // complete from there forward.
+  eventCareers?: Record<string, CareerStats>;
   // Rotation pool of map snapshots. Every match picks one (currently at
   // random); the index is stored on the matchup so replays land on the same
   // map deterministically. Always has length ≥ 1 while a universe is live.

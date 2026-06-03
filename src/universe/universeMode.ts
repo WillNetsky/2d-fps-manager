@@ -97,6 +97,9 @@ export class UniverseMode {
   private newsCat: NewsCategory | "all" = "all";
   private newsRegion: Region | "all" = "all";
 
+  // Career stats scope: all games, or tournament (event) games only.
+  private careerMode: "all" | "event" = "all";
+
   constructor(parent: HTMLElement) {
     this.root = parent;
     this.render();
@@ -577,6 +580,9 @@ export class UniverseMode {
     // archive lives in IndexedDB), so rebuilding from it would undercount —
     // only rebuild when careers are entirely absent, and only from what we have.
     if (!u.careers) rebuildCareers(u);
+    // Event-only careers postdate lifetime careers; backfill from the retained
+    // window on first load (partial for old saves, complete from here forward).
+    if (!u.eventCareers) rebuildEventCareers(u);
     trimHistory(u);
     // Reserve existing team names so freshly crystallized teams don't collide,
     // and retire any legacy "Team X" org names (those now read as pickup labels).
@@ -644,6 +650,7 @@ export class UniverseMode {
       players: u.players,
       elos: u.elos,
       careers: u.careers ??= {},
+      eventCareers: u.eventCareers ??= {},
       maps: u.maps ?? [],
       pendingDay: u.pendingDay,
       day: u.day,
@@ -1618,7 +1625,19 @@ export class UniverseMode {
 
   private renderCareer(body: HTMLElement) {
     if (!this.universe) return;
-    body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id)));
+    // Scope toggle: all games vs tournament (event) games only.
+    const toggle = document.createElement("div");
+    toggle.className = "uni-seg-toggle";
+    const mk = (key: "all" | "event", label: string) => {
+      const b = document.createElement("button");
+      b.className = "uni-seg" + (this.careerMode === key ? " active" : "");
+      b.textContent = label;
+      b.onclick = () => { if (this.careerMode !== key) { this.careerMode = key; this.render(); } };
+      return b;
+    };
+    toggle.append(mk("all", "All games"), mk("event", "Event games"));
+    body.appendChild(toggle);
+    body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id), this.careerMode));
   }
 
   // ---- News feed ----
@@ -2392,7 +2411,10 @@ function playerTable(
 
 // Career stats table — aggregates each player's game log into a sortable
 // per-player overview of their performance across the whole universe history.
-function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLElement {
+function careerStatsTable(u: Universe, onPick?: (id: string) => void, mode: "all" | "event" = "all"): HTMLElement {
+  // Source aggregate: lifetime (all games) or tournament-only.
+  const src = mode === "event" ? (u.eventCareers ?? {}) : (u.careers ?? {});
+  const statOf = (id: string) => src[id] ?? emptyCareer();
   interface CareerRow {
     p: Player;
     elo: number;
@@ -2411,8 +2433,8 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
   }
 
   const rows: CareerRow[] = u.players.map(p => {
-    const c = careerView(careerOf(u, p.id));
-    const clutchBuckets = careerClutchBuckets(careerOf(u, p.id));
+    const c = careerView(statOf(p.id));
+    const clutchBuckets = careerClutchBuckets(statOf(p.id));
     const clutches = clutchBuckets.reduce((s, b) => s + b.wins, 0);
     return {
       p,
@@ -2430,7 +2452,7 @@ function careerStatsTable(u: Universe, onPick?: (id: string) => void): HTMLEleme
       k2: c.k2, k3: c.k3, k4: c.k4, k5: c.k5,
       clutchBuckets,
     };
-  });
+  }).filter(r => mode !== "event" || r.matches > 0); // event view: only players with event games
 
   type Col = {
     label: string;
@@ -3329,6 +3351,18 @@ function rebuildCareers(u: Universe): void {
   }
   for (const m of u.pendingDay?.matchups ?? []) recordMatchupCareers(careers, m);
   u.careers = careers;
+}
+
+// Backfill the event-only career aggregate from the retained history window
+// (playoff matchups only). Lifetime event totals from before the window can't be
+// reconstructed — going forward every tournament game accrues here at fold time.
+function rebuildEventCareers(u: Universe): void {
+  const ev: Record<string, CareerStats> = {};
+  for (const day of u.history) {
+    for (const m of day.matchups) if (m.playoff) recordMatchupCareers(ev, m);
+  }
+  for (const m of u.pendingDay?.matchups ?? []) if (m.playoff) recordMatchupCareers(ev, m);
+  u.eventCareers = ev;
 }
 
 // Backfill `Universe.yearStats` from history. The calendar year is a pure
