@@ -4,7 +4,7 @@
 
 import type { Player } from "../domain/types.ts";
 import {
-  STARTING_ELO, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD,
+  STARTING_ELO, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD, CONTRACT_LENGTH_DAYS,
   type RegionPlayoff, type Universe, type UniverseTeam,
 } from "./types.ts";
 
@@ -107,13 +107,69 @@ export function recomputePlayerValues(u: Universe): void {
   }
 }
 
-// ---- wages & budget --------------------------------------------------------
+// ---- wages, contracts & budget ---------------------------------------------
 
-// A player's per-cycle wage, derived from their current market value (so it
-// floats with skill/age/form — no stored contract for v1). Cheap/floor players
-// cost almost nothing to keep.
-export function wageOf(p: Player): number {
+// The going rate to sign/renew a player: their market value scaled by WAGE_RATE.
+export function marketWage(p: Player): number {
   return Math.round((p.value ?? 0) * WAGE_RATE);
+}
+
+// A player's actual per-cycle wage: their locked contract salary, or the market
+// rate if they have no contract yet (new joiner before the next contract cycle).
+export function wageOf(p: Player): number {
+  return p.contract?.salary ?? marketWage(p);
+}
+
+// Sign (or renew) a player to a fresh contract at the current market rate, for a
+// jittered term around CONTRACT_LENGTH_DAYS so expiries stagger across the scene.
+export function signContract(p: Player, day: number, rng: () => number = Math.random): void {
+  const term = Math.round(CONTRACT_LENGTH_DAYS * (0.75 + rng() * 0.5));
+  p.contract = { salary: marketWage(p), until: day + term };
+}
+
+// Reconcile contracts once per cycle:
+//   - invariant: only players on an active org hold a contract (free agents /
+//     folded players have theirs cleared);
+//   - new joiners (e.g. an emergent crystallized lineup) get signed at market rate;
+//   - expired deals are renewed at the new market rate, OR the player is let go to
+//     free agency — a struggling org sheds its costliest expiring player, and an
+//     aging player is sometimes not renewed (at most one release per org per cycle).
+// Released players (returned) drop to the market, where the transfer window's
+// backfill refills the short org. Run before the wage debit so a release relieves
+// this cycle's bill.
+export function runContractCycle(
+  teams: UniverseTeam[], players: Player[], day: number, rng: () => number = Math.random,
+): string[] {
+  const byId = new Map(players.map(p => [p.id, p] as const));
+  const onActiveOrg = new Set<string>();
+  for (const t of teams) if (!t.disbandedDay) for (const id of t.playerIds) onActiveOrg.add(id);
+  for (const p of players) if (p.contract && !onActiveOrg.has(p.id)) delete p.contract;
+
+  const freed: string[] = [];
+  for (const t of teams) {
+    if (t.disbandedDay || t.playerIds.length === 0) continue;
+    let released = 0;
+    const expiring = t.playerIds
+      .map(id => byId.get(id)).filter((p): p is Player => !!p)
+      .filter(p => !p.contract || p.contract.until <= day)
+      .sort((a, b) => (b.contract?.salary ?? 0) - (a.contract?.salary ?? 0));
+    for (const p of expiring) {
+      if (!p.contract) { signContract(p, day, rng); continue; } // new joiner
+      const costCut = (t.balance ?? 0) < 0 && released < 1;
+      const ageCut = p.age >= 31 && rng() < 0.35 && released < 1;
+      if ((costCut || ageCut) && t.playerIds.length > 1) {
+        t.playerIds = t.playerIds.filter(id => id !== p.id);
+        delete p.contract;
+        freed.push(p.id);
+        released++;
+        (t.rosterHistory ??= []).push({ day, playerIds: [...t.playerIds], note: `Released ${p.handle}` });
+      } else {
+        signContract(p, day, rng); // renew at current market rate
+      }
+    }
+    if (released > 0) t.rosterKey = [...t.playerIds].sort().join(",");
+  }
+  return freed;
 }
 
 // An org's total per-cycle wage bill (sum of its roster's wages).

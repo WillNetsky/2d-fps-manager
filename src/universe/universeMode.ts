@@ -19,7 +19,7 @@ import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
-import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, runFinancialCycle, foldInsolventOrgs } from "./finance.ts";
+import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, foldInsolventOrgs } from "./finance.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -825,6 +825,7 @@ export class UniverseMode {
     // orgs still insolvent. Roster moves flow into rosterHistory → news; the
     // structured transfer log feeds the Market screen.
     const teams = u.teams ?? [];
+    runContractCycle(teams, u.players, day); // renew/expire deals; release some to FA
     runFinancialCycle(teams, u.players);
     const log = (u.transfers ??= []);
     log.push(...runTransferWindow(teams, u.players, u.elos, day));
@@ -2898,6 +2899,15 @@ function playerPage(
   const totalClutchWins = clutchBuckets.reduce((s, b) => s + b.wins, 0);
   const totalClutchAttempts = clutchBuckets.reduce((s, b) => s + b.attempts, 0);
 
+  // Contract line: locked salary + expiry, flagged a bargain or overpay vs the
+  // current market rate; or "Free agent" for an unsigned, active player.
+  const mw = marketWage(p);
+  const contractMeta = p.retired ? ""
+    : (team && p.contract)
+      ? ` · <span class="upp-contract">${formatMoney(p.contract.salary)}/cyc until D${p.contract.until}` +
+        `${p.contract.salary < mw * 0.8 ? ` · <span class="upp-bargain">bargain</span>` : p.contract.salary > mw * 1.25 ? ` · <span class="upp-overpaid">overpaid</span>` : ""}</span>`
+      : (!team ? ` · <span class="upp-fa">Free agent</span>` : "");
+
   // ----- Header -----
   const header = document.createElement("div");
   header.className = "upp-header";
@@ -2910,11 +2920,13 @@ function playerPage(
         <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}` +
           (team ? ` · <span class="upp-team-link clickable" data-tid="${team.id}">${escapeHtml(team.name)}</span>` : "") +
           (p.retired ? ` · <span class="upp-retired">Retired${p.retiredDay ? ` (Day ${p.retiredDay})` : ""}</span>` : "") +
+          contractMeta +
         `</div>
       </div>
     </div>
     <div class="upp-headline-stats">
       <div class="upp-hl"><div class="upp-hl-label">Elo</div><div class="upp-hl-val">${elo}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Value</div><div class="upp-hl-val">${formatMoney(p.value ?? 0)}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Matches</div><div class="upp-hl-val">${career.played}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Record</div><div class="upp-hl-val">${career.wins}-${career.losses}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Win %</div><div class="upp-hl-val">${career.played > 0 ? Math.round((career.wins / career.played) * 100) : 0}%</div></div>
@@ -3346,7 +3358,8 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
         `<span class="utm-rr-handle">${escapeHtml(p.handle)}</span>` +
         `<span class="utm-rr-name">${escapeHtml(p.name)}</span>` +
         `<span class="utm-rr-role">${escapeHtml(p.role)}</span>` +
-        `<span class="utm-rr-elo">${Math.round(u.elos[id] ?? STARTING_ELO)}</span>`;
+        `<span class="utm-rr-elo">${Math.round(u.elos[id] ?? STARTING_ELO)}</span>` +
+        `<span class="utm-rr-salary">${p.contract ? `${formatMoney(p.contract.salary)}/cyc` : "—"}${p.contract ? ` <span class="utm-rr-until">'til D${p.contract.until}</span>` : ""}</span>`;
       row.onclick = () => h.onPlayer(id);
     } else {
       row.innerHTML = `<span class="utm-rr-handle">${escapeHtml(id)}</span><span class="utm-rr-name">(former member)</span>`;

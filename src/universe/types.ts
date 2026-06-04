@@ -391,6 +391,7 @@ export const WAGE_RATE = 0.05;            // per-cycle wage = this × player mar
 export const BASE_SPONSOR = 30_000;       // flat sponsorship every active org draws
 export const SPONSOR_PER_RP = 50;         // extra sponsorship per ranking point (results pay)
 export const FOLD_THRESHOLD = -200_000;   // balance below this → the org folds (insolvent)
+export const CONTRACT_LENGTH_DAYS = 112;  // base contract term (~2 seasons); jittered per signing
 // How many most-recent years of per-player breakdown to retain in
 // `Universe.yearStats`. Older years drop from the per-year view (their games are
 // still counted in lifetime `careers`), keeping core storage bounded.

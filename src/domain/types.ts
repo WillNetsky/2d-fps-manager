@@ -63,6 +63,14 @@ export type Trait =
   | "loyal"            // morale boost from teammates
   | "entry-fragger";   // bonus when taking first contact
 
+// A player's signed deal with their org (universe economy). Salary is locked for
+// the term; `until` is the universe day it expires, after which the org renews,
+// lets it lapse to free agency, or the player is released.
+export interface PlayerContract {
+  salary: number;   // locked per-cycle wage in dollars
+  until: number;    // universe day the contract expires
+}
+
 export interface Player {
   id: string;
   name: string;        // full real name, e.g. "Aleksandr Volkov"
@@ -84,6 +92,11 @@ export interface Player {
   // Market value in dollars, derived from elo/age/form. Recomputed once per sim
   // day (see finance.recomputePlayerValues); absent until first computed.
   value?: number;
+  // Active contract with the org this player is on: a salary locked at signing
+  // (so value drift over the term makes the deal a bargain or a burden) and the
+  // universe day it expires. Cleared when the player reaches free agency. Absent
+  // for free agents and on saves predating contracts (see finance.runContractCycle).
+  contract?: PlayerContract;
   mood: number;        // 0-100, drifts based on outcomes
   morale: number;      // 0-100, longer-term
   // Relationships keyed by other player id (-100 to 100).

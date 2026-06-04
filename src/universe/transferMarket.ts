@@ -17,7 +17,7 @@
 import type { Player } from "../domain/types.ts";
 import { regionOf } from "../domain/countries.ts";
 import { seedCliqueBonds } from "./chemistry.ts";
-import { formatMoney } from "./finance.ts";
+import { formatMoney, signContract } from "./finance.ts";
 import { STARTING_ELO, TEAM_SIZE, type TransferRecord, type UniverseTeam } from "./types.ts";
 
 const MIN_UPGRADE_GAP = 30;  // elo improvement required to bother signing
@@ -90,6 +90,8 @@ export function runTransferWindow(
     onOrg.delete(weakestId);   // released to free agency
     onOrg.add(pick.id);
     moved.add(pick.id);
+    delete byId.get(weakestId)?.contract;       // released player → no contract
+    signContract(signing, day);                  // new deal at the buying org
     seed(org);
     commit(org);
 
@@ -114,6 +116,7 @@ export function runTransferWindow(
       org.playerIds.push(fa.id);
       onOrg.add(fa.id);
       moved.add(fa.id);
+      signContract(fa, day);
       seed(org);
       commit(org);
       transfers.push({

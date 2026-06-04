@@ -18,7 +18,8 @@ import { type Universe, type UniverseTeam } from "./types.ts";
 export type StorylineKind =
   | "streak" | "race" | "rivalry" | "decline"      // increment 2
   | "headtohead" | "dynasty" | "milestone" | "breakout" // increment 3
-  | "trouble";                                     // economy (v2)
+  | "trouble"                                      // economy (v2)
+  | "expiring";                                    // contracts (v3)
 
 export interface Storyline {
   kind: StorylineKind;
@@ -46,6 +47,8 @@ const BREAKOUT_AGE = 21;
 const BREAKOUT_RATING = 1.1;   // recent-year rating to count as breaking out
 const BREAKOUT_MIN_GAMES = 10; // ...over at least this many games (real sample)
 const TROUBLE_BALANCE = -100_000; // balance below this = a club in financial trouble
+const CONTRACT_YEAR_DAYS = 21;    // a deal expiring within this many days = a contract year
+const CONTRACT_YEAR_MIN_VALUE = 120_000; // ...for a player at least this valuable (notable)
 
 export function buildStorylines(u: Universe, opts: { region?: Region | "all"; limit?: number } = {}): Storyline[] {
   const region = opts.region && opts.region !== "all" ? opts.region : null;
@@ -245,6 +248,20 @@ export function buildStorylines(u: Universe, opts: { region?: Region | "all"; li
       title: `${t.name} are in financial trouble`,
       detail: `${formatMoney(bal)} in the red — selling stars or folding may be next.`,
       region: t.region, teamIds: [t.id], playerIds: [],
+    });
+  }
+
+  // --- Contract years (a notable player's deal nearing expiry) ---
+  for (const [pid, t] of orgOf) {
+    const p = playerById.get(pid);
+    if (!p?.contract || !inRegion(t.region)) continue;
+    const daysLeft = p.contract.until - u.day;
+    if (daysLeft < 0 || daysLeft > CONTRACT_YEAR_DAYS || (p.value ?? 0) < CONTRACT_YEAR_MIN_VALUE) continue;
+    out.push({
+      kind: "expiring", heat: 38 + (p.value ?? 0) / 12000,
+      title: `${p.handle} enters a contract year`,
+      detail: `${p.name}'s deal at ${t.name} expires in ${daysLeft} day${daysLeft === 1 ? "" : "s"} — rivals will circle.`,
+      region: t.region, teamIds: [t.id], playerIds: [pid],
     });
   }
 
