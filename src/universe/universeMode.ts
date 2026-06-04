@@ -1630,11 +1630,15 @@ export class UniverseMode {
       const aIsCt = m.ctTeamId === bm.aTeamId;
       return aIsCt ? `${m.ctScore}-${m.tScore}` : `${m.tScore}-${m.ctScore}`;
     };
-    // A clickable team label (or plain "TBD").
+    const flagOf = (id?: string) => {
+      const c = id ? teamById.get(id)?.country : undefined;
+      return c ? `${flagEmoji(c)} ` : "";
+    };
+    // A clickable team label (with nation flag), or plain "TBD".
     const teamSpan = (id?: string, won = false) => {
       const cls = `upo-team${won ? " upo-win" : ""}${id ? " clickable" : ""}`;
       const tid = id ? ` data-tid="${id}"` : "";
-      return `<span class="${cls}"${tid}>${escapeHtml(nameOf(id))}</span>`;
+      return `<span class="${cls}"${tid}>${flagOf(id)}${escapeHtml(nameOf(id))}</span>`;
     };
 
     const grid = document.createElement("div");
