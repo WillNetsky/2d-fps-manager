@@ -20,7 +20,7 @@ import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
 import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, MAJOR_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
-import { benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
+import { activeLineup, benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -688,10 +688,14 @@ export class UniverseMode {
     });
   }
 
-  // A team's current 5-man roster, for building tournament matchups.
+  // A team's Active 5 (NOT its full bench roster), for building tournament
+  // matchups — otherwise a 12-man org would field everyone (a 7v5).
   private rosterOf(u: Universe): (teamId: string) => string[] {
     const byId = new Map((u.teams ?? []).map(t => [t.id, t] as const));
-    return (id: string) => byId.get(id)?.playerIds ?? [];
+    return (id: string) => {
+      const t = byId.get(id);
+      return t ? activeLineup(t, t.playerIds, u.elos) : [];
+    };
   }
 
   // Player ids committed to the active tournament (so they sit out the ladder).
