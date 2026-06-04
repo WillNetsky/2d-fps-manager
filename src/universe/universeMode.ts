@@ -1145,7 +1145,7 @@ export class UniverseMode {
   // Top 4 players by HLTV rating across completed matches in the current day.
   private topPerformersGrid(matchups: Matchup[], byId: Map<string, Player>): HTMLElement {
     interface Row {
-      pid: string; side: "CT" | "T"; stats: PlayerMatchStats; rating: number;
+      pid: string; side: "CT" | "T"; stats: PlayerMatchStats; rating: number; m: Matchup;
     }
     const rows: Row[] = [];
     for (const m of matchups) {
@@ -1154,17 +1154,30 @@ export class UniverseMode {
       const stats = matchupPlayerStats(m);
       for (const [pid, s] of Object.entries(stats)) {
         const side: "CT" | "T" = m.ctPlayerIds.includes(pid) ? "CT" : "T";
-        rows.push({ pid, side, stats: s, rating: hltvRating1(s) });
+        rows.push({ pid, side, stats: s, rating: hltvRating1(s), m });
       }
     }
     rows.sort((a, b) => b.rating - a.rating);
     const top = rows.slice(0, 4);
 
+    const u = this.universe;
     const wrap = document.createElement("div");
     wrap.className = "universe-top-performers";
     top.forEach((r, i) => {
       const p = byId.get(r.pid);
-      if (!p) return;
+      if (!p || !u) return;
+      const m = r.m;
+      // The org this player currently belongs to, if any.
+      const team = u.teams?.find(t => !t.disbandedDay && t.playerIds.includes(r.pid));
+      // This game's score (their side first) and the opponent's name.
+      const ownScore = (r.side === "CT" ? m.ctScore : m.tScore) ?? 0;
+      const oppScore = (r.side === "CT" ? m.tScore : m.ctScore) ?? 0;
+      const won = m.winnerSide === r.side;
+      const oppTeamId = r.side === "CT" ? m.tTeamId : m.ctTeamId;
+      const oppIds = r.side === "CT" ? m.tPlayerIds : m.ctPlayerIds;
+      const oppName = orgNameOf(u, oppTeamId)
+        ?? teamNameFor(oppIds.map(id => byId.get(id)).filter((x): x is Player => !!x), u.elos);
+
       const card = document.createElement("div");
       card.className = `utp-card ${r.side === "CT" ? "ct" : "t"}`;
       card.onclick = () => this.openPlayer(r.pid);
@@ -1175,12 +1188,17 @@ export class UniverseMode {
           <span class="utp-rank">#${i + 1}</span>
           <span class="utp-rating" style="color:${ratingColorCss}">${r.rating.toFixed(2)}</span>
         </div>
-        <div class="utp-name">${escapeHtml(shortName(p))}</div>
+        <div class="utp-name">${flagEmoji(p.country)} ${escapeHtml(shortName(p))}</div>
+        <div class="utp-team">${team ? escapeHtml(team.name) : "<span class=\"utp-fa\">free agent</span>"}</div>
         <div class="utp-stats">
           <span><b>${r.stats.kills}</b>K</span>
           <span><b>${r.stats.deaths}</b>D</span>
           <span><b>${r.stats.assists}</b>A</span>
           <span><b>${Math.round(adr)}</b>ADR</span>
+        </div>
+        <div class="utp-match">
+          <span class="utp-score ${won ? "win" : "loss"}">${ownScore}-${oppScore}</span>
+          <span class="utp-opp">vs ${escapeHtml(oppName)}</span>
         </div>
       `;
       wrap.appendChild(card);

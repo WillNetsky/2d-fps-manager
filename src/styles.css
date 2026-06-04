@@ -1542,6 +1542,16 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-variant-numeric: tabular-nums;
 }
 .utp-stats b { color: var(--text); font-weight: 600; margin-right: 2px; }
+.utp-team { font-size: 11.5px; color: var(--muted); margin: -2px 0 2px; }
+.utp-team .utp-fa { font-style: italic; opacity: 0.8; }
+.utp-match {
+  display: flex; align-items: baseline; gap: 6px; font-size: 11.5px;
+  color: var(--muted); margin-top: 4px; border-top: 1px solid var(--border, #2a3142); padding-top: 5px;
+}
+.utp-score { font-weight: 700; font-variant-numeric: tabular-nums; }
+.utp-score.win { color: var(--good); }
+.utp-score.loss { color: var(--bad); }
+.utp-opp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 900px) { .universe-top-performers { grid-template-columns: repeat(2, 1fr); } }
 
