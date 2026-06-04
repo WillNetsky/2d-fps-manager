@@ -3,7 +3,10 @@
 // recomputes player values once per completed day (see universeMode).
 
 import type { Player } from "../domain/types.ts";
-import { STARTING_ELO, type RegionPlayoff, type Universe } from "./types.ts";
+import {
+  STARTING_ELO, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD,
+  type RegionPlayoff, type Universe, type UniverseTeam,
+} from "./types.ts";
 
 // ---- prize money -----------------------------------------------------------
 
@@ -102,6 +105,56 @@ export function recomputePlayerValues(u: Universe): void {
   for (const p of u.players) {
     p.value = playerValue(p, u.elos[p.id] ?? STARTING_ELO);
   }
+}
+
+// ---- wages & budget --------------------------------------------------------
+
+// A player's per-cycle wage, derived from their current market value (so it
+// floats with skill/age/form — no stored contract for v1). Cheap/floor players
+// cost almost nothing to keep.
+export function wageOf(p: Player): number {
+  return Math.round((p.value ?? 0) * WAGE_RATE);
+}
+
+// An org's total per-cycle wage bill (sum of its roster's wages).
+export function wageBill(team: UniverseTeam, byId: Map<string, Player>): number {
+  let sum = 0;
+  for (const id of team.playerIds) { const p = byId.get(id); if (p) sum += wageOf(p); }
+  return sum;
+}
+
+// An org's per-cycle sponsorship income: a flat base plus a bonus scaled by
+// ranking points, so results pay. (Prize money is awarded separately.)
+export function sponsorIncome(team: UniverseTeam): number {
+  return BASE_SPONSOR + Math.round((team.rankingPoints ?? 0) * SPONSOR_PER_RP);
+}
+
+// Run one cycle of finances over every active org: credit sponsorship, debit the
+// wage bill. Mutates `balance` in place. Prize money is added separately (before
+// this) so winnings are spendable. Call once per event cycle.
+export function runFinancialCycle(teams: UniverseTeam[], players: Player[]): void {
+  const byId = new Map(players.map(p => [p.id, p] as const));
+  for (const t of teams) {
+    if (t.disbandedDay || t.playerIds.length === 0) continue;
+    t.balance = (t.balance ?? 0) + sponsorIncome(t) - wageBill(t, byId);
+  }
+}
+
+// Fold every active org whose balance has fallen below FOLD_THRESHOLD. Marks the
+// org disbanded (freeing its players to the market, since disbanded orgs are
+// excluded from active-roster lookups) with a distinct "insolvent" note for the
+// news feed. Call AFTER the transfer window, so a sellable org can be bailed out
+// by poach fees first. Returns the orgs that folded.
+export function foldInsolventOrgs(teams: UniverseTeam[], day: number): UniverseTeam[] {
+  const folded: UniverseTeam[] = [];
+  for (const t of teams) {
+    if (t.disbandedDay || t.playerIds.length === 0) continue;
+    if ((t.balance ?? 0) >= FOLD_THRESHOLD) continue;
+    t.disbandedDay = day;
+    (t.rosterHistory ??= []).push({ day, playerIds: [], note: "Folded — insolvent" });
+    folded.push(t);
+  }
+  return folded;
 }
 
 // ---- formatting ------------------------------------------------------------

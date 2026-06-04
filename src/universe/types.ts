@@ -220,6 +220,11 @@ export interface UniverseTeam {
   roundsLost: number;
   // Current win/loss streak: positive = consecutive wins, negative = losses.
   streak: number;
+  // Spendable cash. Income (prize money + sponsorship) flows in, wages and
+  // transfer fees flow out, each event cycle. Distinct from `earnings` (a
+  // lifetime stat). An org whose balance falls below FOLD_THRESHOLD goes under.
+  // Absent on saves predating wages; seeded from `earnings` on load.
+  balance?: number;
   // Lifetime tournament prize money won, in dollars. Accrues when each event
   // finishes (see finance.regionPayouts). Absent on saves predating the economy;
   // treated as 0 until the team next cashes.
@@ -376,6 +381,16 @@ export const RANKING_DECAY = 0.8;
 // Cap on the trophy log so circuit history doesn't grow without bound.
 export const TITLES_LOG_MAX = 200;
 export const TRANSFERS_LOG_MAX = 200;
+
+// ---- Economy (wages / budget). All amounts are per event cycle (~14 days), the
+// cadence at which finances tick (see finance.runFinancialCycle). Tunable; the
+// intent is that lean or winning orgs sustain while expensive-but-losing rosters
+// bleed and eventually fold, with the transfer market bailing out sellable orgs.
+export const STARTING_BALANCE = 250_000;  // seed cash a new org crystallizes with
+export const WAGE_RATE = 0.05;            // per-cycle wage = this × player market value
+export const BASE_SPONSOR = 30_000;       // flat sponsorship every active org draws
+export const SPONSOR_PER_RP = 50;         // extra sponsorship per ranking point (results pay)
+export const FOLD_THRESHOLD = -200_000;   // balance below this → the org folds (insolvent)
 // How many most-recent years of per-player breakdown to retain in
 // `Universe.yearStats`. Older years drop from the per-year view (their games are
 // still counted in lifetime `careers`), keeping core storage bounded.

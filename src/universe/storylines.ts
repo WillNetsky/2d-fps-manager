@@ -12,11 +12,13 @@
 
 import { REGION_ORDER, REGION_LABELS, type Region } from "../domain/countries.ts";
 import { ratingOfCareer } from "./rating.ts";
+import { formatMoney } from "./finance.ts";
 import { type Universe, type UniverseTeam } from "./types.ts";
 
 export type StorylineKind =
   | "streak" | "race" | "rivalry" | "decline"      // increment 2
-  | "headtohead" | "dynasty" | "milestone" | "breakout"; // increment 3
+  | "headtohead" | "dynasty" | "milestone" | "breakout" // increment 3
+  | "trouble";                                     // economy (v2)
 
 export interface Storyline {
   kind: StorylineKind;
@@ -43,6 +45,7 @@ const WIN_NEAR = 8;            // within this many wins of a step = a watch
 const BREAKOUT_AGE = 21;
 const BREAKOUT_RATING = 1.1;   // recent-year rating to count as breaking out
 const BREAKOUT_MIN_GAMES = 10; // ...over at least this many games (real sample)
+const TROUBLE_BALANCE = -100_000; // balance below this = a club in financial trouble
 
 export function buildStorylines(u: Universe, opts: { region?: Region | "all"; limit?: number } = {}): Storyline[] {
   const region = opts.region && opts.region !== "all" ? opts.region : null;
@@ -231,6 +234,18 @@ export function buildStorylines(u: Universe, opts: { region?: Region | "all"; li
         });
       }
     }
+  }
+
+  // --- Financial trouble (an org deep in the red, nearing insolvency) ---
+  for (const t of activeTeams) {
+    const bal = t.balance ?? 0;
+    if (bal >= TROUBLE_BALANCE || !inRegion(t.region)) continue;
+    out.push({
+      kind: "trouble", heat: 50 + Math.min(40, -bal / 10000),
+      title: `${t.name} are in financial trouble`,
+      detail: `${formatMoney(bal)} in the red — selling stars or folding may be next.`,
+      region: t.region, teamIds: [t.id], playerIds: [],
+    });
   }
 
   out.sort((a, b) => b.heat - a.heat);

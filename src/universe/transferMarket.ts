@@ -1,16 +1,17 @@
 // Transfer market — the post-event roster shuffle. Pure (no DOM, no storage),
 // mirroring lifecycle.ts: the day loop calls runTransferWindow once each event
-// finishes, after prize money is awarded (so winnings are spendable). Fees-only
-// economy: an org buys an upgrade by paying a transfer fee (≈ market value) from
-// its prize-money `earnings` to the selling org; free agents are free. This is
-// what finally gives `earnings` a purpose and drives a rich-get-richer scene.
+// finishes, after income (prize money + sponsorship) is credited and wages are
+// paid (so the spendable `balance` is current). An org buys an upgrade by paying
+// a transfer fee (≈ market value) from its balance to the selling org; free
+// agents are free. The fee flow also bails out a sellable org in financial
+// trouble before the insolvency check folds it.
 //
 // One window:
 //   1. Each active org, RICHEST first, makes at most one improving signing it can
 //      afford — a free agent, or a poach from an equal/weaker org (players only
 //      move sideways or up). The org's weakest player is released to free agency.
 //   2. Orgs left short (they sold a player) backfill from the best free agent.
-// Mutates teams (rosters/earnings/identity), players (chemistry), and returns the
+// Mutates teams (rosters/balance/identity), players (chemistry), and returns the
 // transfers for logging + news.
 
 import type { Player } from "../domain/types.ts";
@@ -50,11 +51,11 @@ export function runTransferWindow(
 
   // --- Buying pass: richest first (prize money = buying power) ---
   const buyers = [...active].sort((a, b) =>
-    (b.earnings ?? 0) - (a.earnings ?? 0) || (b.rankingPoints ?? 0) - (a.rankingPoints ?? 0));
+    (b.balance ?? 0) - (a.balance ?? 0) || (b.rankingPoints ?? 0) - (a.rankingPoints ?? 0));
 
   for (const org of buyers) {
     if (org.playerIds.length < TEAM_SIZE) continue; // short orgs are handled in backfill
-    const budget = org.earnings ?? 0;
+    const budget = org.balance ?? 0;
     const weakestId = [...org.playerIds].sort((a, b) => eloOf(a) - eloOf(b))[0];
     const weakElo = eloOf(weakestId);
 
@@ -81,8 +82,8 @@ export function runTransferWindow(
     const signing = byId.get(pick.id)!;
     if (pick.from) {
       pick.from.playerIds = pick.from.playerIds.filter(id => id !== pick.id);
-      pick.from.earnings = (pick.from.earnings ?? 0) + pick.fee;
-      org.earnings = (org.earnings ?? 0) - pick.fee;
+      pick.from.balance = (pick.from.balance ?? 0) + pick.fee; // selling org banks the fee
+      org.balance = (org.balance ?? 0) - pick.fee;
       commit(pick.from);
     }
     org.playerIds = [...org.playerIds.filter(id => id !== weakestId), pick.id];

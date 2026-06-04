@@ -955,6 +955,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-story-dynasty    { border-top-color: #c9a227; }
 .uni-story-milestone  { border-top-color: #5a8fc7; }
 .uni-story-breakout   { border-top-color: #6bbf59; }
+.uni-story-trouble    { border-top-color: #d9534f; }
 .uni-story-title { font-weight: 700; font-size: 0.92rem; }
 .uni-story-detail { font-size: 0.8rem; color: var(--muted, #8a93a6); line-height: 1.35; }
 

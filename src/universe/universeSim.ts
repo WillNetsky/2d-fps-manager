@@ -11,7 +11,7 @@ import { applyMatchElo } from "./elo.ts";
 import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
-  STARTING_ELO, TEAM_SIZE, RECRUIT_BOND,
+  STARTING_ELO, TEAM_SIZE, RECRUIT_BOND, STARTING_BALANCE,
   GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE,
   type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
   type ProvisionalStack, type UniverseTeam, type VetoStep,
@@ -331,6 +331,7 @@ export function crystallizeTeam(
       foundedDay: ctx.day,
       lastPlayedDay: ctx.day,
       wins: 0, losses: 0, roundsWon: 0, roundsLost: 0, streak: 0,
+      balance: STARTING_BALANCE,
     };
     ctx.teams.push(team);
   } else {

@@ -19,7 +19,7 @@ import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
-import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES } from "./finance.ts";
+import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, runFinancialCycle, foldInsolventOrgs } from "./finance.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -29,7 +29,7 @@ import {
 } from "./storage.ts";
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
-  EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, YEAR_STATS_KEEP,
+  EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, STARTING_BALANCE, YEAR_STATS_KEEP,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
   type RegionPlayoff, type TournamentTitle, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
@@ -602,6 +602,9 @@ export class UniverseMode {
       t.tier ??= "org";
       t.rosterHistory ??= [{ day: t.foundedDay, playerIds: [...t.playerIds], note: "Founded" }];
       t.country ??= playerById.get(captainOf(t.playerIds, u.elos))?.country;
+      // Wages/budget postdate the fees-only market: seed spendable cash from the
+      // accumulated earnings (which the v1 market already used as a balance).
+      t.balance ??= t.earnings ?? STARTING_BALANCE;
     }
     this.ensureCircuit(u); // lazy-init the circuit scheduler for saves predating it
     if (!u.yearStats) rebuildYearStats(u); // backfill per-year stat buckets from history
@@ -792,10 +795,10 @@ export class UniverseMode {
     const byId = new Map((u.teams ?? []).map(t => [t.id, t] as const));
     const titles = (u.titles ??= []);
     for (const rp of u.playoffs?.regions ?? []) {
-      // Prize money + ranking points by placement.
+      // Prize money: into spendable balance AND the lifetime earnings stat.
       for (const [teamId, amt] of regionPayouts(rp)) {
         const t = byId.get(teamId);
-        if (t) t.earnings = (t.earnings ?? 0) + amt;
+        if (t) { t.balance = (t.balance ?? 0) + amt; t.earnings = (t.earnings ?? 0) + amt; }
       }
       for (const [teamId, pts] of rankingPointsFor(rp)) {
         const t = byId.get(teamId);
@@ -816,13 +819,17 @@ export class UniverseMode {
     c.nextEventId += 1;
     c.daysUntilNext = EVENT_INTERVAL_DAYS;
 
-    // Post-event transfer window: orgs spend fresh winnings to shuffle rosters.
-    // Roster moves flow into rosterHistory → news; the structured log feeds the
-    // Market screen. Players' market values are unchanged (elo/age/form didn't
-    // move), so no recompute is needed.
+    // Finances tick once per event cycle: credit sponsorship, pay wages (prize
+    // money was just added above), THEN run the transfer window — so a sellable
+    // org in the red can be bailed out by poach fees — and only THEN fold the
+    // orgs still insolvent. Roster moves flow into rosterHistory → news; the
+    // structured transfer log feeds the Market screen.
+    const teams = u.teams ?? [];
+    runFinancialCycle(teams, u.players);
     const log = (u.transfers ??= []);
-    log.push(...runTransferWindow(u.teams ?? [], u.players, u.elos, day));
+    log.push(...runTransferWindow(teams, u.players, u.elos, day));
     if (log.length > TRANSFERS_LOG_MAX) log.splice(0, log.length - TRANSFERS_LOG_MAX);
+    foldInsolventOrgs(teams, day);
   }
 
   // The team that lost the final of a finished region bracket, if any.
@@ -1674,20 +1681,21 @@ export class UniverseMode {
     for (const t of active) for (const id of t.playerIds) onOrg.add(id);
     const teamName = (id?: string) => (id ? u.teams?.find(t => t.id === id)?.name : undefined);
 
-    // --- Spending power (top orgs by prize-money earnings) ---
-    const rich = [...active].sort((a, b) => (b.earnings ?? 0) - (a.earnings ?? 0)).slice(0, 8);
-    if (rich.some(t => (t.earnings ?? 0) > 0)) {
+    // --- Spending power (top orgs by spendable balance) ---
+    const rich = [...active].sort((a, b) => (b.balance ?? 0) - (a.balance ?? 0)).slice(0, 8);
+    if (rich.length > 0) {
       const sec = document.createElement("div");
       sec.className = "uni-market-sec";
-      sec.innerHTML = `<h3 class="uni-market-h">Spending power</h3>`;
+      sec.innerHTML = `<h3 class="uni-market-h">Spending power <span class="uni-market-sub">cash on hand</span></h3>`;
       const strip = document.createElement("div");
       strip.className = "uni-budgets";
       for (const t of rich) {
         const chip = document.createElement("div");
         chip.className = "uni-budget clickable";
         chip.dataset.tid = t.id;
+        const bal = t.balance ?? 0;
         chip.innerHTML = `<span class="uni-budget-name">${t.country ? `${flagEmoji(t.country)} ` : ""}${escapeHtml(t.name)}</span>` +
-          `<span class="uni-budget-amt">${formatMoney(t.earnings ?? 0)}</span>`;
+          `<span class="uni-budget-amt" style="color:${bal < 0 ? "var(--bad)" : "var(--good)"}">${formatMoney(bal)}</span>`;
         strip.appendChild(chip);
       }
       sec.appendChild(strip);
@@ -3316,6 +3324,8 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
       <div class="utm-hl"><div class="utm-hl-label">Round diff</div><div class="utm-hl-val">${diff >= 0 ? "+" : ""}${diff}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Streak</div><div class="utm-hl-val" style="color:${team.streak > 0 ? "var(--good)" : team.streak < 0 ? "var(--bad)" : "inherit"}">${streak}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Ranking pts</div><div class="utm-hl-val">${Math.round(team.rankingPoints ?? 0)}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Balance</div><div class="utm-hl-val" style="color:${(team.balance ?? 0) < 0 ? "var(--bad)" : "var(--good)"}">${formatMoney(team.balance ?? 0)}</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Wage bill</div><div class="utm-hl-val">${formatMoney(wageBill(team, playerById))}/cyc</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Earnings</div><div class="utm-hl-val">${formatMoney(team.earnings ?? 0)}</div></div>
     </div>`;
   root.appendChild(header);
