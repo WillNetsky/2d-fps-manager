@@ -140,6 +140,17 @@ export function reservePlayerIds(players: Array<{ id: string }>): void {
   playerCounter = max;
 }
 
+// A team's front-office staff member (manager/coach). Identity only for now —
+// a locale-flavored name and nationality drawn from the team's region.
+export function generateManager(region: Region, day: number): { name: string; country: string; since: number } {
+  const country = pickCountryInRegion(rand, region);
+  return {
+    name: `${country.faker.person.firstName()} ${country.faker.person.lastName()}`,
+    country: country.code,
+    since: day,
+  };
+}
+
 // Pass `region` to draw the player's nationality from that region only — used
 // to seed a guaranteed headcount per competitive region. Omit for a globally
 // weighted pick.

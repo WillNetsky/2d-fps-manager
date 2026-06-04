@@ -17,6 +17,7 @@ import {
   type ProvisionalStack, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 import { generateTeamName } from "../domain/teamNames.ts";
+import { activeLineup } from "./roster.ts";
 
 // The mutable slice of a Universe the simulation reads and writes. Everything
 // here is plain data (structured-cloneable), so it crosses the worker boundary
@@ -324,8 +325,10 @@ export function crystallizeTeam(
       region,
       country: ctx.byId.get(captainOf(playerIds, elos))?.country,
       playerIds: [...playerIds],
+      activeIds: [...playerIds],   // founding five are all active
       rosterKey,
       tier: "org",
+      founderId: captainOf(playerIds, elos), // a player leads a grassroots team — no hired coach
       rosterHistory: [{ day: ctx.day, playerIds: [...playerIds], note: "Founded" }],
       elo,
       foundedDay: ctx.day,
@@ -336,9 +339,11 @@ export function crystallizeTeam(
     ctx.teams.push(team);
   } else {
     team.playerIds = [...playerIds];
+    team.activeIds = [...playerIds];
     team.elo = elo;
     team.lastPlayedDay = ctx.day;
     team.region = region;
+    team.founderId ??= captainOf(playerIds, elos);
     // The exact clique re-formed: revive a disbanded org rather than minting a
     // new identity, and reopen its roster history.
     if (team.disbandedDay !== undefined) {
@@ -428,7 +433,32 @@ export function generateMatchups(
     const inRegion = byRegion.get(region);
     if (!inRegion || inRegion.length < TEAM_SIZE * 2) continue; // can't field a lobby
 
-    const teams = formTeams(inRegion, eloOf, !!teamCtx);
+    // Tracked orgs field their Active 5 directly; every rostered player (active
+    // or bench) is COMMITTED and never re-enters free-agent matchmaking, so no
+    // player ends up on two teams. Only the remaining free agents form pickup
+    // cliques — the sole path by which a brand-new org crystallizes.
+    let teams: FormedTeam[];
+    if (teamCtx) {
+      const available = new Set(inRegion.map(p => p.id));
+      const committed = new Set<string>();
+      const orgTeams: FormedTeam[] = [];
+      for (const org of teamCtx.teams) {
+        if (org.disbandedDay || org.region !== region || org.playerIds.length === 0) continue;
+        for (const id of org.playerIds) committed.add(id); // bench/unavailable included
+        const rosterAvail = org.playerIds.filter(id => available.has(id));
+        if (rosterAvail.length < TEAM_SIZE) continue;        // can't field today
+        const active = activeLineup(org, rosterAvail, elos);
+        const players = active.map(id => teamCtx.byId.get(id)).filter((p): p is Player => !!p);
+        if (players.length === TEAM_SIZE) orgTeams.push({ players, parties: [active], orgId: org.id });
+      }
+      const freeAgents = inRegion.filter(p => !committed.has(p.id));
+      const faTeams = freeAgents.length >= TEAM_SIZE ? formTeams(freeAgents, eloOf, true) : [];
+      teams = [...orgTeams, ...faTeams];
+    } else {
+      teams = formTeams(inRegion, eloOf, false);
+    }
+    if (teams.length < 2) continue;
+
     // Pair teams by stack composition first, Elo second: a 3+2 lobby faces
     // another 3+2 (or a 2+2+1), a premade five faces a premade, solos face solos
     // — so a stacked side never stomps five randoms. Odd teams out sit the day.
@@ -448,13 +478,15 @@ export function generateMatchups(
       // Surface every friend-stack (2+ that queued together) in this lobby.
       const parties = [...ct.parties, ...t.parties];
       const series = pi === 0 && topIsSeries;
-      // A side that fielded a full premade five enters the stack→org pipeline:
-      // it's tagged (and its result folds into standings) only once it has
-      // promoted to a tracked org; until then it plays as a pickup lobby.
-      const ctTeamId = teamCtx && ct.parties.some(p => p.length === TEAM_SIZE)
-        ? resolveOrgSide(teamCtx, region, ct.players.map(p => p.id), elos) : undefined;
-      const tTeamId = teamCtx && t.parties.some(p => p.length === TEAM_SIZE)
-        ? resolveOrgSide(teamCtx, region, t.players.map(p => p.id), elos) : undefined;
+      // Org sides carry their id directly. A free-agent premade five enters the
+      // stack→org pipeline and is tagged only once it promotes to a tracked org;
+      // until then it plays as a pickup lobby.
+      const ctTeamId = ct.orgId
+        ?? (teamCtx && ct.parties.some(p => p.length === TEAM_SIZE)
+          ? resolveOrgSide(teamCtx, region, ct.players.map(p => p.id), elos) : undefined);
+      const tTeamId = t.orgId
+        ?? (teamCtx && t.parties.some(p => p.length === TEAM_SIZE)
+          ? resolveOrgSide(teamCtx, region, t.players.map(p => p.id), elos) : undefined);
       matchups.push({
         id: `m${idx++}`,
         ctPlayerIds: ct.players.map(p => p.id),
@@ -476,7 +508,7 @@ export function generateMatchups(
 // A formed 5-player team plus the friend-stacks that seeded it (each a clique of
 // 2+ players who queued together; empty for teams built purely from solos). A
 // team can carry more than one stack, e.g. a 3+2 or 2+2+1 lobby.
-interface FormedTeam { players: Player[]; parties: string[][]; }
+interface FormedTeam { players: Player[]; parties: string[][]; orgId?: string }
 
 // Two partial stacks are only merged into one lineup when their average Elo is
 // within this band, so grouping friends never builds a wildly mismatched five.

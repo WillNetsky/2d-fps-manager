@@ -191,19 +191,39 @@ export interface ProvisionalStack {
   lastSeenDay: number;
 }
 
-// A persistent, named team: a full 5-man friend-stack that has crystallized into
-// a tracked org. Identity is stable across days via `id`; `rosterKey` (sorted
-// player ids) is how a re-formed identical stack is matched back to its team.
+// A non-player staff member who runs a team. Minimal for now (identity only) —
+// groundwork for a fuller coach role and academy teams later.
+export interface Manager {
+  name: string;
+  country?: string;   // ISO-3166 alpha-2
+  since: number;      // day they took charge
+}
+
+// A persistent, named team: an org that owns a roster. A player belongs to at
+// most one team. Identity is stable across days via `id`. The roster holds up to
+// ROSTER_MAX players; `activeIds` is the five that actually play (the rest are
+// bench). `rosterKey` (sorted ACTIVE ids) still matches a re-formed lineup back.
 export interface UniverseTeam {
   id: string;
   name: string;
   region: Region;
+  // The founding player who runs the club. A team that crystallized from a
+  // grassroots 5-stack is player-led: this is that founder (the de facto captain
+  // at founding). Leadership falls to the current captain if the founder leaves.
+  founderId?: string;
+  // Hired front-office staff (see Manager). NOT auto-generated for grassroots
+  // teams — they're player-run; reserved for established orgs / future hiring.
+  manager?: Manager;
   // Country of origin — the founding captain's nationality (ISO-3166 alpha-2).
   // Fixed at crystallization; survives roster changes. Absent on saves predating
   // org nationality; backfilled from the current captain on load.
   country?: string;
-  playerIds: string[];                      // current 5-man roster
-  rosterKey: string;                        // sorted playerIds joined — identity match
+  playerIds: string[];                      // full roster (active + bench), up to ROSTER_MAX
+  // The five players who actually play (a subset of playerIds, AI-managed). The
+  // rest of the roster are bench. Absent on saves predating benches — backfilled
+  // to the best five on load.
+  activeIds?: string[];
+  rosterKey: string;                        // sorted ACTIVE ids joined — identity match
   // Competitive tier. Absent on saves predating tiers; treated as "org" (every
   // tracked team used to be a crystallized org).
   tier?: TeamTier;
@@ -438,4 +458,8 @@ export const PLAYERS_PER_REGION = 1000;
 // Upper guard for the setup input — prevents runaway player generation from a typo.
 export const MAX_PLAYERS_PER_REGION = 2000;
 export const PLAYER_COUNT = PLAYERS_PER_REGION * REGION_ORDER.length;
-export const TEAM_SIZE = 5;
+export const TEAM_SIZE = 5;            // players on the Active Roster (who play a match)
+export const ROSTER_MAX = 12;         // full roster cap (active + bench); academy comes later
+// A benched player loses this much morale per cycle (they want to play). Drives
+// the bench dynamics: seek a transfer, quit if uncontracted, or stay if content.
+export const BENCH_MORALE_HIT = 6;

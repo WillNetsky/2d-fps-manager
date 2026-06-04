@@ -3,8 +3,11 @@
 // recomputes player values once per completed day (see universeMode).
 
 import type { Player } from "../domain/types.ts";
+import { FRIEND_THRESHOLD } from "./chemistry.ts";
+import { benchOf, refreshActiveRoster } from "./roster.ts";
 import {
-  STARTING_ELO, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD, CONTRACT_LENGTH_DAYS,
+  STARTING_ELO, TEAM_SIZE, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD,
+  CONTRACT_LENGTH_DAYS, BENCH_MORALE_HIT,
   type RegionPlayoff, type Universe, type UniverseTeam,
 } from "./types.ts";
 
@@ -211,6 +214,43 @@ export function foldInsolventOrgs(teams: UniverseTeam[], day: number): UniverseT
     folded.push(t);
   }
   return folded;
+}
+
+// ---- bench dynamics --------------------------------------------------------
+
+// Benched players don't want to sit. Each cycle they lose morale; an unhappy,
+// UNCONTRACTED bench player who isn't tied to the squad by friendship quits to
+// free agency (the more ambitious, the likelier). Contracted bench players are
+// locked in — they stew (and the market may sell them), but can't just walk.
+// A player still friends with the starters, or content (low ambition), stays.
+// Only ever removes bench players, so the active five is never disturbed.
+// Returns the ids that quit.
+export function runBenchCycle(
+  teams: UniverseTeam[], players: Player[], elos: Record<string, number>, day: number,
+  rng: () => number = Math.random,
+): string[] {
+  const byId = new Map(players.map(p => [p.id, p] as const));
+  const quit: string[] = [];
+  for (const t of teams) {
+    if (t.disbandedDay) continue;
+    const active = t.activeIds ?? t.playerIds.slice(0, TEAM_SIZE);
+    let changed = false;
+    for (const id of benchOf(t)) {
+      const p = byId.get(id);
+      if (!p) continue;
+      p.morale = Math.max(0, Math.min(100, p.morale - BENCH_MORALE_HIT));
+      const befriended = active.some(aid => (p.relationships[aid] ?? 0) >= FRIEND_THRESHOLD);
+      const wantsOut = !p.contract && p.morale < 45 && !befriended;
+      if (wantsOut && rng() < 0.3 + p.ambition / 200) {
+        t.playerIds = t.playerIds.filter(x => x !== id);
+        quit.push(id);
+        changed = true;
+        (t.rosterHistory ??= []).push({ day, playerIds: [...t.playerIds], note: `${p.handle} left the bench` });
+      }
+    }
+    if (changed) refreshActiveRoster(t, elos);
+  }
+  return quit;
 }
 
 // ---- formatting ------------------------------------------------------------

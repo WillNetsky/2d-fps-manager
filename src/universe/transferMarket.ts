@@ -18,7 +18,8 @@ import type { Player } from "../domain/types.ts";
 import { regionOf } from "../domain/countries.ts";
 import { seedCliqueBonds } from "./chemistry.ts";
 import { formatMoney, signContract } from "./finance.ts";
-import { STARTING_ELO, TEAM_SIZE, type TransferRecord, type UniverseTeam } from "./types.ts";
+import { refreshActiveRoster } from "./roster.ts";
+import { STARTING_ELO, TEAM_SIZE, ROSTER_MAX, type TransferRecord, type UniverseTeam } from "./types.ts";
 
 const MIN_UPGRADE_GAP = 30;  // elo improvement required to bother signing
 const SIGNING_BOND = 55;     // seed cohesion across the new lineup (clears FRIEND_THRESHOLD)
@@ -43,8 +44,8 @@ export function runTransferWindow(
     players.filter(p => !p.retired && !onOrg.has(p.id) && !moved.has(p.id) && regionOf(p.country) === region);
 
   const commit = (org: UniverseTeam): void => {
-    org.rosterKey = [...org.playerIds].sort().join(",");
     org.elo = Math.round(org.playerIds.reduce((s, id) => s + eloOf(id), 0) / org.playerIds.length);
+    refreshActiveRoster(org, elos); // re-pick the best 5 active; rest are bench
   };
   const seed = (org: UniverseTeam): void =>
     seedCliqueBonds(org.playerIds.map(id => byId.get(id)!).filter(Boolean), SIGNING_BOND);
@@ -56,13 +57,15 @@ export function runTransferWindow(
   for (const org of buyers) {
     if (org.playerIds.length < TEAM_SIZE) continue; // short orgs are handled in backfill
     const budget = org.balance ?? 0;
-    const weakestId = [...org.playerIds].sort((a, b) => eloOf(a) - eloOf(b))[0];
-    const weakElo = eloOf(weakestId);
+    // Upgrade is measured against the weakest player in the ACTIVE 5 (who the
+    // signing would push to the bench).
+    const activeIds = (org.activeIds ?? org.playerIds.slice(0, TEAM_SIZE));
+    const weakElo = Math.min(...activeIds.map(eloOf));
 
     // Best affordable, willing in-region upgrade (free agent or poach).
     let best: { id: string; from?: UniverseTeam; fee: number; elo: number } | null = null;
     const consider = (id: string, from?: UniverseTeam) => {
-      if (moved.has(id) || id === weakestId) return;
+      if (moved.has(id)) return;
       const e = eloOf(id);
       if (e < weakElo + MIN_UPGRADE_GAP) return;          // not enough of an upgrade
       if (from && teamElo(org) < teamElo(from)) return;   // players don't move to a weaker org
@@ -78,20 +81,28 @@ export function runTransferWindow(
     if (!best) continue;
     const pick: { id: string; from?: UniverseTeam; fee: number } = best;
 
-    // Execute: pay the fee, pull the player, release the weakest.
+    // Execute: pay the fee, pull the player onto the roster (bench-aware).
     const signing = byId.get(pick.id)!;
     if (pick.from) {
       pick.from.playerIds = pick.from.playerIds.filter(id => id !== pick.id);
       pick.from.balance = (pick.from.balance ?? 0) + pick.fee; // selling org banks the fee
       org.balance = (org.balance ?? 0) - pick.fee;
-      commit(pick.from);
+      commit(pick.from); // bench promotes into the seller's active five
     }
-    org.playerIds = [...org.playerIds.filter(id => id !== weakestId), pick.id];
-    onOrg.delete(weakestId);   // released to free agency
+    org.playerIds = [...org.playerIds, pick.id];
     onOrg.add(pick.id);
     moved.add(pick.id);
-    delete byId.get(weakestId)?.contract;       // released player → no contract
-    signContract(signing, day);                  // new deal at the buying org
+    signContract(signing, day); // new deal at the buying org
+
+    // Over the roster cap → release the worst-Elo player to free agency.
+    let releasedNote = "";
+    if (org.playerIds.length > ROSTER_MAX) {
+      const worst = [...org.playerIds].sort((a, b) => eloOf(a) - eloOf(b))[0];
+      org.playerIds = org.playerIds.filter(id => id !== worst);
+      onOrg.delete(worst);
+      delete byId.get(worst)?.contract;
+      releasedNote = `, released ${byId.get(worst)?.handle ?? worst}`;
+    }
     seed(org);
     commit(org);
 
@@ -102,9 +113,9 @@ export function runTransferWindow(
     });
     (org.rosterHistory ??= []).push({
       day, playerIds: [...org.playerIds],
-      note: pick.from
+      note: (pick.from
         ? `Signed ${signing.handle} from ${pick.from.name} (${formatMoney(pick.fee)})`
-        : `Signed ${signing.handle} (free agent)`,
+        : `Signed ${signing.handle} (free agent)`) + releasedNote,
     });
   }
 

@@ -19,7 +19,8 @@ import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
-import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, foldInsolventOrgs } from "./finance.ts";
+import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
+import { benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
 import type { SimWorkerRequest, SimWorkerResponse } from "./universeSimWorker.ts";
@@ -606,6 +607,7 @@ export class UniverseMode {
       // accumulated earnings (which the v1 market already used as a balance).
       t.balance ??= t.earnings ?? STARTING_BALANCE;
     }
+    dedupeRosters(u, u.day); // enforce one team per player; backfill active roster + manager
     this.ensureCircuit(u); // lazy-init the circuit scheduler for saves predating it
     if (!u.yearStats) rebuildYearStats(u); // backfill per-year stat buckets from history
     recomputePlayerValues(u); // backfill/refresh market values (incl. pre-economy saves)
@@ -830,6 +832,7 @@ export class UniverseMode {
     const log = (u.transfers ??= []);
     log.push(...runTransferWindow(teams, u.players, u.elos, day));
     if (log.length > TRANSFERS_LOG_MAX) log.splice(0, log.length - TRANSFERS_LOG_MAX);
+    runBenchCycle(teams, u.players, u.elos, day); // unhappy bench players walk
     foldInsolventOrgs(teams, day);
   }
 
@@ -3315,6 +3318,18 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
   const diff = team.roundsWon - team.roundsLost;
   const streak = team.streak === 0 ? "—" : (team.streak > 0 ? `W${team.streak}` : `L${-team.streak}`);
   const titles = (u.titles ?? []).filter(t => t.championTeamId === team.id);
+  // Leadership: the founding player (or current captain if they've moved on), the
+  // on-server IGL, and a hired manager only if the club actually has one.
+  const igl = iglOf(team, playerById);
+  const founderOnRoster = !!team.founderId && team.playerIds.includes(team.founderId);
+  const inChargeId = founderOnRoster ? team.founderId! : (team.playerIds.length ? captainOf(team.playerIds, u.elos) : undefined);
+  const inCharge = inChargeId ? playerById.get(inChargeId) : undefined;
+  const pLink = (p: Player) => `<span class="upp-team-link clickable" data-pid="${p.id}">${escapeHtml(p.handle)}</span>`;
+  const leadParts: string[] = [];
+  if (team.manager) leadParts.push(`Manager: ${team.manager.country ? `${flagEmoji(team.manager.country)} ` : ""}${escapeHtml(team.manager.name)}`);
+  if (inCharge) leadParts.push(`${founderOnRoster ? "Founder" : "Captain"}: ${pLink(inCharge)}`);
+  if (igl && igl.id !== inCharge?.id) leadParts.push(`IGL: ${pLink(igl)}`);
+  const leadership = leadParts.join(" · ");
 
   // ----- Header -----
   const header = document.createElement("div");
@@ -3326,7 +3341,8 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
         <div class="utm-name">${team.country ? `${flagEmoji(team.country)} ` : ""}${escapeHtml(team.name)}</div>
         <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · founded day ${team.foundedDay}` +
           `${titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : ""}` +
-          `${team.disbandedDay ? ` · <span class="upp-retired">Disbanded (Day ${team.disbandedDay})</span>` : ""}</div>
+          `${team.disbandedDay ? ` · <span class="upp-retired">Disbanded (Day ${team.disbandedDay})</span>` : ""}</div>` +
+          (leadership ? `<div class="utm-lead">${leadership}</div>` : "") + `
       </div>
     </div>
     <div class="utm-headline-stats">
@@ -3341,14 +3357,14 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
       <div class="utm-hl"><div class="utm-hl-label">Earnings</div><div class="utm-hl-val">${formatMoney(team.earnings ?? 0)}</div></div>
     </div>`;
   root.appendChild(header);
+  // Wire the clickable leadership links (founder/captain, IGL) to their pages.
+  header.querySelectorAll("[data-pid]").forEach(el => {
+    const pid = (el as HTMLElement).dataset.pid!;
+    (el as HTMLElement).onclick = () => h.onPlayer(pid);
+  });
 
-  // ----- Roster -----
-  const rosterSection = document.createElement("div");
-  rosterSection.className = "utm-section";
-  rosterSection.innerHTML = `<h3 class="utm-section-h">Roster</h3>`;
-  const roster = document.createElement("div");
-  roster.className = "utm-roster";
-  for (const id of team.playerIds) {
+  // ----- Roster (Active 5 + bench) -----
+  const rosterRow = (id: string): HTMLElement => {
     const p = playerById.get(id);
     const row = document.createElement("div");
     row.className = "utm-roster-row clickable-row";
@@ -3364,10 +3380,65 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     } else {
       row.innerHTML = `<span class="utm-rr-handle">${escapeHtml(id)}</span><span class="utm-rr-name">(former member)</span>`;
     }
-    roster.appendChild(row);
+    return row;
+  };
+  const members = new Set(team.playerIds);
+  const activeIds = (team.activeIds ?? team.playerIds.slice(0, TEAM_SIZE)).filter(id => members.has(id));
+  const bench = benchOf(team);
+  const rosterSection = document.createElement("div");
+  rosterSection.className = "utm-section";
+  rosterSection.innerHTML = `<h3 class="utm-section-h">Active Roster</h3>`;
+  const active = document.createElement("div");
+  active.className = "utm-roster";
+  for (const id of activeIds) active.appendChild(rosterRow(id));
+  rosterSection.appendChild(active);
+  if (bench.length > 0) {
+    rosterSection.insertAdjacentHTML("beforeend", `<h3 class="utm-section-h utm-bench-h">Bench</h3>`);
+    const benchEl = document.createElement("div");
+    benchEl.className = "utm-roster utm-bench";
+    for (const id of bench) benchEl.appendChild(rosterRow(id));
+    rosterSection.appendChild(benchEl);
   }
-  rosterSection.appendChild(roster);
   root.appendChild(rosterSection);
+
+  // ----- Former members (everyone the club has ever signed, who's since left) -----
+  const everSigned = new Set<string>();
+  const lastSeenDay = new Map<string, number>();
+  for (const e of team.rosterHistory ?? []) {
+    for (const id of e.playerIds) { everSigned.add(id); lastSeenDay.set(id, e.day); }
+  }
+  const current = new Set(team.playerIds);
+  const former = [...everSigned]
+    .filter(id => !current.has(id) && playerById.has(id))
+    .sort((a, b) => (lastSeenDay.get(b) ?? 0) - (lastSeenDay.get(a) ?? 0));
+  if (former.length > 0) {
+    const whereNow = (id: string): string => {
+      const p = playerById.get(id);
+      if (p?.retired) return "retired";
+      const club = (u.teams ?? []).find(t => !t.disbandedDay && t.id !== team.id && t.playerIds.includes(id));
+      return club ? `now at ${club.name}` : "free agent";
+    };
+    const sec = document.createElement("div");
+    sec.className = "utm-section";
+    sec.innerHTML = `<h3 class="utm-section-h">Former members <span class="utm-sub">${former.length}</span></h3>`;
+    const list = document.createElement("div");
+    list.className = "utm-former";
+    for (const id of former) {
+      const p = playerById.get(id)!;
+      const row = document.createElement("div");
+      row.className = "utm-former-row clickable-row";
+      row.innerHTML =
+        `<span class="utm-rr-flag">${flagEmoji(p.country)}</span>` +
+        `<span class="utm-rr-handle">${escapeHtml(p.handle)}</span>` +
+        `<span class="utm-rr-name">${escapeHtml(p.name)}</span>` +
+        `<span class="utm-former-when">left ~D${lastSeenDay.get(id) ?? "?"}</span>` +
+        `<span class="utm-former-now">${escapeHtml(whereNow(id))}</span>`;
+      row.onclick = () => h.onPlayer(id);
+      list.appendChild(row);
+    }
+    sec.appendChild(list);
+    root.appendChild(sec);
+  }
 
   // ----- Trophy cabinet -----
   if (titles.length > 0) {
@@ -3396,15 +3467,23 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     const list = document.createElement("div");
     list.className = "utm-roster-history";
     for (const e of [...history].reverse()) {
-      const handles = e.playerIds.map(id => playerById.get(id)?.handle ?? "?").join(", ");
+      const roster = e.playerIds.length === 0 ? "—" : e.playerIds.map(id => {
+        const p = playerById.get(id);
+        return p ? `<span class="utm-rh-p clickable" data-pid="${id}">${escapeHtml(p.handle)}</span>` : escapeHtml(id);
+      }).join(", ");
       const row = document.createElement("div");
       row.className = "utm-rh-row";
       row.innerHTML =
         `<span class="utm-rh-day">Day ${e.day}</span>` +
         `<span class="utm-rh-note">${escapeHtml(e.note)}</span>` +
-        `<span class="utm-rh-roster">${escapeHtml(handles)}</span>`;
+        `<span class="utm-rh-roster">${roster}</span>`;
       list.appendChild(row);
     }
+    // Delegated navigation for the (now clickable) roster snapshots.
+    list.addEventListener("click", (ev) => {
+      const el = (ev.target as HTMLElement).closest("[data-pid]") as HTMLElement | null;
+      if (el?.dataset.pid) h.onPlayer(el.dataset.pid);
+    });
     rh.appendChild(list);
     root.appendChild(rh);
   }
@@ -3482,6 +3561,29 @@ function rebuildCareers(u: Universe): void {
   }
   for (const m of u.pendingDay?.matchups ?? []) recordMatchupCareers(careers, m);
   u.careers = careers;
+}
+
+// One-time cleanup of pre-exclusivity saves: enforce one team per player. Each
+// player is kept on their STRONGEST org (highest team Elo claims first); they're
+// removed from every weaker duplicate. Orgs left below a fieldable five — the
+// overlapping near-duplicates the old matchmaking spawned — are disbanded. Then
+// the active roster + manager are backfilled. Idempotent (a no-op once clean).
+function dedupeRosters(u: Universe, day: number): void {
+  const teams = (u.teams ?? []).filter(t => !t.disbandedDay);
+  const byElo = [...teams].sort((a, b) => (b.elo ?? STARTING_ELO) - (a.elo ?? STARTING_ELO));
+  const claimed = new Map<string, UniverseTeam>();
+  for (const t of byElo) for (const id of t.playerIds) if (!claimed.has(id)) claimed.set(id, t);
+  for (const t of teams) {
+    t.playerIds = t.playerIds.filter(id => claimed.get(id) === t);
+    if (t.playerIds.length < TEAM_SIZE) {
+      t.disbandedDay = day;
+      (t.rosterHistory ??= []).push({ day, playerIds: [], note: "Disbanded — roster overlap cleanup" });
+    } else {
+      refreshActiveRoster(t, u.elos);
+      t.founderId ??= captainOf(t.playerIds, u.elos); // a player leads the team
+      delete t.manager; // grassroots teams are player-run — clear auto-generated coaches
+    }
+  }
 }
 
 // Backfill the event-only career aggregate from the retained history window

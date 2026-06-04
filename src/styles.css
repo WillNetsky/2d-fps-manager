@@ -963,6 +963,20 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .upp-fa { color: var(--accent, #e3a857); font-weight: 600; }
 .utm-rr-salary { color: var(--muted, #8a93a6); font-size: 0.78rem; white-space: nowrap; }
 .utm-rr-until { opacity: 0.7; }
+.utm-lead { color: var(--muted, #8a93a6); font-size: 0.82rem; margin-top: 0.15rem; }
+.utm-bench-h { margin-top: 0.9rem; color: var(--muted, #8a93a6); font-size: 0.85rem; }
+.utm-bench { opacity: 0.85; }
+.utm-sub { color: var(--muted, #8a93a6); font-size: 0.75rem; font-weight: 400; }
+.utm-rh-p { color: var(--text, #cdd3dc); }
+.utm-rh-p:hover { color: var(--accent, #e3a857); text-decoration: underline; }
+.utm-former { display: flex; flex-direction: column; gap: 1px; }
+.utm-former-row {
+  display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.6rem;
+  background: var(--panel, #181b22); cursor: pointer; font-size: 0.85rem;
+}
+.utm-former-row:hover { background: var(--panel-2, #20242d); }
+.utm-former-when { color: var(--muted, #8a93a6); font-size: 0.75rem; margin-left: auto; white-space: nowrap; }
+.utm-former-now { color: var(--accent, #e3a857); font-size: 0.78rem; white-space: nowrap; min-width: 8rem; text-align: right; }
 .uni-story-title { font-weight: 700; font-size: 0.92rem; }
 .uni-story-detail { font-size: 0.8rem; color: var(--muted, #8a93a6); line-height: 1.35; }
 
