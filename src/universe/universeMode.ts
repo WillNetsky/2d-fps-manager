@@ -15,6 +15,7 @@ import {
 import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
 import { yearOf, eventInvitees, freeAgentContenders, compareRanking, rankingPointsFor } from "./circuit.ts";
 import { runSeasonLifecycle } from "./lifecycle.ts";
+import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
@@ -28,7 +29,7 @@ import {
 } from "./storage.ts";
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
-  EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, YEAR_STATS_KEEP,
+  EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, YEAR_STATS_KEEP,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
   type RegionPlayoff, type TournamentTitle, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
@@ -39,7 +40,7 @@ import {
 // matches stay replayable — not the career totals.
 const HISTORY_DAYS = HISTORY_WINDOW;
 
-type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "news" | "career" | "settings" | "player" | "team" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "market" | "news" | "career" | "settings" | "player" | "team" | "replay";
 
 // In-progress configuration for the New Universe setup screen.
 interface UniverseSetup {
@@ -63,7 +64,7 @@ interface SeriesPlay {
 }
 
 // Screens that share the day-view tab bar.
-const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "news", "career", "settings"];
+const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "market", "news", "career", "settings"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -138,6 +139,7 @@ export class UniverseMode {
       case "match":     this.renderMatch(body); break;
       case "standings": this.renderStandings(body); break;
       case "teams":     this.renderTeams(body); break;
+      case "market":    this.renderMarket(body); break;
       case "news":      this.renderNews(body); break;
       case "career":    this.renderCareer(body); break;
       case "settings":  this.renderSettings(body); break;
@@ -214,6 +216,7 @@ export class UniverseMode {
       { key: "matchups",  label: "Matchups",       show: hasPending },
       { key: "standings", label: "Player ratings", show: true },
       { key: "teams",     label: "Teams",          show: true },
+      { key: "market",    label: "Market",         show: true },
       { key: "news",      label: "News",           show: true },
       { key: "career",    label: "Career stats",   show: true },
       { key: "settings",  label: "Settings",       show: true },
@@ -812,6 +815,14 @@ export class UniverseMode {
     u.playoffs = null;
     c.nextEventId += 1;
     c.daysUntilNext = EVENT_INTERVAL_DAYS;
+
+    // Post-event transfer window: orgs spend fresh winnings to shuffle rosters.
+    // Roster moves flow into rosterHistory → news; the structured log feeds the
+    // Market screen. Players' market values are unchanged (elo/age/form didn't
+    // move), so no recompute is needed.
+    const log = (u.transfers ??= []);
+    log.push(...runTransferWindow(u.teams ?? [], u.players, u.elos, day));
+    if (log.length > TRANSFERS_LOG_MAX) log.splice(0, log.length - TRANSFERS_LOG_MAX);
   }
 
   // The team that lost the final of a finished region bracket, if any.
@@ -1638,6 +1649,103 @@ export class UniverseMode {
     toggle.append(mk("all", "All games"), mk("event", "Event games"));
     body.appendChild(toggle);
     body.appendChild(careerStatsTable(this.universe, id => this.openPlayer(id), this.careerMode));
+  }
+
+  // ---- Transfer market ----
+
+  // The market is autonomous (orgs shuffle rosters in post-event windows); this
+  // screen is the observability view: who's available, who can spend, and what
+  // just moved. Three panels: spending power, free agents, recent transfers.
+  private renderMarket(body: HTMLElement) {
+    if (!this.universe) return;
+    const u = this.universe;
+    const FA_CAP = 60, XFER_CAP = 60;
+
+    const wrap = document.createElement("div");
+    wrap.className = "uni-market";
+    wrap.addEventListener("click", (e) => {
+      const el = (e.target as HTMLElement).closest("[data-tid],[data-pid]") as HTMLElement | null;
+      if (el?.dataset.tid) this.openTeam(el.dataset.tid);
+      else if (el?.dataset.pid) this.openPlayer(el.dataset.pid);
+    });
+
+    const active = (u.teams ?? []).filter(t => !t.disbandedDay && t.playerIds.length > 0);
+    const onOrg = new Set<string>();
+    for (const t of active) for (const id of t.playerIds) onOrg.add(id);
+    const teamName = (id?: string) => (id ? u.teams?.find(t => t.id === id)?.name : undefined);
+
+    // --- Spending power (top orgs by prize-money earnings) ---
+    const rich = [...active].sort((a, b) => (b.earnings ?? 0) - (a.earnings ?? 0)).slice(0, 8);
+    if (rich.some(t => (t.earnings ?? 0) > 0)) {
+      const sec = document.createElement("div");
+      sec.className = "uni-market-sec";
+      sec.innerHTML = `<h3 class="uni-market-h">Spending power</h3>`;
+      const strip = document.createElement("div");
+      strip.className = "uni-budgets";
+      for (const t of rich) {
+        const chip = document.createElement("div");
+        chip.className = "uni-budget clickable";
+        chip.dataset.tid = t.id;
+        chip.innerHTML = `<span class="uni-budget-name">${t.country ? `${flagEmoji(t.country)} ` : ""}${escapeHtml(t.name)}</span>` +
+          `<span class="uni-budget-amt">${formatMoney(t.earnings ?? 0)}</span>`;
+        strip.appendChild(chip);
+      }
+      sec.appendChild(strip);
+      wrap.appendChild(sec);
+    }
+
+    // --- Free agents (best available, by market value) ---
+    const fas = u.players
+      .filter(p => !p.retired && !onOrg.has(p.id))
+      .sort((a, b) => (b.value ?? 0) - (a.value ?? 0) || (u.elos[b.id] ?? STARTING_ELO) - (u.elos[a.id] ?? STARTING_ELO))
+      .slice(0, FA_CAP);
+    const faSec = document.createElement("div");
+    faSec.className = "uni-market-sec";
+    faSec.innerHTML = `<h3 class="uni-market-h">Free agents <span class="uni-market-sub">top ${fas.length} by value</span></h3>`;
+    if (fas.length === 0) {
+      faSec.insertAdjacentHTML("beforeend", `<div class="universe-empty-note">No unsigned players right now.</div>`);
+    } else {
+      const rows = fas.map(p =>
+        `<tr class="clickable" data-pid="${p.id}">` +
+        `<td class="umk-name"><span class="pt-handle">${escapeHtml(p.handle)}</span> <span class="pt-realname">${escapeHtml(p.name)}</span></td>` +
+        `<td>${flagEmoji(p.country)} ${escapeHtml(p.country)}</td>` +
+        `<td>${escapeHtml(p.role)}</td><td>${p.age}</td>` +
+        `<td>${Math.round(u.elos[p.id] ?? STARTING_ELO)}</td>` +
+        `<td class="umk-val">${formatMoney(p.value ?? 0)}</td></tr>`).join("");
+      faSec.insertAdjacentHTML("beforeend",
+        `<table class="uni-fa-table"><thead><tr><th>Player</th><th>From</th><th>Role</th><th>Age</th><th>Elo</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>`);
+    }
+    wrap.appendChild(faSec);
+
+    // --- Recent transfers (newest first) ---
+    const xfers = [...(u.transfers ?? [])].reverse().slice(0, XFER_CAP);
+    const xSec = document.createElement("div");
+    xSec.className = "uni-market-sec";
+    xSec.innerHTML = `<h3 class="uni-market-h">Recent transfers</h3>`;
+    if (xfers.length === 0) {
+      xSec.insertAdjacentHTML("beforeend", `<div class="universe-empty-note">No transfers yet — they happen in the window after each event.</div>`);
+    } else {
+      const list = document.createElement("div");
+      list.className = "uni-xfer-list";
+      for (const x of xfers) {
+        const fromName = x.fromTeamName ?? teamName(x.fromTeamId);
+        const route = fromName
+          ? `<button class="uni-news-chip" data-tid="${x.fromTeamId}">${escapeHtml(fromName)}</button> → <button class="uni-news-chip" data-tid="${x.toTeamId}">${escapeHtml(x.toTeamName)}</button>`
+          : `free agent → <button class="uni-news-chip" data-tid="${x.toTeamId}">${escapeHtml(x.toTeamName)}</button>`;
+        const fee = x.fee > 0 ? `<span class="uni-xfer-fee">${formatMoney(x.fee)}</span>` : `<span class="uni-xfer-free">free</span>`;
+        const row = document.createElement("div");
+        row.className = "uni-xfer-row";
+        row.innerHTML =
+          `<span class="uni-news-day">D${x.day}</span>` +
+          `<button class="uni-news-chip ucp-player" data-pid="${x.playerId}">${escapeHtml(x.playerHandle)}</button>` +
+          `<span class="uni-xfer-route">${route}</span>${fee}`;
+        list.appendChild(row);
+      }
+      xSec.appendChild(list);
+    }
+    wrap.appendChild(xSec);
+
+    body.appendChild(wrap);
   }
 
   // ---- News feed ----

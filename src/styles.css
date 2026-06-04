@@ -958,6 +958,35 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-story-title { font-weight: 700; font-size: 0.92rem; }
 .uni-story-detail { font-size: 0.8rem; color: var(--muted, #8a93a6); line-height: 1.35; }
 
+/* ---- Transfer market ---- */
+.uni-market-sec { margin-bottom: 1.4rem; }
+.uni-market-h { font-size: 0.95rem; margin: 0 0 0.5rem; display: flex; align-items: baseline; gap: 0.5rem; }
+.uni-market-sub { color: var(--muted, #8a93a6); font-size: 0.72rem; font-weight: 400; }
+.uni-budgets { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.uni-budget {
+  display: flex; flex-direction: column; gap: 0.15rem; padding: 0.5rem 0.7rem;
+  background: var(--panel, #181b22); border: 1px solid var(--border, #2a3142);
+  border-radius: 6px; cursor: pointer; min-width: 110px;
+}
+.uni-budget:hover { border-color: var(--accent, #e3a857); }
+.uni-budget-name { font-size: 0.82rem; }
+.uni-budget-amt { color: var(--good, #6bbf59); font-weight: 700; font-size: 0.9rem; }
+.uni-fa-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.uni-fa-table th { text-align: left; color: var(--muted, #8a93a6); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.3rem 0.6rem; }
+.uni-fa-table td { padding: 0.35rem 0.6rem; border-top: 1px solid var(--border, #2a3142); }
+.uni-fa-table tbody tr:hover { background: var(--panel-2, #20242d); }
+.uni-fa-table .umk-val { color: var(--good, #6bbf59); font-weight: 600; text-align: right; }
+.uni-fa-table .pt-realname { color: var(--muted, #8a93a6); }
+.uni-xfer-list { display: flex; flex-direction: column; gap: 1px; }
+.uni-xfer-row {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.45rem 0.7rem; background: var(--panel, #181b22);
+}
+.uni-xfer-row:hover { background: var(--panel-2, #20242d); }
+.uni-xfer-route { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--muted, #8a93a6); font-size: 0.82rem; }
+.uni-xfer-fee { margin-left: auto; color: var(--good, #6bbf59); font-weight: 700; font-size: 0.82rem; }
+.uni-xfer-free { margin-left: auto; color: var(--muted, #8a93a6); font-size: 0.78rem; }
+
 /* ---- News feed ---- */
 .uni-news-filters { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.9rem; }
 .uni-news-seg { display: flex; align-items: center; flex-wrap: wrap; gap: 0.1rem; }

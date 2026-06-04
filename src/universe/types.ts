@@ -31,6 +31,9 @@ export interface Universe {
   // window on load (older events outside the window can't be reconstructed) and
   // complete from there forward.
   eventCareers?: Record<string, CareerStats>;
+  // Recent transfers (most recent last), bounded to TRANSFERS_LOG_MAX. Populated
+  // by the post-event transfer window; drives the Market screen's activity list.
+  transfers?: TransferRecord[];
   // Rotation pool of map snapshots. Every match picks one (currently at
   // random); the index is stored on the matchup so replays land on the same
   // map deterministically. Always has length ≥ 1 while a universe is live.
@@ -87,6 +90,20 @@ export interface TournamentTitle {
   runnerUpTeamId?: string;
   runnerUpName?: string;
   prize: number;              // champion's prize money (display only)
+}
+
+// One transfer executed in a market window: a player signing for an org, either
+// poached from another org (fromTeamId set, fee paid) or picked up as a free
+// agent (no fromTeamId, fee 0). Logged for the Market screen's activity list.
+export interface TransferRecord {
+  day: number;
+  playerId: string;
+  playerHandle: string;
+  fromTeamId?: string;
+  fromTeamName?: string;
+  toTeamId: string;
+  toTeamName: string;
+  fee: number;
 }
 
 // One running tournament across every region that fielded a bracket. Each region
@@ -358,6 +375,7 @@ export const INVITE_FIELD = 8;
 export const RANKING_DECAY = 0.8;
 // Cap on the trophy log so circuit history doesn't grow without bound.
 export const TITLES_LOG_MAX = 200;
+export const TRANSFERS_LOG_MAX = 200;
 // How many most-recent years of per-player breakdown to retain in
 // `Universe.yearStats`. Older years drop from the per-year view (their games are
 // still counted in lifetime `careers`), keeping core storage bounded.
