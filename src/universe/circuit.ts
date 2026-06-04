@@ -116,8 +116,26 @@ export const RANKING_POINTS: PlacementTiers = {
   swiss: 50,
 };
 
-// Ranking points owed to each team in one region's finished tournament, keyed by
-// team id. Call only after the region's bracket has fully resolved.
+// A Major awards far more ranking points — winning one anchors a world #1 run.
+export const MAJOR_RANKING_POINTS: PlacementTiers = {
+  champion: 3000,
+  runnerUp: 1800,
+  semifinal: 1050,
+  quarterfinal: 600,
+  bracket: 300,
+  swiss: 150,
+};
+
+// Ranking points owed to each team in one finished bracket (regional or Major),
+// keyed by team id. Call only after the bracket has fully resolved.
 export function rankingPointsFor(rp: RegionPlayoff): Map<string, number> {
-  return placementPayouts(rp, RANKING_POINTS);
+  return placementPayouts(rp, rp.intl ? MAJOR_RANKING_POINTS : RANKING_POINTS);
+}
+
+// The Major field: the world's best active orgs by ranking, across all regions.
+export function majorField(teams: UniverseTeam[], n = INVITE_FIELD): UniverseTeam[] {
+  return teams
+    .filter(t => !t.disbandedDay && t.playerIds.length > 0)
+    .sort(compareRanking)
+    .slice(0, n);
 }

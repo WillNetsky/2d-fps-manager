@@ -13,13 +13,13 @@ import {
   emptyCareer, clutchBucket, captainOf, type SimState, type MatchupOutcome, type TeamContext,
 } from "./universeSim.ts";
 import { startPlayoffs, playoffRoundMatchups, advancePlayoffs } from "./tournament.ts";
-import { yearOf, eventInvitees, freeAgentContenders, compareRanking, rankingPointsFor } from "./circuit.ts";
+import { yearOf, eventInvitees, freeAgentContenders, majorField, compareRanking, rankingPointsFor } from "./circuit.ts";
 import { runSeasonLifecycle } from "./lifecycle.ts";
 import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
-import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
+import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, MAJOR_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
 import { benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
@@ -31,8 +31,9 @@ import {
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
   EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, STARTING_BALANCE, YEAR_STATS_KEEP,
+  MAJOR_EVERY, MAJOR_FIELD,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
-  type RegionPlayoff, type TournamentTitle, type Universe, type UniverseTeam, type VetoStep,
+  type PlayoffState, type RegionPlayoff, type TournamentTitle, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -441,7 +442,7 @@ export class UniverseMode {
       maps: maps.map(deepCloneMap),
       teams: [],
       stacks: [],
-      circuit: { nextEventId: 1, daysUntilNext: EVENT_INTERVAL_DAYS, lastLifecycleYear: 1 },
+      circuit: { nextEventId: 1, daysUntilNext: EVENT_INTERVAL_DAYS, lastLifecycleYear: 1, nextMajorId: 1 },
       titles: [],
     };
     recomputePlayerValues(this.universe);
@@ -683,7 +684,7 @@ export class UniverseMode {
   private ensureCircuit(u: Universe): Circuit {
     u.titles ??= [];
     return (u.circuit ??= {
-      nextEventId: 1, daysUntilNext: EVENT_INTERVAL_DAYS, lastLifecycleYear: yearOf(u.day),
+      nextEventId: 1, daysUntilNext: EVENT_INTERVAL_DAYS, lastLifecycleYear: yearOf(u.day), nextMajorId: 1,
     });
   }
 
@@ -745,6 +746,36 @@ export class UniverseMode {
   private startEvent(u: Universe) {
     const c = this.ensureCircuit(u);
     for (const t of u.teams ?? []) t.rankingPoints = (t.rankingPoints ?? 0) * RANKING_DECAY;
+    // Every MAJOR_EVERY-th slot is a Major (one international bracket) instead of
+    // the regional circuits — falling back to regionals if the world can't yet
+    // field a Major (a tiny early-game scene).
+    const event = this.eventIsMajor(c.nextEventId)
+      ? (this.seedMajor(u) ?? this.seedRegional(u))
+      : this.seedRegional(u);
+    if (!event || event.regions.length === 0) { c.daysUntilNext = EVENT_INTERVAL_DAYS; return; }
+    u.playoffs = event;
+  }
+
+  // Whether the given event slot is a Major.
+  private eventIsMajor(eventId: number): boolean {
+    return eventId % MAJOR_EVERY === 0;
+  }
+
+  // Seed the Major: one cross-region bracket of the world's best teams by ranking.
+  // Reuses the per-group bracket engine via a single-entry seed map (the carrier
+  // region just tags matchups; the bracket is flagged `intl` and shown as "Major").
+  private seedMajor(u: Universe): PlayoffState | null {
+    const field = majorField(u.teams ?? [], MAJOR_FIELD);
+    if (field.length < 2) return null;
+    const event = startPlayoffs(this.ensureCircuit(u).nextEventId, new Map([[field[0].region, field]]));
+    event.major = true;
+    if (event.regions[0]) event.regions[0].intl = true;
+    return event;
+  }
+
+  // Seed the regular per-region circuits. Returns the playoff state (or null).
+  private seedRegional(u: Universe): PlayoffState | null {
+    const c = this.ensureCircuit(u);
     const byId = new Map(u.players.map(p => [p.id, p] as const));
     const isActive = (id: string) => { const p = byId.get(id); return !!p && !p.retired; };
     const invitees = eventInvitees(u.teams ?? [], u.stacks ?? [], u.elos, isActive);
@@ -785,9 +816,7 @@ export class UniverseMode {
       seeded.sort((a, b) => (b.elo ?? STARTING_ELO) - (a.elo ?? STARTING_ELO));
       if (seeded.length >= 2) seededByRegion.set(region, seeded);
     }
-    const event = startPlayoffs(c.nextEventId, seededByRegion);
-    if (event.regions.length === 0) { c.daysUntilNext = EVENT_INTERVAL_DAYS; return; }
-    u.playoffs = event;
+    return startPlayoffs(c.nextEventId, seededByRegion);
   }
 
   // Crown each region's champion into the trophy log, pay prize money + ranking
@@ -809,12 +838,16 @@ export class UniverseMode {
       const champ = rp.championTeamId ? byId.get(rp.championTeamId) : undefined;
       if (!champ) continue;
       const runnerUp = this.runnerUpOf(rp, byId);
+      const majorNo = c.nextMajorId ?? 1;
       titles.push({
-        eventId: c.nextEventId, name: `${REGION_LABELS[rp.region] ?? rp.region} Circuit #${c.nextEventId}`,
+        eventId: c.nextEventId,
+        name: rp.intl ? `Major #${majorNo}` : `${REGION_LABELS[rp.region] ?? rp.region} Circuit #${c.nextEventId}`,
+        intl: rp.intl || undefined,
         region: rp.region, day, championTeamId: champ.id, championName: champ.name,
         runnerUpTeamId: runnerUp?.id, runnerUpName: runnerUp?.name,
-        prize: PLAYOFF_PRIZES.champion,
+        prize: rp.intl ? MAJOR_PRIZES.champion : PLAYOFF_PRIZES.champion,
       });
+      if (rp.intl) c.nextMajorId = majorNo + 1;
     }
     if (titles.length > TITLES_LOG_MAX) titles.splice(0, titles.length - TITLES_LOG_MAX);
     u.playoffs = null;
@@ -1427,12 +1460,13 @@ export class UniverseMode {
     if (u.playoffs) {
       banner.innerHTML =
         `<span class="uss-title">Circuit</span>` +
-        `<span class="uss-progress uss-playoffs">★ Tournament live · Day ${u.playoffs.day}</span>`;
+        `<span class="uss-progress uss-playoffs">${u.playoffs.major ? "🌍 MAJOR live" : "★ Tournament live"} · Day ${u.playoffs.day}</span>`;
     } else {
       const d = Math.max(0, c.daysUntilNext);
+      const nextIsMajor = c.nextEventId % MAJOR_EVERY === 0;
       banner.innerHTML =
         `<span class="uss-title">Circuit</span>` +
-        `<span class="uss-progress">Next event ${d === 0 ? "today" : `in ${d} day${d === 1 ? "" : "s"}`}</span>`;
+        `<span class="uss-progress${nextIsMajor ? " uss-major" : ""}">Next ${nextIsMajor ? "🌍 Major" : "event"} ${d === 0 ? "today" : `in ${d} day${d === 1 ? "" : "s"}`}</span>`;
     }
     body.appendChild(banner);
 
@@ -1585,10 +1619,11 @@ export class UniverseMode {
     grid.className = "uni-playoff-grid";
     for (const rp of u.playoffs?.regions ?? []) {
       const card = document.createElement("div");
-      card.className = "uni-playoff-card";
+      card.className = "uni-playoff-card" + (rp.intl ? " uni-playoff-major" : "");
       const stageLabel = rp.stage === "swiss" ? `Swiss · Round ${rp.swissRound}`
         : rp.stage === "bracket" ? "Knockout bracket" : "Complete";
-      let html = `<div class="upo-head">${REGION_LABELS[rp.region] ?? rp.region}` +
+      const cardTitle = rp.intl ? "🌍 Major" : (REGION_LABELS[rp.region] ?? rp.region);
+      let html = `<div class="upo-head">${cardTitle}` +
         `<span class="upo-stage">${stageLabel}</span></div>`;
 
       if (rp.stage === "done" && rp.championTeamId) {
@@ -3449,8 +3484,8 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     list.className = "utm-trophies";
     for (const t of [...titles].sort((a, b) => b.eventId - a.eventId)) {
       const chip = document.createElement("div");
-      chip.className = "utm-trophy";
-      chip.innerHTML = `🏆 <b>${escapeHtml(t.name)}</b> <span>Day ${t.day}</span>`;
+      chip.className = "utm-trophy" + (t.intl ? " utm-trophy-major" : "");
+      chip.innerHTML = `${t.intl ? "🌍" : "🏆"} <b>${escapeHtml(t.name)}</b> <span>Day ${t.day}</span>`;
       list.appendChild(chip);
     }
     sec.appendChild(list);

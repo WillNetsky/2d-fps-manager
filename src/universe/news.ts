@@ -50,14 +50,16 @@ export function buildNews(u: Universe, opts: NewsOptions = {}): NewsItem[] {
     const everWon = new Set<string>();
     const lastChampByRegion = new Map<Region, string>();
     for (const t of titles) {
+      // A Major win is always the headline; otherwise flag first titles / repeats.
       let tag: string | undefined;
-      if (lastChampByRegion.get(t.region) === t.championTeamId) tag = "BACK-TO-BACK";
+      if (t.intl) tag = "MAJOR";
+      else if (lastChampByRegion.get(t.region) === t.championTeamId) tag = "BACK-TO-BACK";
       else if (!everWon.has(t.championTeamId)) tag = "FIRST TITLE";
       everWon.add(t.championTeamId);
-      lastChampByRegion.set(t.region, t.championTeamId);
+      if (!t.intl) lastChampByRegion.set(t.region, t.championTeamId);
       items.push({
         day: t.day, seq: seq++, category: "trophy",
-        headline: `🏆 ${t.championName} win ${t.name}${t.runnerUpName ? ` over ${t.runnerUpName}` : ""}`,
+        headline: `${t.intl ? "🌍" : "🏆"} ${t.championName} win ${t.name}${t.runnerUpName ? ` over ${t.runnerUpName}` : ""}`,
         region: t.region,
         teamIds: [t.championTeamId, ...(t.runnerUpTeamId ? [t.runnerUpTeamId] : [])],
         playerIds: [],

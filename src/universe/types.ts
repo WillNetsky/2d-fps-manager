@@ -77,12 +77,14 @@ export interface Circuit {
   nextEventId: number;        // monotonic id for naming events
   daysUntilNext: number;      // days until the next tournament starts
   lastLifecycleYear: number;  // last calendar year the world aged through
+  nextMajorId?: number;       // monotonic id for naming Majors (absent → 1)
 }
 
 // One completed tournament's headline result — the trophy-cabinet record.
 export interface TournamentTitle {
   eventId: number;
-  name: string;               // e.g. "EU Circuit #3"
+  name: string;               // e.g. "EU Circuit #3" or "Major #2"
+  intl?: boolean;             // a Major (international): the marquee title
   region: Region;
   day: number;                // day the final concluded
   championTeamId: string;
@@ -113,6 +115,7 @@ export interface PlayoffState {
   season: number;                           // the event id this tournament is
   day: number;                              // 1-based tournament day index
   regions: RegionPlayoff[];
+  major?: boolean;                          // a Major: one international bracket
 }
 
 export type PlayoffStage = "swiss" | "bracket" | "done";
@@ -120,7 +123,8 @@ export type PlayoffStage = "swiss" | "bracket" | "done";
 // One region's playoff run: an optional Swiss group stage that whittles entrants
 // down to the bracket cut, then a single-elimination bracket to the title.
 export interface RegionPlayoff {
-  region: Region;
+  region: Region;             // for a Major this is just a nominal carrier (see intl)
+  intl?: boolean;             // the international Major bracket — labelled "Major", not a region
   stage: PlayoffStage;
   entrants: PlayoffEntrant[];               // seed order (seed 1 first)
   swissRound: number;                       // 1-based Swiss round (next to play)
@@ -424,6 +428,12 @@ export const YEAR_STATS_KEEP = 12;
 export const SWISS_FIELD = 16;
 export const SWISS_TARGET = 3;
 export const BRACKET_FIELD = 8;
+
+// Majors: the marquee international event. Every MAJOR_EVERY-th event slot is a
+// Major instead of the regional circuits — one cross-region bracket of the
+// world's best MAJOR_FIELD teams by ranking. Less frequent, bigger stakes.
+export const MAJOR_EVERY = 4;    // ~1 Major per in-game year (YEAR/EVENT cadence)
+export const MAJOR_FIELD = 16;   // top teams worldwide invited (Swiss → bracket)
 
 // Stack→org promotion gate. A recurring full-5 clique becomes a named org once
 // it has stacked together at least GAMES_TO_ORG times AND carries a driven core

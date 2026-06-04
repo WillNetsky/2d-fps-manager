@@ -24,6 +24,16 @@ export const PLAYOFF_PRIZES = {
   swiss: 5_000,          // eliminated in the Swiss stage, never reached bracket
 } as const;
 
+// A Major pays far more — the marquee international event. Same tier shape.
+export const MAJOR_PRIZES = {
+  champion: 1_000_000,
+  runnerUp: 400_000,
+  semifinal: 175_000,
+  quarterfinal: 80_000,
+  bracket: 35_000,
+  swiss: 15_000,
+} as const;
+
 // Per-placement amounts (money or ranking points) — same tier shape so the same
 // bracket-walk distributes either.
 export interface PlacementTiers {
@@ -66,9 +76,10 @@ export function placementPayouts(rp: RegionPlayoff, tiers: PlacementTiers): Map<
   return out;
 }
 
-// Prize money owed to each team in one region's finished tournament.
+// Prize money owed to each team in a finished bracket — Major-scaled if it's the
+// international event, otherwise the regional circuit purse.
 export function regionPayouts(rp: RegionPlayoff): Map<string, number> {
-  return placementPayouts(rp, PLAYOFF_PRIZES);
+  return placementPayouts(rp, rp.intl ? MAJOR_PRIZES : PLAYOFF_PRIZES);
 }
 
 // ---- player market value ---------------------------------------------------
