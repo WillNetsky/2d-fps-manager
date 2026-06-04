@@ -1505,11 +1505,18 @@ export class UniverseMode {
       b.onclick = () => { if (this.teamsView !== key) { this.teamsView = key; this.render(); } };
       return b;
     };
-    toggle.append(mk("season", "World ranking"), mk("alltime", "All-time ladder"));
+    toggle.append(mk("season", "World ranking"), mk("alltime", "All teams · stats"));
     body.appendChild(toggle);
 
     if (this.teamsView === "alltime") {
-      body.appendChild(teamsTable(teams, byId, id => this.openTeam(id)));
+      // Tally titles (and Majors) per team for the stats table.
+      const titleCount = new Map<string, { total: number; majors: number }>();
+      for (const t of u.titles ?? []) {
+        const e = titleCount.get(t.championTeamId) ?? { total: 0, majors: 0 };
+        e.total++; if (t.intl) e.majors++;
+        titleCount.set(t.championTeamId, e);
+      }
+      body.appendChild(teamsTable(teams, byId, titleCount, id => this.openTeam(id)));
       return;
     }
 
@@ -2474,13 +2481,19 @@ function virtualTable<T>(
 
 // Persistent-team standings table. Sortable like the player tables; the name
 // cell carries the team's region and a roster preview (player handles).
-function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (teamId: string) => void): HTMLElement {
+function teamsTable(
+  teams: UniverseTeam[], byId: Map<string, Player>,
+  titleCount: Map<string, { total: number; majors: number }>,
+  onPick?: (teamId: string) => void,
+): HTMLElement {
   const winPct = (t: UniverseTeam) => {
     const g = t.wins + t.losses;
     return g > 0 ? (t.wins / g) * 100 : 0;
   };
   const streakLabel = (t: UniverseTeam) =>
     t.streak === 0 ? "—" : (t.streak > 0 ? `W${t.streak}` : `L${-t.streak}`);
+  const titlesOf = (t: UniverseTeam) => titleCount.get(t.id)?.total ?? 0;
+  const majorsOf = (t: UniverseTeam) => titleCount.get(t.id)?.majors ?? 0;
 
   const vcols: VCol<UniverseTeam>[] = [
     {
@@ -2503,6 +2516,11 @@ function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (
       label: "Elo",
       cmp: (a, b) => a.elo - b.elo,
       fill: (t, td) => { td.textContent = String(Math.round(t.elo)); },
+    },
+    {
+      label: "Rank pts",
+      cmp: (a, b) => (a.rankingPoints ?? 0) - (b.rankingPoints ?? 0),
+      fill: (t, td) => { td.textContent = String(Math.round(t.rankingPoints ?? 0)); },
     },
     {
       label: "W-L",
@@ -2529,6 +2547,30 @@ function teamsTable(teams: UniverseTeam[], byId: Map<string, Player>, onPick?: (
       fill: (t, td) => {
         td.textContent = streakLabel(t);
         if (t.streak !== 0) td.style.color = t.streak > 0 ? "var(--good)" : "var(--bad)";
+      },
+    },
+    {
+      label: "Titles",
+      cmp: (a, b) => titlesOf(a) - titlesOf(b),
+      fill: (t, td) => {
+        const n = titlesOf(t);
+        td.textContent = n > 0 ? `🏆 ${n}` : "—";
+      },
+    },
+    {
+      label: "Majors",
+      cmp: (a, b) => majorsOf(a) - majorsOf(b),
+      fill: (t, td) => {
+        const n = majorsOf(t);
+        td.innerHTML = n > 0 ? `<span style="color:#c9a227;font-weight:700">🌍 ${n}</span>` : "—";
+      },
+    },
+    {
+      label: "Balance",
+      cmp: (a, b) => (a.balance ?? 0) - (b.balance ?? 0),
+      fill: (t, td) => {
+        td.textContent = formatMoney(t.balance ?? 0);
+        td.style.color = (t.balance ?? 0) < 0 ? "var(--bad)" : "var(--good)";
       },
     },
     {
