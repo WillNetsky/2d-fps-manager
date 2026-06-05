@@ -80,12 +80,27 @@ export interface Circuit {
   nextMajorId?: number;       // monotonic id for naming Majors (absent → 1)
 }
 
+// The standout player of a finished tournament — captured at finish time (when
+// the bracket's match stats are still in the retained history).
+export interface TitleMvp {
+  playerId: string;
+  handle: string;
+  country?: string;
+  teamId?: string;            // the org they played for in the event
+  teamName?: string;
+  rating: number;             // aggregate HLTV 1.0 across the event
+  kills: number;
+  deaths: number;
+  adr: number;
+}
+
 // One completed tournament's headline result — the trophy-cabinet record.
 export interface TournamentTitle {
   eventId: number;
   name: string;               // e.g. "EU Circuit #3" or "Major #2"
   intl?: boolean;             // a Major (international): the marquee title
   region: Region;
+  mvp?: TitleMvp;             // standout player (absent on saves predating MVPs)
   day: number;                // day the final concluded
   championTeamId: string;
   championName: string;

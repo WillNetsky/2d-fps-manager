@@ -1009,6 +1009,9 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-xfer-fee { margin-left: auto; color: var(--good, #6bbf59); font-weight: 700; font-size: 0.82rem; }
 .uni-xfer-free { margin-left: auto; color: var(--muted, #8a93a6); font-size: 0.78rem; }
 
+/* ---- Event & Major history ---- */
+.uni-history .uni-news-seg { margin-bottom: 0.8rem; }
+
 /* ---- News feed ---- */
 .uni-news-filters { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.9rem; }
 .uni-news-seg { display: flex; align-items: center; flex-wrap: wrap; gap: 0.1rem; }
@@ -1695,6 +1698,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .universe-match .replay { width: 100%; align-self: stretch; border-radius: 4px; border: 1px solid var(--line); }
 .universe-match-controls .speed-btn {
+  position: static; /* override the legacy absolute .speed-btn so the flex row lays them out */
   background: var(--panel); border: 1px solid var(--line); color: var(--text);
   border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px;
   white-space: nowrap; line-height: 1.4;

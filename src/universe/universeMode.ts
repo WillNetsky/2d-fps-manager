@@ -31,9 +31,9 @@ import {
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
   EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, STARTING_BALANCE, YEAR_STATS_KEEP,
-  MAJOR_EVERY, MAJOR_FIELD,
+  MAJOR_EVERY, MAJOR_FIELD, YEAR_LENGTH,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
-  type PlayoffState, type RegionPlayoff, type TournamentTitle, type Universe, type UniverseTeam, type VetoStep,
+  type PlayoffState, type RegionPlayoff, type TournamentTitle, type TitleMvp, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
 
 // How many recent completed days to keep in memory for replay + per-player game
@@ -42,7 +42,7 @@ import {
 // matches stay replayable — not the career totals.
 const HISTORY_DAYS = HISTORY_WINDOW;
 
-type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "market" | "news" | "career" | "settings" | "player" | "team" | "replay";
+type Screen = "menu" | "newUniverse" | "players" | "matchups" | "match" | "standings" | "teams" | "market" | "news" | "history" | "career" | "settings" | "player" | "team" | "replay";
 
 // In-progress configuration for the New Universe setup screen.
 interface UniverseSetup {
@@ -66,7 +66,7 @@ interface SeriesPlay {
 }
 
 // Screens that share the day-view tab bar.
-const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "market", "news", "career", "settings"];
+const DAY_TABS: Screen[] = ["matchups", "standings", "teams", "market", "news", "history", "career", "settings"];
 
 export class UniverseMode {
   private root: HTMLElement;
@@ -102,6 +102,9 @@ export class UniverseMode {
 
   // Career stats scope: all games, or tournament (event) games only.
   private careerMode: "all" | "event" = "all";
+
+  // Event history filter: all, Majors only, or a single region's circuits.
+  private historyFilter: "all" | "major" | Region = "all";
 
   constructor(parent: HTMLElement) {
     this.root = parent;
@@ -143,6 +146,7 @@ export class UniverseMode {
       case "teams":     this.renderTeams(body); break;
       case "market":    this.renderMarket(body); break;
       case "news":      this.renderNews(body); break;
+      case "history":   this.renderHistory(body); break;
       case "career":    this.renderCareer(body); break;
       case "settings":  this.renderSettings(body); break;
       case "player":    this.renderPlayer(body); break;
@@ -220,6 +224,7 @@ export class UniverseMode {
       { key: "teams",     label: "Teams",          show: true },
       { key: "market",    label: "Market",         show: true },
       { key: "news",      label: "News",           show: true },
+      { key: "history",   label: "History",        show: true },
       { key: "career",    label: "Career stats",   show: true },
       { key: "settings",  label: "Settings",       show: true },
     ];
@@ -732,7 +737,7 @@ export class UniverseMode {
 
     if (u.playoffs) {
       // Tournament in progress: advance its brackets; finish when every region's done.
-      if (advancePlayoffs(u.playoffs, done.matchups)) this.finishEvent(u, done.day);
+      if (advancePlayoffs(u.playoffs, done.matchups)) this.finishEvent(u, done);
     } else if (c.daysUntilNext > 0) {
       c.daysUntilNext--; // tick down to the next event
     }
@@ -825,9 +830,14 @@ export class UniverseMode {
 
   // Crown each region's champion into the trophy log, pay prize money + ranking
   // points by finish, then clear the event and rearm the timer for the next one.
-  private finishEvent(u: Universe, day: number) {
+  private finishEvent(u: Universe, done: CompletedDay) {
+    const day = done.day;
     const c = this.ensureCircuit(u);
     const byId = new Map((u.teams ?? []).map(t => [t.id, t] as const));
+    const playerById = new Map(u.players.map(p => [p.id, p] as const));
+    // The event ran for `playoffs.day` game days ending today; scope MVP stats to
+    // that window so a previous event's playoff games don't get mixed in.
+    const sinceDay = day - (u.playoffs?.day ?? 0);
     const titles = (u.titles ??= []);
     for (const rp of u.playoffs?.regions ?? []) {
       // Prize money: into spendable balance AND the lifetime earnings stat.
@@ -850,6 +860,7 @@ export class UniverseMode {
         region: rp.region, day, championTeamId: champ.id, championName: champ.name,
         runnerUpTeamId: runnerUp?.id, runnerUpName: runnerUp?.name,
         prize: rp.intl ? MAJOR_PRIZES.champion : PLAYOFF_PRIZES.champion,
+        mvp: eventMvp(u, rp.region, sinceDay, done.matchups, playerById),
       });
       if (rp.intl) c.nextMajorId = majorNo + 1;
     }
@@ -1825,6 +1836,125 @@ export class UniverseMode {
     }
     wrap.appendChild(xSec);
 
+    body.appendChild(wrap);
+  }
+
+  // ---- Event & Major history ----
+
+  // Every finished tournament (regional circuits + Majors), newest first, each
+  // with its champion, runner-up, prize, and MVP. Filterable to Majors or a
+  // single region. MVPs are captured at finish time, so events that concluded
+  // before MVP tracking existed simply omit it.
+  private renderHistory(body: HTMLElement) {
+    if (!this.universe) return;
+    const u = this.universe;
+    const allTitles = u.titles ?? [];
+
+    const wrap = document.createElement("div");
+    wrap.className = "uni-history";
+    wrap.addEventListener("click", (e) => {
+      const el = (e.target as HTMLElement).closest("[data-tid],[data-pid]") as HTMLElement | null;
+      if (el?.dataset.tid) this.openTeam(el.dataset.tid);
+      else if (el?.dataset.pid) this.openPlayer(el.dataset.pid);
+    });
+
+    // --- Filter bar ---
+    const filters = document.createElement("div");
+    filters.className = "uni-news-seg";
+    const lab = document.createElement("span");
+    lab.className = "uni-news-seg-label";
+    lab.textContent = "Show";
+    filters.appendChild(lab);
+    const chip = (key: "all" | "major" | Region, label: string) => {
+      const b = document.createElement("button");
+      b.className = "uni-seg" + (this.historyFilter === key ? " active" : "");
+      b.innerHTML = label;
+      b.onclick = () => { if (this.historyFilter !== key) { this.historyFilter = key; this.render(); } };
+      return b;
+    };
+    filters.appendChild(chip("all", "All"));
+    filters.appendChild(chip("major", "🌍 Majors"));
+    for (const r of REGION_ORDER) filters.appendChild(chip(r, REGION_LABELS[r] ?? r));
+    wrap.appendChild(filters);
+
+    // --- Filter + sort ---
+    let titles = [...allTitles];
+    if (this.historyFilter === "major") titles = titles.filter(t => t.intl);
+    else if (this.historyFilter !== "all") titles = titles.filter(t => !t.intl && t.region === this.historyFilter);
+    titles.sort((a, b) =>
+      b.eventId - a.eventId ||
+      (b.intl ? 1 : 0) - (a.intl ? 1 : 0) ||
+      REGION_ORDER.indexOf(a.region) - REGION_ORDER.indexOf(b.region));
+
+    if (titles.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "universe-empty-note";
+      empty.textContent = "No events yet — play out some days and the circuit will start crowning champions.";
+      wrap.appendChild(empty);
+      body.appendChild(wrap);
+      return;
+    }
+
+    const teamById = new Map((u.teams ?? []).map(t => [t.id, t] as const));
+    const flagOf = (id?: string) => {
+      const c = id ? teamById.get(id)?.country : undefined;
+      return c ? `${flagEmoji(c)} ` : "";
+    };
+    const teamChip = (id?: string, name?: string) =>
+      name ? (id ? `<button class="uni-news-chip" data-tid="${id}">${flagOf(id)}${escapeHtml(name)}</button>` : escapeHtml(name)) : "—";
+
+    const vcols: VCol<TournamentTitle>[] = [
+      {
+        label: "Event", thClass: "pt-col-name",
+        cmp: (a, b) => a.eventId - b.eventId || REGION_ORDER.indexOf(a.region) - REGION_ORDER.indexOf(b.region),
+        fill: (t, td) => { td.innerHTML = `<span class="pt-handle">${t.intl ? "🌍" : "🏆"} ${escapeHtml(t.name)}</span>`; td.className = "name-cell"; },
+      },
+      { label: "Day", cmp: (a, b) => a.day - b.day, fill: (t, td) => { td.textContent = `Day ${t.day}`; } },
+      {
+        label: "Region",
+        cmp: (a, b) => (a.intl ? 1 : 0) - (b.intl ? 1 : 0) || REGION_ORDER.indexOf(a.region) - REGION_ORDER.indexOf(b.region),
+        fill: (t, td) => { td.textContent = t.intl ? "🌍 Intl" : (REGION_LABELS[t.region] ?? t.region); },
+      },
+      {
+        label: "Champion", cmp: (a, b) => a.championName.localeCompare(b.championName),
+        fill: (t, td) => { td.innerHTML = teamChip(t.championTeamId, t.championName); },
+      },
+      {
+        label: "Runner-up", cmp: (a, b) => (a.runnerUpName ?? "").localeCompare(b.runnerUpName ?? ""),
+        fill: (t, td) => { td.innerHTML = teamChip(t.runnerUpTeamId, t.runnerUpName); },
+      },
+      {
+        label: "Prize", cmp: (a, b) => a.prize - b.prize,
+        fill: (t, td) => { td.textContent = formatMoney(t.prize); td.style.color = "var(--accent)"; },
+      },
+      {
+        label: "MVP", cmp: (a, b) => (a.mvp?.handle ?? "").localeCompare(b.mvp?.handle ?? ""),
+        fill: (t, td) => {
+          td.innerHTML = t.mvp
+            ? `<button class="uni-news-chip ucp-player" data-pid="${t.mvp.playerId}">${t.mvp.country ? `${flagEmoji(t.mvp.country)} ` : ""}${escapeHtml(t.mvp.handle)}</button>`
+            : "—";
+        },
+      },
+      { label: "MVP team", cmp: (a, b) => (a.mvp?.teamName ?? "").localeCompare(b.mvp?.teamName ?? ""), fill: (t, td) => { td.textContent = t.mvp?.teamName ?? "—"; } },
+      {
+        label: "Rating", cmp: (a, b) => (a.mvp?.rating ?? -1) - (b.mvp?.rating ?? -1),
+        fill: (t, td) => {
+          if (!t.mvp) { td.textContent = "—"; return; }
+          td.textContent = t.mvp.rating.toFixed(2);
+          td.style.color = t.mvp.rating >= 1 ? "var(--good)" : "var(--bad)";
+          td.style.fontWeight = "700";
+        },
+      },
+      {
+        label: "K-D", cmp: (a, b) => (a.mvp ? a.mvp.kills - a.mvp.deaths : -9999) - (b.mvp ? b.mvp.kills - b.mvp.deaths : -9999),
+        fill: (t, td) => { td.textContent = t.mvp ? `${t.mvp.kills}-${t.mvp.deaths}` : "—"; },
+      },
+      { label: "ADR", cmp: (a, b) => (a.mvp?.adr ?? -1) - (b.mvp?.adr ?? -1), fill: (t, td) => { td.textContent = t.mvp ? String(Math.round(t.mvp.adr)) : "—"; } },
+    ];
+
+    // Default sort: Event descending (most recent first). Chip clicks (data-tid /
+    // data-pid) bubble to the wrap's delegated handler above.
+    wrap.appendChild(virtualTable(titles, vcols, 0, -1));
     body.appendChild(wrap);
   }
 
@@ -3005,14 +3135,8 @@ function playerPage(
   const totalClutchWins = clutchBuckets.reduce((s, b) => s + b.wins, 0);
   const totalClutchAttempts = clutchBuckets.reduce((s, b) => s + b.attempts, 0);
 
-  // Contract line: locked salary + expiry, flagged a bargain or overpay vs the
-  // current market rate; or "Free agent" for an unsigned, active player.
+  // Current market rate, for flagging a contract as a bargain or an overpay.
   const mw = marketWage(p);
-  const contractMeta = p.retired ? ""
-    : (team && p.contract)
-      ? ` · <span class="upp-contract">${formatMoney(p.contract.salary)}/cyc until D${p.contract.until}` +
-        `${p.contract.salary < mw * 0.8 ? ` · <span class="upp-bargain">bargain</span>` : p.contract.salary > mw * 1.25 ? ` · <span class="upp-overpaid">overpaid</span>` : ""}</span>`
-      : (!team ? ` · <span class="upp-fa">Free agent</span>` : "");
 
   // ----- Header -----
   const header = document.createElement("div");
@@ -3026,7 +3150,6 @@ function playerPage(
         <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}` +
           (team ? ` · <span class="upp-team-link clickable" data-tid="${team.id}">${escapeHtml(team.name)}</span>` : "") +
           (p.retired ? ` · <span class="upp-retired">Retired${p.retiredDay ? ` (Day ${p.retiredDay})` : ""}</span>` : "") +
-          contractMeta +
         `</div>
       </div>
     </div>
@@ -3066,15 +3189,27 @@ function playerPage(
   }
   root.appendChild(traits);
 
-  // ----- Dynamic state (money/mood/morale) -----
+  // ----- Persona / economy state -----
+  // Contract: salary + time left, flagged a bargain/overpay vs the market rate;
+  // "Free agent" for an unsigned active player.
+  let contractHtml: string;
+  if (p.contract && team) {
+    const yearsLeft = Math.max(0, (p.contract.until - u.day) / YEAR_LENGTH);
+    const color = p.contract.salary < mw * 0.8 ? "var(--good)" : p.contract.salary > mw * 1.25 ? "var(--bad)" : "inherit";
+    const tag = p.contract.salary < mw * 0.8 ? " · bargain" : p.contract.salary > mw * 1.25 ? " · overpaid" : "";
+    contractHtml = `<b style="color:${color}" title="until Day ${p.contract.until}${tag}">${formatMoney(p.contract.salary)}/cyc · ${yearsLeft.toFixed(1)} yr</b>`;
+  } else if (!team && !p.retired) {
+    contractHtml = `<b style="color:var(--accent)">Free agent</b>`;
+  } else {
+    contractHtml = `<b>—</b>`;
+  }
   const dyn = document.createElement("div");
   dyn.className = "upp-dyn";
   dyn.innerHTML = `
     <div class="upp-dyn-item"><span>Market value</span><b>${formatMoney(p.value ?? 0)}</b></div>
+    <div class="upp-dyn-item"><span>Contract</span>${contractHtml}</div>
     <div class="upp-dyn-item"><span>Form</span><b style="color:${ratingColor(p.morale)}" title="${Math.round(p.morale)}/100 morale">${formLabel(p.morale)}</b></div>
-    <div class="upp-dyn-item"><span>Buy bank</span><b>$${p.money}</b></div>
     <div class="upp-dyn-item"><span>Values</span><b title="${p.ambition ?? 50}/100 ambition">${valuesLabel(p.ambition ?? 50)}</b></div>
-    <div class="upp-dyn-item"><span>CT assignment</span><b>${p.ctAssignment}</b></div>
   `;
   root.appendChild(dyn);
 
@@ -3770,6 +3905,44 @@ function careerClutchBuckets(c: CareerStats): ClutchBucketStats[] {
 
 function careerOf(u: Universe, id: string): CareerStats {
   return u.careers?.[id] ?? emptyCareer();
+}
+
+// The MVP of a finished tournament bracket: the player with the best aggregate
+// HLTV rating across the event's playoff games, scoped by region AND the event's
+// day window (so a prior event's games still in history don't bleed in). Needs a
+// real sample of rounds. Returns undefined if nobody qualifies.
+function eventMvp(
+  u: Universe, region: Region, sinceDay: number, extra: Matchup[],
+  playerById: Map<string, Player>,
+): TitleMvp | undefined {
+  interface Agg { kills: number; deaths: number; assists: number; damage: number; rounds: number; k1: number; k2: number; k3: number; k4: number; k5: number; teamId?: string; }
+  const agg = new Map<string, Agg>();
+  const fold = (m: Matchup) => {
+    if (m.status !== "completed" || !m.playoff || m.region !== region) return;
+    for (const [pid, s] of Object.entries(matchupPlayerStats(m))) {
+      const a = agg.get(pid) ?? agg.set(pid, { kills: 0, deaths: 0, assists: 0, damage: 0, rounds: 0, k1: 0, k2: 0, k3: 0, k4: 0, k5: 0 }).get(pid)!;
+      a.kills += s.kills; a.deaths += s.deaths; a.assists += s.assists; a.damage += s.damage; a.rounds += s.roundsPlayed;
+      a.k1 += s.k1; a.k2 += s.k2; a.k3 += s.k3; a.k4 += s.k4; a.k5 += s.k5;
+      a.teamId = m.ctPlayerIds.includes(pid) ? m.ctTeamId : m.tTeamId;
+    }
+  };
+  for (const d of u.history) if (d.day >= sinceDay) for (const m of d.matchups) fold(m);
+  for (const m of extra) fold(m);
+
+  let best: { pid: string; a: Agg; rating: number } | undefined;
+  for (const [pid, a] of agg) {
+    if (a.rounds < 30) continue; // a real sample, not a single map fluke
+    const rating = hltvRating1({ kills: a.kills, deaths: a.deaths, assists: a.assists, damage: a.damage, roundsPlayed: a.rounds, k1: a.k1, k2: a.k2, k3: a.k3, k4: a.k4, k5: a.k5 });
+    if (!best || rating > best.rating) best = { pid, a, rating };
+  }
+  if (!best) return undefined;
+  const p = playerById.get(best.pid);
+  return {
+    playerId: best.pid, handle: p?.handle ?? best.pid, country: p?.country,
+    teamId: best.a.teamId, teamName: best.a.teamId ? u.teams?.find(t => t.id === best.a.teamId)?.name : undefined,
+    rating: best.rating, kills: best.a.kills, deaths: best.a.deaths,
+    adr: best.a.rounds > 0 ? best.a.damage / best.a.rounds : 0,
+  };
 }
 
 // Per-player stats for a matchup: a Bo1's own stats, or a series' games summed
