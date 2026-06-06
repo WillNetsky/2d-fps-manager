@@ -37,6 +37,8 @@
 - [x] Abillity to create new maps, edit saved maps
 - [x] Load saved maps
 - [x] Save as new map
+- [x] Balancer should have the option to sim whole MR12 games, changes "rounds" to "series"
+- [ ] Grid tends to start missing both horizontal and vertical lines
 
 ## Universe
 - [x] Pool of players
@@ -44,7 +46,7 @@
 - [ ] Professional Teams 
 - [x] Tournament prize money
 - [x] Player's value money
-- [ ] Something to spend money on (better equipment? buy a team?) — deferred until a user-controlled team exists
+- [ ] Something to spend money on (better equipment? buy a team?)
 - [ ] Player pages should show their handle before their real names
 - [ ] Player pages relationship display should show "Handle" Real Name
 

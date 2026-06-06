@@ -2,7 +2,7 @@ import type { GameMap } from "../domain/types.ts";
 import BalanceWorker from "./balanceWorker.ts?worker";
 import type {
   BalanceMatrixResult, BalanceProgress, BalanceRequest, BalanceResult,
-  HeatGrids, LoadoutPreset, RunStats,
+  HeatGrids, LoadoutPreset, RunStats, SeriesStats,
 } from "./balanceWorker.ts";
 import { ALL_PRESETS, ALL_T_STRATEGIES, PRESET_LABELS } from "./balanceWorker.ts";
 
@@ -21,12 +21,14 @@ export class BalanceMode {
   private getMap: () => GameMap;
   private onResult?: (heat: HeatGrids | null) => void;
 
+  private roundsLabel!: HTMLElement;
   private roundsInput!: HTMLInputElement;
   private neutralToggle!: HTMLInputElement;
   private resetEconToggle!: HTMLInputElement;
   private ctLoadoutSelect!: HTMLSelectElement;
   private tLoadoutSelect!: HTMLSelectElement;
   private matrixToggle!: HTMLInputElement;
+  private seriesToggle!: HTMLInputElement;
   private runBtn!: HTMLButtonElement;
   private status!: HTMLElement;
   private resultsEl!: HTMLElement;
@@ -43,11 +45,11 @@ export class BalanceMode {
   private buildUI() {
     const sidebar = this.root;
 
-    // Rounds
-    const roundsLabel = document.createElement("div");
-    roundsLabel.className = "editor-group";
-    roundsLabel.textContent = "Rounds";
-    sidebar.appendChild(roundsLabel);
+    // Rounds (relabelled "Series" in MR12 mode)
+    this.roundsLabel = document.createElement("div");
+    this.roundsLabel.className = "editor-group";
+    this.roundsLabel.textContent = "Rounds";
+    sidebar.appendChild(this.roundsLabel);
     this.roundsInput = document.createElement("input");
     this.roundsInput.type = "number";
     this.roundsInput.min = "1";
@@ -55,6 +57,16 @@ export class BalanceMode {
     this.roundsInput.value = "200";
     this.roundsInput.className = "balance-input";
     sidebar.appendChild(this.roundsInput);
+
+    // MR12 series mode — sim whole games (real economy) instead of independent
+    // rounds. Drives the economy itself, so loadout/matrix/reset controls go off.
+    const seriesRow = document.createElement("label");
+    seriesRow.className = "balance-toggle";
+    this.seriesToggle = document.createElement("input");
+    this.seriesToggle.type = "checkbox";
+    this.seriesToggle.onchange = () => this.onSeriesToggle();
+    seriesRow.append(this.seriesToggle, " MR12 series — sim full games");
+    sidebar.appendChild(seriesRow);
 
     // Loadouts
     const loadoutLabel = document.createElement("div");
@@ -99,8 +111,9 @@ export class BalanceMode {
     this.matrixToggle.type = "checkbox";
     this.matrixToggle.onchange = () => {
       const on = this.matrixToggle.checked;
-      this.ctLoadoutSelect.disabled = on;
-      this.tLoadoutSelect.disabled = on;
+      this.ctLoadoutSelect.disabled = on || this.seriesToggle.checked;
+      this.tLoadoutSelect.disabled = on || this.seriesToggle.checked;
+      this.seriesToggle.disabled = on;
     };
     matrixRow.append(this.matrixToggle, ` Compare all matchups (${ALL_PRESETS.length}×${ALL_PRESETS.length} grid)`);
     sidebar.appendChild(matrixRow);
@@ -164,6 +177,18 @@ export class BalanceMode {
     this.status.textContent = "Cancelled";
   }
 
+  // Series mode owns the economy and always uses auto buys, so the loadout
+  // pickers, the matchup matrix, and the per-round money reset are all moot.
+  private onSeriesToggle() {
+    const on = this.seriesToggle.checked;
+    this.ctLoadoutSelect.disabled = on || this.matrixToggle.checked;
+    this.tLoadoutSelect.disabled = on || this.matrixToggle.checked;
+    this.matrixToggle.disabled = on;
+    this.resetEconToggle.disabled = on;
+    this.roundsLabel.textContent = on ? "Series (full games)" : "Rounds";
+    this.roundsInput.value = on ? "50" : "200";
+  }
+
   private run() {
     const rounds = Math.max(1, Math.min(100000, parseInt(this.roundsInput.value, 10) || 100));
     this.runBtn.disabled = true;
@@ -174,7 +199,8 @@ export class BalanceMode {
     this.runStartedAt = performance.now();
     this.status.textContent = "Running… 0%";
 
-    const matrix = this.matrixToggle.checked;
+    const seriesMode = this.seriesToggle.checked;
+    const matrix = !seriesMode && this.matrixToggle.checked;
 
     this.worker.addEventListener("message", (e: MessageEvent<BalanceProgress | BalanceResult | BalanceMatrixResult>) => {
       const msg = e.data;
@@ -188,8 +214,10 @@ export class BalanceMode {
         }
       } else if (msg.kind === "done") {
         const elapsed = ((performance.now() - this.runStartedAt) / 1000).toFixed(1);
-        this.status.textContent = `Done — ${msg.stats.rounds} rounds in ${elapsed}s`;
-        this.renderResults(msg.stats);
+        this.status.textContent = msg.series
+          ? `Done — ${msg.series.seriesPlayed} games (${msg.stats.rounds} rounds) in ${elapsed}s`
+          : `Done — ${msg.stats.rounds} rounds in ${elapsed}s`;
+        this.renderResults(msg.stats, msg.series);
         this.onResult?.(msg.heat ?? null);
         this.runBtn.disabled = false;
         this.worker?.terminate();
@@ -216,16 +244,41 @@ export class BalanceMode {
       ctLoadout: this.ctLoadoutSelect.value as LoadoutPreset,
       tLoadout: this.tLoadoutSelect.value as LoadoutPreset,
       matrix,
+      seriesMode,
     };
     this.worker.postMessage(req);
   }
 
-  private renderResults(s: RunStats) {
+  // MR12 series summary: how lopsided games are, OT frequency, and how decisive
+  // pistol rounds are — the things a full-game sim shows that single rounds can't.
+  private renderSeries(s: SeriesStats): string {
+    const games = Math.max(1, s.seriesPlayed);
+    const avgWin = (s.totalWinnerScore / games).toFixed(1);
+    const avgLose = (s.totalLoserScore / games).toFixed(1);
+    const otPct = ((s.overtimes / games) * 100).toFixed(1);
+    const pistols = Math.max(1, s.pistolRounds);
+    const pistolCt = ((s.pistolCtWins / pistols) * 100).toFixed(1);
+    const pistolT = ((s.pistolTWins / pistols) * 100).toFixed(1);
+    const conv = s.halvesPlayed > 0
+      ? `${((s.pistolWinnerHalfWins / s.halvesPlayed) * 100).toFixed(1)}%`
+      : "—";
+    return `
+      <h3>Series (${s.seriesPlayed} full MR12 games)</h3>
+      <table class="balance-table">
+        <tr><th>Avg final score</th><td>${avgWin} – ${avgLose}</td></tr>
+        <tr><th>Overtime</th><td>${s.overtimes} (${otPct}%)</td></tr>
+        <tr><th>Pistol round wins</th><td>CT ${pistolCt}% · T ${pistolT}%</td></tr>
+        <tr><th>Pistol → half conversion</th><td>${conv}</td></tr>
+      </table>`;
+  }
+
+  private renderResults(s: RunStats, series?: SeriesStats) {
     const pct = (n: number) => `${((n / Math.max(1, s.rounds)) * 100).toFixed(1)}%`;
     const avg = (n: number) => (n / Math.max(1, s.rounds)).toFixed(1);
     const avgSec = (ms: number) => (ms / Math.max(1, s.rounds) / 1000).toFixed(1);
     this.resultsEl.innerHTML = `
-      <h3>Results (${s.rounds} rounds)</h3>
+      ${series ? this.renderSeries(series) : ""}
+      <h3>${series ? `Rounds (${s.rounds} across ${series.seriesPlayed} games)` : `Results (${s.rounds} rounds)`}</h3>
       <table class="balance-table">
         <tr><th>CT wins</th><td>${s.ctWins} (${pct(s.ctWins)})</td></tr>
         <tr><th>T wins</th><td>${s.tWins} (${pct(s.tWins)})</td></tr>

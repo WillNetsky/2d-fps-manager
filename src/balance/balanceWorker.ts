@@ -1,5 +1,5 @@
 // Headless balance simulator. Runs in a Web Worker so the UI stays responsive.
-import type { GameMap, RoundOutcome, Side, TStrategy, WeaponId, UtilityId } from "../domain/types.ts";
+import type { GameMap, RoundOutcome, RoundResult, Side, TStrategy, WeaponId, UtilityId } from "../domain/types.ts";
 import { makeTeam, neutralizeTeamStats, setSeed } from "../domain/factory.ts";
 import { RoundSim } from "../sim/round.ts";
 import { applyRoundReward } from "../sim/economy.ts";
@@ -26,12 +26,16 @@ export const PRESET_LABELS: Record<LoadoutPreset, string> = {
 export interface BalanceRequest {
   kind: "run";
   map: GameMap;
-  rounds: number;
+  rounds: number; // round count, or (in series mode) the number of full games to sim
   neutralize: boolean;
   resetEachRound: boolean;
   ctLoadout: LoadoutPreset;
   tLoadout: LoadoutPreset;
   matrix: boolean; // if true, ignore ctLoadout/tLoadout and run all combos in ALL_PRESETS
+  // If true, sim whole MR12 games (first to 13, halftime side-swap, MR3 OT) with
+  // a real economy instead of independent rounds. `rounds` is read as the series
+  // count; loadout/matrix/reset-money options are ignored (economy drives buys).
+  seriesMode: boolean;
 }
 
 export interface BalanceProgress {
@@ -55,10 +59,27 @@ export interface HeatGrids {
   tPos: number[];
 }
 
+// Series-level color, populated only by MR12 series runs. Round-by-side balance
+// still lives in RunStats (aggregated over every round of every game); this adds
+// what only a full-game sim can show: how lopsided games are, how often they go
+// to OT, and how decisive pistol rounds are.
+export interface SeriesStats {
+  seriesPlayed: number;
+  overtimes: number;          // games that reached 12-12 and went to OT
+  totalWinnerScore: number;   // sum of the winning team's round total → avg
+  totalLoserScore: number;    // sum of the losing team's round total → avg
+  pistolRounds: number;       // first round of each regulation half
+  pistolCtWins: number;
+  pistolTWins: number;
+  halvesPlayed: number;          // regulation halves played to completion (12 rounds)
+  pistolWinnerHalfWins: number;  // such halves the pistol winner went on to win
+}
+
 export interface BalanceResult {
   kind: "done";
   stats: RunStats;
   heat?: HeatGrids;
+  series?: SeriesStats;
 }
 
 export interface BalanceMatrixResult {
@@ -209,6 +230,98 @@ function tileIndex(map: GameMap, x: number, y: number): number {
   return ty * map.width + tx;
 }
 
+// A clean buy-phase loadout: default pistol, no armor/util, nothing kept.
+function freshLoadout(side: Side): MiniTeam["loadouts"][string] {
+  return {
+    weapon: defaultPistol(side), utility: [], armor: false, helmet: false,
+    keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
+  };
+}
+
+// Run a round to completion, optionally folding death/kill/occupancy into heat.
+function runRound(sim: RoundSim, map: GameMap, heat?: HeatGrids) {
+  if (heat) sim.collectHeat = true;
+  let safety = 100000;
+  let tickN = 0;
+  while (!sim.finished && safety-- > 0) {
+    sim.tick();
+    // Occupancy: bin every alive agent's tile into its side's grid periodically.
+    if (heat && tickN++ % POS_SAMPLE_EVERY === 0) {
+      for (const ag of sim.agents) {
+        if (!ag.alive) continue;
+        const idx = tileIndex(map, ag.pos.x, ag.pos.y);
+        if (ag.side === "CT") heat.ctPos[idx]++; else heat.tPos[idx]++;
+      }
+    }
+  }
+  if (heat && sim.result) {
+    for (const d of sim.deathLog) {
+      const idx = tileIndex(map, d.x, d.y);
+      if (d.side === "CT") heat.ctDeaths[idx]++; else heat.tDeaths[idx]++;
+    }
+    for (const k of sim.killLog) {
+      const idx = tileIndex(map, k.x, k.y);
+      if (k.side === "CT") heat.ctKills[idx]++; else heat.tKills[idx]++;
+    }
+  }
+}
+
+// Fold one finished round into the aggregate stats. `ctIds` identifies which
+// players were on CT this round (for kill attribution) — it flips at halftime.
+function tallyRound(stats: RunStats, sim: RoundSim, r: RoundResult, ctIds: Set<string>) {
+  stats.rounds++;
+  stats.totalDurationMs += r.durationMs;
+  stats.outcomes[r.outcome]++;
+  if (r.winningSide === "CT") stats.ctWins++; else stats.tWins++;
+  if (r.outcome === "ct-elim") stats.tElims++;
+  else if (r.outcome === "t-elim") stats.ctElims++;
+  else if (r.outcome === "bomb-detonated") stats.detonations++;
+  else if (r.outcome === "bomb-defused") stats.defuses++;
+  else if (r.outcome === "time-expired") stats.timeouts++;
+
+  const strat = stats.byTStrategy[sim.tStrategy];
+  const setupKey = ctSetupKey(sim.ctSetup);
+  const setupBucket = stats.byCtSetup[setupKey] ?? (stats.byCtSetup[setupKey] = emptyBucket());
+  for (const b of [strat, setupBucket]) {
+    b.rounds++;
+    b.totalDurationMs += r.durationMs;
+    if (r.winningSide === "CT") b.ctWins++; else b.tWins++;
+    if (r.outcome === "bomb-defused") b.defuses++;
+    else if (r.outcome === "bomb-detonated") b.detonations++;
+    else if (r.outcome === "time-expired") b.timeouts++;
+  }
+
+  for (const e of r.events) {
+    if (e.kind === "kill") {
+      if (ctIds.has(e.killer)) { stats.ctKills++; strat.ctKills++; setupBucket.ctKills++; }
+      else { stats.tKills++; strat.tKills++; setupBucket.tKills++; }
+    } else if (e.kind === "bomb-plant") {
+      stats.plants++;
+      strat.plants++;
+      setupBucket.plants++;
+    }
+  }
+}
+
+// Carry surviving agents' gear into next round's loadout; reset the fallen to a
+// fresh pistol. Only meaningful when the economy isn't reset between rounds.
+function carryLoadouts(ctTeam: MiniTeam, tTeam: MiniTeam, sim: RoundSim) {
+  for (const ag of sim.agents) {
+    const team = ctTeam.players.some(pl => pl.id === ag.playerId) ? ctTeam : tTeam;
+    if (ag.alive) {
+      const hasVest = ag.armor > 30;
+      const keptUtil = [...ag.utility];
+      team.loadouts[ag.playerId] = {
+        weapon: ag.weapon, utility: keptUtil, armor: hasVest, helmet: ag.helmet,
+        keptWeapon: ag.weapon === "knife" ? null : ag.weapon,
+        keptArmor: hasVest, keptHelmet: ag.helmet, keptUtility: keptUtil,
+      };
+    } else {
+      team.loadouts[ag.playerId] = freshLoadout(team.side);
+    }
+  }
+}
+
 export function simulateCell(p: CellParams): RunStats {
   setSeed(Date.now());
   const home = makeTeam("home", "Home", "CT") as unknown as MiniTeam;
@@ -220,10 +333,7 @@ export function simulateCell(p: CellParams): RunStats {
   }
 
   for (const team of [home, away]) for (const pl of team.players) {
-    team.loadouts[pl.id] = {
-      weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
-      keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
-    };
+    team.loadouts[pl.id] = freshLoadout(team.side);
   }
 
   // If a fixed loadout is specified, force it every round; eco state doesn't
@@ -235,6 +345,7 @@ export function simulateCell(p: CellParams): RunStats {
 
   let ctLossStreak = 0, tLossStreak = 0;
   const stats = emptyStats();
+  const ctIds = new Set(home.players.map(pl => pl.id)); // home is always CT here
   const progressEvery = Math.max(1, Math.floor(p.rounds / 50));
 
   for (let i = 0; i < p.rounds; i++) {
@@ -242,10 +353,7 @@ export function simulateCell(p: CellParams): RunStats {
       for (const team of [home, away]) {
         for (const pl of team.players) {
           pl.money = INDEPENDENT_ROUND_STIPEND;
-          team.loadouts[pl.id] = {
-            weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
-            keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
-          };
+          team.loadouts[pl.id] = freshLoadout(team.side);
         }
       }
       ctLossStreak = 0;
@@ -264,87 +372,14 @@ export function simulateCell(p: CellParams): RunStats {
     applyPreset(away, p.tLoadout);
 
     const sim = new RoundSim(home as any, away as any, p.map, Math.floor(Math.random() * 1e9));
-    const heat = p.heatOut;
-    if (heat) sim.collectHeat = true;
-    let safety = 100000;
-    let tickN = 0;
-    while (!sim.finished && safety-- > 0) {
-      sim.tick();
-      // Occupancy: bin every alive agent's tile into its side's grid periodically.
-      if (heat && tickN++ % POS_SAMPLE_EVERY === 0) {
-        for (const ag of sim.agents) {
-          if (!ag.alive) continue;
-          const idx = tileIndex(p.map, ag.pos.x, ag.pos.y);
-          if (ag.side === "CT") heat.ctPos[idx]++; else heat.tPos[idx]++;
-        }
-      }
-    }
+    runRound(sim, p.map, p.heatOut);
     if (!sim.result) continue;
 
-    if (heat) {
-      for (const d of sim.deathLog) {
-        const idx = tileIndex(p.map, d.x, d.y);
-        if (d.side === "CT") heat.ctDeaths[idx]++; else heat.tDeaths[idx]++;
-      }
-      for (const k of sim.killLog) {
-        const idx = tileIndex(p.map, k.x, k.y);
-        if (k.side === "CT") heat.ctKills[idx]++; else heat.tKills[idx]++;
-      }
-    }
-
     const r = sim.result;
-    stats.rounds++;
-    stats.totalDurationMs += r.durationMs;
-    stats.outcomes[r.outcome]++;
-    if (r.winningSide === "CT") stats.ctWins++; else stats.tWins++;
-    if (r.outcome === "ct-elim") stats.tElims++;
-    else if (r.outcome === "t-elim") stats.ctElims++;
-    else if (r.outcome === "bomb-detonated") stats.detonations++;
-    else if (r.outcome === "bomb-defused") stats.defuses++;
-    else if (r.outcome === "time-expired") stats.timeouts++;
-
-    const strat = stats.byTStrategy[sim.tStrategy];
-    const setupKey = ctSetupKey(sim.ctSetup);
-    const setupBucket = stats.byCtSetup[setupKey] ?? (stats.byCtSetup[setupKey] = emptyBucket());
-    for (const b of [strat, setupBucket]) {
-      b.rounds++;
-      b.totalDurationMs += r.durationMs;
-      if (r.winningSide === "CT") b.ctWins++; else b.tWins++;
-      if (r.outcome === "bomb-defused") b.defuses++;
-      else if (r.outcome === "bomb-detonated") b.detonations++;
-      else if (r.outcome === "time-expired") b.timeouts++;
-    }
-
-    for (const e of r.events) {
-      if (e.kind === "kill") {
-        const ctKill = home.players.some(pl => pl.id === e.killer);
-        if (ctKill) { stats.ctKills++; strat.ctKills++; setupBucket.ctKills++; }
-        else { stats.tKills++; strat.tKills++; setupBucket.tKills++; }
-      } else if (e.kind === "bomb-plant") {
-        stats.plants++;
-        strat.plants++;
-        setupBucket.plants++;
-      }
-    }
+    tallyRound(stats, sim, r, ctIds);
 
     // Carry over surviving loadouts (only meaningful in "auto" mode without reset).
-    for (const ag of sim.agents) {
-      const team = home.players.some(pl => pl.id === ag.playerId) ? home : away;
-      if (ag.alive) {
-        const hasVest = ag.armor > 30;
-        const keptUtil = [...ag.utility];
-        team.loadouts[ag.playerId] = {
-          weapon: ag.weapon, utility: keptUtil, armor: hasVest, helmet: ag.helmet,
-          keptWeapon: ag.weapon === "knife" ? null : ag.weapon,
-          keptArmor: hasVest, keptHelmet: ag.helmet, keptUtility: keptUtil,
-        };
-      } else {
-        team.loadouts[ag.playerId] = {
-          weapon: defaultPistol(team.side), utility: [], armor: false, helmet: false,
-          keptWeapon: null, keptArmor: false, keptHelmet: false, keptUtility: [],
-        };
-      }
-    }
+    carryLoadouts(home, away, sim);
 
     const next = applyRoundReward(home as any, away as any, r, ctLossStreak, tLossStreak);
     ctLossStreak = next.ctLossStreak;
@@ -355,13 +390,162 @@ export function simulateCell(p: CellParams): RunStats {
   return stats;
 }
 
+// --- MR12 series simulation -------------------------------------------------
+
+interface SeriesParams {
+  map: GameMap;
+  seriesCount: number;
+  neutralize: boolean;
+  onProgress: (done: number) => void;
+  heatOut?: HeatGrids;
+}
+
+function emptySeriesStats(): SeriesStats {
+  return {
+    seriesPlayed: 0, overtimes: 0,
+    totalWinnerScore: 0, totalLoserScore: 0,
+    pistolRounds: 0, pistolCtWins: 0, pistolTWins: 0,
+    halvesPlayed: 0, pistolWinnerHalfWins: 0,
+  };
+}
+
+// MR12 rules: first to 13, sides switch after 12, MR3 overtime if 12-12.
+const REG_HALF = 12, REG_WIN = 13;
+const OT_HALF = 3, OT_WIN = 4;       // each OT: 6 rounds (3 per side), first to +4
+const PISTOL_MONEY = 800, OT_MONEY = 10000;
+const MAX_OT_BLOCKS = 20;            // guard against a pathological infinite tie
+
+// Sim `seriesCount` full MR12 games with a real economy (loss bonuses, pistol
+// rounds, halftime reset + side-swap). Round-by-side balance accrues into a
+// normal RunStats; the series-only color goes into SeriesStats.
+export function simulateSeries(p: SeriesParams): { stats: RunStats; series: SeriesStats } {
+  setSeed(Date.now());
+  const teamA = makeTeam("home", "Home", "CT") as unknown as MiniTeam;
+  const teamB = makeTeam("away", "Away", "T") as unknown as MiniTeam;
+  if (p.neutralize) {
+    neutralizeTeamStats(teamA as any, 60);
+    neutralizeTeamStats(teamB as any, 60);
+  }
+  const stats = emptyStats();
+  const series = emptySeriesStats();
+
+  for (let s = 0; s < p.seriesCount; s++) {
+    // Fresh game: team A starts CT, team B starts T. ctTeam/tTeam track who's on
+    // which side right now and are swapped at the half.
+    let ctTeam = teamA, tTeam = teamB;
+    ctTeam.side = "CT"; tTeam.side = "T";
+    let scoreA = 0, scoreB = 0; // total rounds won, by team identity (not side)
+    let ctLossStreak = 0, tLossStreak = 0;
+
+    // Play up to `len` rounds. Resets economy to `startMoney` and re-anchors mood
+    // at the buy. Returns "decided" the instant a team reaches `winTarget` (the
+    // game is over), else "complete" once all `len` rounds are played. Pistol /
+    // half-conversion color is only recorded for regulation halves.
+    const playHalf = (len: number, startMoney: number, winTarget: number, regulation: boolean): "decided" | "complete" => {
+      for (const team of [ctTeam, tTeam]) for (const pl of team.players) {
+        pl.money = startMoney;
+        if (p.neutralize) { pl.mood = 65; pl.morale = 65; }
+        team.loadouts[pl.id] = freshLoadout(team.side);
+      }
+      ctLossStreak = 0; tLossStreak = 0;
+      const aAtStart = scoreA;
+      let pistolWinner: MiniTeam | null = null;
+
+      for (let r = 0; r < len; r++) {
+        if (p.neutralize) for (const team of [ctTeam, tTeam]) for (const pl of team.players) {
+          pl.mood = 65; pl.morale = 65;
+        }
+        applyPreset(ctTeam, "auto");
+        applyPreset(tTeam, "auto");
+
+        const sim = new RoundSim(ctTeam as any, tTeam as any, p.map, Math.floor(Math.random() * 1e9));
+        runRound(sim, p.map, p.heatOut);
+        if (!sim.result) continue;
+        const res = sim.result;
+        tallyRound(stats, sim, res, new Set(ctTeam.players.map(pl => pl.id)));
+
+        const winnerTeam = res.winningSide === "CT" ? ctTeam : tTeam;
+        if (winnerTeam === teamA) scoreA++; else scoreB++;
+
+        if (regulation && r === 0) { // pistol round
+          series.pistolRounds++;
+          if (res.winningSide === "CT") series.pistolCtWins++; else series.pistolTWins++;
+          pistolWinner = winnerTeam;
+        }
+
+        carryLoadouts(ctTeam, tTeam, sim);
+        const next = applyRoundReward(ctTeam as any, tTeam as any, res, ctLossStreak, tLossStreak);
+        ctLossStreak = next.ctLossStreak; tLossStreak = next.tLossStreak;
+
+        if (scoreA >= winTarget || scoreB >= winTarget) return "decided";
+      }
+
+      // Half played to completion. Record conversion only for regulation halves
+      // (OT "pistols" are $10k full buys, not real pistol rounds).
+      if (regulation) {
+        series.halvesPlayed++;
+        const halfWinner = (scoreA - aAtStart) > len / 2 ? teamA : teamB; // 7+ of 12
+        if (pistolWinner && halfWinner === pistolWinner) series.pistolWinnerHalfWins++;
+      }
+      return "complete";
+    };
+
+    const swapSides = () => {
+      [ctTeam, tTeam] = [tTeam, ctTeam];
+      ctTeam.side = "CT"; tTeam.side = "T";
+    };
+
+    // Regulation: two 12-round halves with a side-swap at the break.
+    let decided = playHalf(REG_HALF, PISTOL_MONEY, REG_WIN, true) === "decided";
+    if (!decided) {
+      swapSides();
+      decided = playHalf(REG_HALF, PISTOL_MONEY, REG_WIN, true) === "decided";
+    }
+
+    // 12-12 → MR3 overtime: 6-round blocks, $10k, swap at 3, first to +4 wins.
+    let wentToOT = false;
+    if (!decided && scoreA === scoreB) {
+      wentToOT = true;
+      swapSides();
+      let blocks = 0;
+      while (scoreA === scoreB && blocks++ < MAX_OT_BLOCKS) {
+        const target = scoreA + OT_WIN; // both equal here
+        if (playHalf(OT_HALF, OT_MONEY, target, false) === "decided") break;
+        swapSides();
+        if (playHalf(OT_HALF, OT_MONEY, target, false) === "decided") break;
+        swapSides(); // block tied (3-3); reset orientation for the next block
+      }
+    }
+
+    series.seriesPlayed++;
+    if (wentToOT) series.overtimes++;
+    series.totalWinnerScore += Math.max(scoreA, scoreB);
+    series.totalLoserScore += Math.min(scoreA, scoreB);
+    p.onProgress(s + 1);
+  }
+
+  return { stats, series };
+}
+
 // Worker entry — guarded so Node-side scripts can import this module.
 if (typeof self !== "undefined" && typeof (self as any).addEventListener === "function") {
 self.addEventListener("message", (e: MessageEvent<BalanceRequest>) => {
   const req = e.data;
   if (req.kind !== "run") return;
 
-  if (req.matrix) {
+  if (req.seriesMode) {
+    const heat = emptyHeatGrids(req.map);
+    const { stats, series } = simulateSeries({
+      map: req.map, seriesCount: req.rounds, neutralize: req.neutralize,
+      heatOut: heat,
+      onProgress: (done) => {
+        const msg: BalanceProgress = { kind: "progress", done, total: req.rounds };
+        self.postMessage(msg);
+      },
+    });
+    const result: BalanceResult = { kind: "done", stats, heat, series };
+    self.postMessage(result);
+  } else if (req.matrix) {
     const cells: { ct: LoadoutPreset; t: LoadoutPreset; stats: RunStats }[] = [];
     const total = ALL_PRESETS.length * ALL_PRESETS.length;
     let cellIndex = 0;
