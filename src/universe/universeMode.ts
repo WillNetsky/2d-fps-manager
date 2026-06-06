@@ -3146,8 +3146,8 @@ function playerPage(
     <div class="upp-identity">
       <div class="upp-flag">${flagEmoji(p.country)}</div>
       <div>
-        <div class="upp-name">${escapeHtml(p.name)}</div>
-        <div class="upp-handle">"${escapeHtml(p.handle)}"</div>
+        <div class="upp-handle">${escapeHtml(p.handle)}</div>
+        <div class="upp-realname">${escapeHtml(p.name)}</div>
         <div class="upp-meta">${escapeHtml(p.country)} · Age ${p.age} · ${escapeHtml(p.role)}` +
           (team ? ` · <span class="upp-team-link clickable" data-tid="${team.id}">${escapeHtml(team.name)}</span>` : "") +
           (p.retired ? ` · <span class="upp-retired">Retired${p.retiredDay ? ` (Day ${p.retiredDay})` : ""}</span>` : "") +
@@ -3285,7 +3285,7 @@ function playerPage(
       const row = document.createElement("div");
       row.className = "upp-rel-row";
       const color = v > 0 ? "var(--ct, #6ea6ff)" : "#e57373";
-      row.innerHTML = `<span>${escapeHtml(other.name)}</span><span style="color:${color}">${v > 0 ? "+" : ""}${v}</span>`;
+      row.innerHTML = `<span><span class="upp-rel-handle">"${escapeHtml(other.handle)}"</span> <span class="upp-rel-realname">${escapeHtml(other.name)}</span></span><span style="color:${color}">${v > 0 ? "+" : ""}${Math.round(v)}</span>`;
       relsCard.appendChild(row);
     });
     root.appendChild(relsCard);

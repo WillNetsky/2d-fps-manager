@@ -39,6 +39,7 @@
 - [x] Save as new map
 - [x] Balancer should have the option to sim whole MR12 games, changes "rounds" to "series"
 - [ ] Grid tends to start missing both horizontal and vertical lines
+- [ ] Heatmaps should clear when loading a new map
 
 ## Universe
 - [x] Pool of players
@@ -47,8 +48,8 @@
 - [x] Tournament prize money
 - [x] Player's value money
 - [ ] Something to spend money on (better equipment? buy a team?)
-- [ ] Player pages should show their handle before their real names
-- [ ] Player pages relationship display should show "Handle" Real Name
+- [x] Player pages should show their handle before their real names
+- [x] Player pages relationship display should show "Handle" Real Name
 
 ## Issues
 - [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing
