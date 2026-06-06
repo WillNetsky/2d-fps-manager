@@ -2,6 +2,20 @@ import type { GameMap, Vec2 } from "../domain/types.ts";
 import { makeMap } from "../domain/factory.ts";
 import { defaultMaps } from "../domain/defaultMaps.ts";
 import { RECOVERED_MAPS } from "../domain/recoveredMaps.ts";
+import { BalanceMode } from "../balance/balanceMode.ts";
+import type { HeatGrids } from "../balance/balanceWorker.ts";
+
+// Heatmap layers the analyze panel can overlay on the map.
+type HeatLayer = "none" | "ct-kills" | "t-kills" | "ct-deaths" | "t-deaths" | "ct-pos" | "t-pos";
+const HEAT_LAYERS: { id: HeatLayer; label: string; color: string }[] = [
+  { id: "none", label: "Off", color: "" },
+  { id: "ct-kills", label: "CT kills", color: "#4a90e2" },
+  { id: "t-kills", label: "T kills", color: "#c9692e" },
+  { id: "ct-deaths", label: "CT deaths", color: "#4a90e2" },
+  { id: "t-deaths", label: "T deaths", color: "#c9692e" },
+  { id: "ct-pos", label: "CT positioning", color: "#4a90e2" },
+  { id: "t-pos", label: "T positioning", color: "#c9692e" },
+];
 
 type Tool =
   | "wall" | "floor"
@@ -86,6 +100,9 @@ export class MapEditor {
   private showCenterLines = false;
   private wallColorInput!: HTMLInputElement;
   private floorColorInput!: HTMLInputElement;
+  private heat: HeatGrids | null = null;
+  private heatLayer: HeatLayer = "none";
+  private heatLayerSelect!: HTMLSelectElement;
 
   constructor(parent: HTMLElement) {
     this.map = loadCustomMap() ?? makeMap();
@@ -158,7 +175,6 @@ export class MapEditor {
       return b;
     };
     mkBtn("Play this map", "primary", () => this.playMap());
-    mkBtn("Balance test this map", "", () => this.balanceMap());
 
     const nameRow = document.createElement("div");
     nameRow.className = "editor-name-row";
@@ -247,6 +263,59 @@ export class MapEditor {
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
     this.root.appendChild(canvasWrap);
+
+    // Analyze panel (right column): balance tester + heatmap overlay controls.
+    const analyze = document.createElement("div");
+    analyze.className = "editor-analyze";
+    const aTitle = document.createElement("h2");
+    aTitle.textContent = "Analyze";
+    analyze.appendChild(aTitle);
+
+    // Heatmap layer selector — drives the overlay drawn on the map canvas.
+    const heatGroup = document.createElement("div");
+    heatGroup.className = "editor-group";
+    heatGroup.textContent = "Heatmap overlay";
+    analyze.appendChild(heatGroup);
+    this.heatLayerSelect = document.createElement("select");
+    this.heatLayerSelect.className = "balance-select";
+    for (const l of HEAT_LAYERS) {
+      const opt = document.createElement("option");
+      opt.value = l.id;
+      opt.textContent = l.label;
+      this.heatLayerSelect.appendChild(opt);
+    }
+    this.heatLayerSelect.disabled = true; // until a run produces heat data
+    this.heatLayerSelect.onchange = () => {
+      this.heatLayer = this.heatLayerSelect.value as HeatLayer;
+      this.draw();
+    };
+    analyze.appendChild(this.heatLayerSelect);
+    const heatHint = document.createElement("div");
+    heatHint.className = "editor-help";
+    heatHint.innerHTML = `<p>Run a sim below to populate the heatmap. Deaths show where each side dies; positioning shows where each side spends time.</p>`;
+    analyze.appendChild(heatHint);
+
+    // Balance tester, hosted in its own sub-panel; tests the live draft map.
+    const balanceHost = document.createElement("div");
+    analyze.appendChild(balanceHost);
+    new BalanceMode(balanceHost, {
+      getMap: () => this.map,
+      onResult: (heat) => {
+        this.heat = heat;
+        this.heatLayerSelect.disabled = heat == null;
+        if (heat == null) {
+          this.heatLayer = "none";
+          this.heatLayerSelect.value = "none";
+        } else if (this.heatLayer === "none") {
+          // Auto-show a useful layer the first time data arrives.
+          this.heatLayer = "ct-kills";
+          this.heatLayerSelect.value = "ct-kills";
+        }
+        this.draw();
+      },
+    });
+
+    this.root.appendChild(analyze);
 
     this.selectTool("wall");
   }
@@ -500,12 +569,6 @@ export class MapEditor {
     window.location.reload();
   }
 
-  private balanceMap() {
-    if (!this.validateAndStage()) return;
-    window.location.hash = "balance";
-    window.location.reload();
-  }
-
   private checkConnectivity(): string | null {
     // BFS over floor tiles from each spawn; the bombsites must be reachable.
     const W = this.map.width, H = this.map.height;
@@ -589,6 +652,9 @@ export class MapEditor {
     this.drawZone(this.map.ctSpawns, "#4a90e2", "CT");
     this.drawZone(this.map.tSpawns, "#c9692e", "T");
 
+    // Heatmap overlay (from the analyze panel's last sim run).
+    this.drawHeat();
+
     if (this.showCenterLines) {
       // With odd width/height there's a single middle column and middle row;
       // highlight those tiles as a band so the center cell is obvious.
@@ -607,6 +673,41 @@ export class MapEditor {
       ctx.moveTo(0, (midRow + 1) * ts + 0.5); ctx.lineTo(this.canvas.width, (midRow + 1) * ts + 0.5);
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+  }
+
+  // Overlay the selected heatmap layer. Tiles are colored by the layer's side
+  // color with alpha scaled by per-tile intensity (relative to the layer's max).
+  private drawHeat() {
+    if (this.heatLayer === "none" || !this.heat) return;
+    const layer = HEAT_LAYERS.find(l => l.id === this.heatLayer);
+    if (!layer || !layer.color) return;
+    const grid =
+      this.heatLayer === "ct-kills" ? this.heat.ctKills
+      : this.heatLayer === "t-kills" ? this.heat.tKills
+      : this.heatLayer === "ct-deaths" ? this.heat.ctDeaths
+      : this.heatLayer === "t-deaths" ? this.heat.tDeaths
+      : this.heatLayer === "ct-pos" ? this.heat.ctPos
+      : this.heat.tPos;
+    // Grid dims may differ from the current draft if the map was edited after a
+    // run; only overlay when they still line up.
+    if (this.heat.width !== this.map.width || this.heat.height !== this.map.height) return;
+
+    let max = 0;
+    for (const v of grid) if (v > max) max = v;
+    if (max <= 0) return;
+
+    const ctx = this.ctx;
+    const ts = this.map.tileSize;
+    for (let i = 0; i < grid.length; i++) {
+      const v = grid[i];
+      if (v <= 0) continue;
+      // Perceptual boost so mid-range cells stay visible against the peak.
+      const intensity = Math.pow(v / max, 0.6);
+      ctx.fillStyle = hexWithAlpha(layer.color, 0.12 + 0.72 * intensity);
+      const x = (i % this.map.width) * ts;
+      const y = Math.floor(i / this.map.width) * ts;
+      ctx.fillRect(x, y, ts, ts);
     }
   }
 

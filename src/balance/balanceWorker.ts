@@ -41,9 +41,24 @@ export interface BalanceProgress {
   cell?: { ct: LoadoutPreset; t: LoadoutPreset; index: number; count: number };
 }
 
+// Per-tile heatmap grids (length width*height each), accumulated over a run.
+// Deaths are binned at the victim's position; occupancy samples alive agents
+// every POS_SAMPLE_EVERY ticks. Only collected for single (non-matrix) runs.
+export interface HeatGrids {
+  width: number;
+  height: number;
+  ctDeaths: number[];  // where CTs died
+  tDeaths: number[];   // where Ts died
+  ctKills: number[];   // where CTs were standing when they got a kill
+  tKills: number[];    // where Ts were standing when they got a kill
+  ctPos: number[];
+  tPos: number[];
+}
+
 export interface BalanceResult {
   kind: "done";
   stats: RunStats;
+  heat?: HeatGrids;
 }
 
 export interface BalanceMatrixResult {
@@ -170,6 +185,28 @@ interface CellParams {
   ctLoadout: LoadoutPreset;
   tLoadout: LoadoutPreset;
   onProgress: (done: number) => void;
+  // When provided, the run records death locations and samples agent positions
+  // into these per-tile grids. Omitted for matrix runs (heat isn't shown there).
+  heatOut?: HeatGrids;
+}
+
+// Sample alive-agent occupancy this often (in ticks) for the positioning grid.
+const POS_SAMPLE_EVERY = 5;
+
+export function emptyHeatGrids(map: GameMap): HeatGrids {
+  const n = map.width * map.height;
+  return {
+    width: map.width, height: map.height,
+    ctDeaths: new Array(n).fill(0), tDeaths: new Array(n).fill(0),
+    ctKills: new Array(n).fill(0), tKills: new Array(n).fill(0),
+    ctPos: new Array(n).fill(0), tPos: new Array(n).fill(0),
+  };
+}
+
+function tileIndex(map: GameMap, x: number, y: number): number {
+  const tx = Math.min(map.width - 1, Math.max(0, Math.floor(x / map.tileSize)));
+  const ty = Math.min(map.height - 1, Math.max(0, Math.floor(y / map.tileSize)));
+  return ty * map.width + tx;
 }
 
 export function simulateCell(p: CellParams): RunStats {
@@ -227,9 +264,33 @@ export function simulateCell(p: CellParams): RunStats {
     applyPreset(away, p.tLoadout);
 
     const sim = new RoundSim(home as any, away as any, p.map, Math.floor(Math.random() * 1e9));
+    const heat = p.heatOut;
+    if (heat) sim.collectHeat = true;
     let safety = 100000;
-    while (!sim.finished && safety-- > 0) sim.tick();
+    let tickN = 0;
+    while (!sim.finished && safety-- > 0) {
+      sim.tick();
+      // Occupancy: bin every alive agent's tile into its side's grid periodically.
+      if (heat && tickN++ % POS_SAMPLE_EVERY === 0) {
+        for (const ag of sim.agents) {
+          if (!ag.alive) continue;
+          const idx = tileIndex(p.map, ag.pos.x, ag.pos.y);
+          if (ag.side === "CT") heat.ctPos[idx]++; else heat.tPos[idx]++;
+        }
+      }
+    }
     if (!sim.result) continue;
+
+    if (heat) {
+      for (const d of sim.deathLog) {
+        const idx = tileIndex(p.map, d.x, d.y);
+        if (d.side === "CT") heat.ctDeaths[idx]++; else heat.tDeaths[idx]++;
+      }
+      for (const k of sim.killLog) {
+        const idx = tileIndex(p.map, k.x, k.y);
+        if (k.side === "CT") heat.ctKills[idx]++; else heat.tKills[idx]++;
+      }
+    }
 
     const r = sim.result;
     stats.rounds++;
@@ -325,16 +386,18 @@ self.addEventListener("message", (e: MessageEvent<BalanceRequest>) => {
     const result: BalanceMatrixResult = { kind: "done-matrix", cells };
     self.postMessage(result);
   } else {
+    const heat = emptyHeatGrids(req.map);
     const stats = simulateCell({
       map: req.map, rounds: req.rounds,
       neutralize: req.neutralize, resetEachRound: req.resetEachRound,
       ctLoadout: req.ctLoadout, tLoadout: req.tLoadout,
+      heatOut: heat,
       onProgress: (done) => {
         const msg: BalanceProgress = { kind: "progress", done, total: req.rounds };
         self.postMessage(msg);
       },
     });
-    const result: BalanceResult = { kind: "done", stats };
+    const result: BalanceResult = { kind: "done", stats, heat };
     self.postMessage(result);
   }
 });

@@ -1,16 +1,26 @@
 import type { GameMap } from "../domain/types.ts";
-import { loadSavedMapsAll } from "../editor/mapEditor.ts";
-import { defaultMap } from "../domain/defaultMaps.ts";
 import BalanceWorker from "./balanceWorker.ts?worker";
 import type {
   BalanceMatrixResult, BalanceProgress, BalanceRequest, BalanceResult,
-  LoadoutPreset, RunStats,
+  HeatGrids, LoadoutPreset, RunStats,
 } from "./balanceWorker.ts";
 import { ALL_PRESETS, ALL_T_STRATEGIES, PRESET_LABELS } from "./balanceWorker.ts";
 
+export interface BalancePanelOpts {
+  // The map to test — read fresh on every run so it tracks the live draft.
+  getMap: () => GameMap;
+  // Called when a run finishes: heat grids for a single run, or null for a
+  // matrix run / cleared state. Lets the host overlay a heatmap.
+  onResult?: (heat: HeatGrids | null) => void;
+}
+
+// Balance tester rendered as a self-contained panel (no full-screen layout).
+// Embedded in the map editor's analyze column; runs against the live draft map.
 export class BalanceMode {
   private root: HTMLElement;
-  private mapSelect!: HTMLSelectElement;
+  private getMap: () => GameMap;
+  private onResult?: (heat: HeatGrids | null) => void;
+
   private roundsInput!: HTMLInputElement;
   private neutralToggle!: HTMLInputElement;
   private resetEconToggle!: HTMLInputElement;
@@ -21,38 +31,17 @@ export class BalanceMode {
   private status!: HTMLElement;
   private resultsEl!: HTMLElement;
 
-  constructor(parent: HTMLElement) {
+  constructor(parent: HTMLElement, opts: BalancePanelOpts) {
     this.root = parent;
+    this.getMap = opts.getMap;
+    this.onResult = opts.onResult;
     parent.innerHTML = "";
+    parent.classList.add("balance-panel");
     this.buildUI();
   }
 
   private buildUI() {
-    this.root.className = "editor-app";
-
-    const sidebar = document.createElement("div");
-    sidebar.className = "editor-sidebar";
-    sidebar.innerHTML = `<h2>Balance Test</h2>`;
-
-    // Map selection
-    const mapLabel = document.createElement("div");
-    mapLabel.className = "editor-group";
-    mapLabel.textContent = "Map";
-    sidebar.appendChild(mapLabel);
-    this.mapSelect = document.createElement("select");
-    this.mapSelect.className = "balance-select";
-    // Saved maps from the editor (the default map is seeded there). The editor's
-    // in-progress draft isn't a testable map — save it first to appear here.
-    const savedMaps = loadSavedMapsAll();
-    const savedNames = Object.keys(savedMaps).sort();
-    for (const name of savedNames) {
-      const opt = document.createElement("option");
-      opt.value = `s:${name}`;
-      opt.textContent = name;
-      this.mapSelect.appendChild(opt);
-    }
-    if (savedNames.length > 0) this.mapSelect.value = `s:${savedNames[0]}`;
-    sidebar.appendChild(this.mapSelect);
+    const sidebar = this.root;
 
     // Rounds
     const roundsLabel = document.createElement("div");
@@ -63,7 +52,7 @@ export class BalanceMode {
     this.roundsInput.type = "number";
     this.roundsInput.min = "1";
     this.roundsInput.max = "100000";
-    this.roundsInput.value = "100";
+    this.roundsInput.value = "200";
     this.roundsInput.className = "balance-input";
     sidebar.appendChild(this.roundsInput);
 
@@ -139,47 +128,29 @@ export class BalanceMode {
     sidebar.appendChild(econRow);
 
     // Run
+    const runRow = document.createElement("div");
+    runRow.className = "balance-run-row";
     this.runBtn = document.createElement("button");
     this.runBtn.textContent = "Run";
     this.runBtn.className = "primary";
     this.runBtn.onclick = () => this.run();
-    sidebar.appendChild(this.runBtn);
+    runRow.appendChild(this.runBtn);
 
     const cancel = document.createElement("button");
     cancel.textContent = "Cancel";
     cancel.onclick = () => this.cancel();
-    sidebar.appendChild(cancel);
-
-    const back = document.createElement("button");
-    back.textContent = "Back to menu";
-    back.onclick = () => { window.location.hash = ""; window.location.reload(); };
-    sidebar.appendChild(back);
+    runRow.appendChild(cancel);
+    sidebar.appendChild(runRow);
 
     this.status = document.createElement("div");
     this.status.className = "balance-status";
     sidebar.appendChild(this.status);
 
-    this.root.appendChild(sidebar);
-
     // Results
-    const main = document.createElement("div");
-    main.className = "editor-canvas-wrap";
-    main.style.padding = "20px";
-    main.style.overflow = "auto";
     this.resultsEl = document.createElement("div");
     this.resultsEl.className = "balance-results";
-    this.resultsEl.innerHTML = `<p style="color: var(--muted);">Configure on the left, hit <strong>Run</strong>.</p>`;
-    main.appendChild(this.resultsEl);
-    this.root.appendChild(main);
-  }
-
-  private pickMap(): GameMap {
-    const key = this.mapSelect.value;
-    if (key.startsWith("s:")) {
-      const saved = loadSavedMapsAll()[key.slice(2)];
-      if (saved) return JSON.parse(JSON.stringify(saved)) as GameMap;
-    }
-    return JSON.parse(JSON.stringify(defaultMap())) as GameMap;
+    this.resultsEl.innerHTML = `<p style="color: var(--muted);">Configure above, hit <strong>Run</strong> to simulate this map.</p>`;
+    sidebar.appendChild(this.resultsEl);
   }
 
   private worker: Worker | null = null;
@@ -219,6 +190,7 @@ export class BalanceMode {
         const elapsed = ((performance.now() - this.runStartedAt) / 1000).toFixed(1);
         this.status.textContent = `Done — ${msg.stats.rounds} rounds in ${elapsed}s`;
         this.renderResults(msg.stats);
+        this.onResult?.(msg.heat ?? null);
         this.runBtn.disabled = false;
         this.worker?.terminate();
         this.worker = null;
@@ -227,6 +199,8 @@ export class BalanceMode {
         const totalRounds = msg.cells.reduce((a, c) => a + c.stats.rounds, 0);
         this.status.textContent = `Done — ${msg.cells.length} cells, ${totalRounds} rounds in ${elapsed}s`;
         this.renderMatrix(msg.cells);
+        // Matrix runs don't collect heat (no single map of positions to show).
+        this.onResult?.(null);
         this.runBtn.disabled = false;
         this.worker?.terminate();
         this.worker = null;
@@ -235,7 +209,7 @@ export class BalanceMode {
 
     const req: BalanceRequest = {
       kind: "run",
-      map: this.pickMap(),
+      map: this.getMap(),
       rounds,
       neutralize: this.neutralToggle.checked,
       resetEachRound: this.resetEconToggle.checked,

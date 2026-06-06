@@ -39,8 +39,35 @@ html, body {
 
 #app.editor-app {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 240px 1fr 340px;
   height: 100vh;
+}
+
+.editor-analyze {
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  padding: 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.editor-analyze h2 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.balance-run-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.balance-run-row button { flex: 1; }
+.balance-panel .balance-results {
+  margin-top: 12px;
+  overflow-x: auto;
 }
 
 .editor-sidebar {
@@ -831,7 +858,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .uni-title-head, .uni-title-actions, .uni-title-load {
   animation: uni-in .5s cubic-bezier(.2,.7,.3,1) backwards;
 }
-.uni-title-actions { animation-delay: .12s; }
+.uni-title-actions { animation-delay: .12s; display: flex; flex-wrap: wrap; gap: 12px; }
 .uni-title-load { animation-delay: .2s; }
 @keyframes uni-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 

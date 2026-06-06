@@ -209,6 +209,13 @@ export class RoundSim {
   drops: DroppedWeapon[] = [];
   t = 0;
   events: SimEvent[] = [];
+  // Death/kill locations for the balance tester's heatmaps. Deaths log the
+  // victim's position (where each side dies); kills log the killer's position
+  // (where each side was standing when it got a kill). Opt-in via collectHeat
+  // so the universe batch sim doesn't accumulate them.
+  collectHeat = false;
+  deathLog: { x: number; y: number; side: Side }[] = [];
+  killLog: { x: number; y: number; side: Side }[] = [];
   finished = false;
   result: RoundResult | null = null;
   // Per-tick shots, drained by renderer each frame.
@@ -470,6 +477,16 @@ export class RoundSim {
   }
 
   private push(e: SimEvent) { this.events.push(e); }
+
+  // Record where a victim died and where the killer was standing (for the
+  // balance tester's heatmaps). `killerId` is looked up to an agent so grenade
+  // kills (thrower referenced by id) are credited at the thrower's position.
+  private recordDeath(victim: Agent, killerId: string) {
+    if (!this.collectHeat) return;
+    this.deathLog.push({ x: victim.pos.x, y: victim.pos.y, side: victim.side });
+    const killer = this.agents.find(a => a.playerId === killerId);
+    if (killer) this.killLog.push({ x: killer.pos.x, y: killer.pos.y, side: killer.side });
+  }
 
   private spawnAgents() {
     const rollPersonality = (s: PlayerStats): AgentPersonality => {
@@ -1057,6 +1074,7 @@ export class RoundSim {
           }
           if (a.playerId === this.bombCarrier) this.dropBomb(a);
           this.push({ t: this.t, kind: "kill", killer: m.thrower, victim: a.playerId, weapon: "molotov", headshot: false });
+          this.recordDeath(a, m.thrower);
           this.bumpStat(m.thrower, "kills", 1);
           this.bumpStat(a.playerId, "deaths", 1);
           this.awardAssists(a.playerId, m.thrower);
@@ -1134,6 +1152,7 @@ export class RoundSim {
         }
         if (a.playerId === this.bombCarrier) this.dropBomb(a);
         this.push({ t: this.t, kind: "kill", killer: he.thrower, victim: a.playerId, weapon: "he", headshot: false });
+        this.recordDeath(a, he.thrower);
         this.bumpStat(he.thrower, "kills", 1);
         this.bumpStat(a.playerId, "deaths", 1);
         this.awardAssists(a.playerId, he.thrower);
@@ -2034,6 +2053,7 @@ export class RoundSim {
         this.drops.push({ pos: { ...enemy.pos }, weapon: enemy.weapon });
       }
       this.push({ t: this.t, kind: "kill", killer: a.playerId, victim: enemy.playerId, weapon: a.weapon, headshot: isHeadshot });
+      this.recordDeath(enemy, a.playerId);
       const killer = this.players(a.playerId)!;
       killer.mood = clamp(killer.mood + 4, 0, 100);
       const victim = this.players(enemy.playerId)!;

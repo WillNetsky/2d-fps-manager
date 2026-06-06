@@ -1,6 +1,5 @@
 import "./styles.css";
 import { MapEditor, seedDefaultMaps, seedRecoveredMaps } from "./editor/mapEditor.ts";
-import { BalanceMode } from "./balance/balanceMode.ts";
 import { UniverseMode } from "./universe/universeMode.ts";
 
 // One-time seed of the default map into the saved-map store (no-op after first run).
@@ -12,13 +11,11 @@ const app = document.getElementById("app")!;
 app.innerHTML = "";
 app.className = "";
 
-// Map editor and balance testing are launched from Universe Mode's settings as
-// separate workspaces; everything else is Universe Mode, which is the home
-// screen (#universe kept for back-compat links).
-if (window.location.hash === "#editor") {
+// The map editor (which now hosts the balance tester / heatmaps in its analyze
+// panel) opens as a separate workspace; everything else is Universe Mode, the
+// home screen. #balance is kept as a back-compat alias for the editor.
+if (window.location.hash === "#editor" || window.location.hash === "#balance") {
   new MapEditor(app);
-} else if (window.location.hash === "#balance") {
-  new BalanceMode(app);
 } else {
   new UniverseMode(app);
 }
