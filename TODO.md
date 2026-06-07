@@ -50,8 +50,8 @@
 - [ ] Something to spend money on (better equipment? buy a team?)
 - [x] Player pages should show their handle before their real names
 - [x] Player pages relationship display should show "Handle" Real Name
-- [ ] Team pages should also show when they benched a player in the Roster history
-- [ ] Established orgs should have their own color (rather than default blue or orange)
+- [x] Team pages should also show when they benched a player in the Roster history
+- [x] Established orgs should have their own color (rather than default blue or orange)
 
 ## Issues
 - [x] CTs don't seem to actually go defuse the bomb, time just runs out and they win by defusing

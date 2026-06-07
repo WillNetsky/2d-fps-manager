@@ -237,6 +237,10 @@ export interface UniverseTeam {
   // Fixed at crystallization; survives roster changes. Absent on saves predating
   // org nationality; backfilled from the current captain on load.
   country?: string;
+  // Brand color for the org (a hex string). Assigned at crystallization and
+  // fixed thereafter; backfilled on load. Absent only on pickup lobbies, which
+  // fall back to their side color. See pickOrgColor.
+  color?: string;
   playerIds: string[];                      // full roster (active + bench), up to ROSTER_MAX
   // The five players who actually play (a subset of playerIds, AI-managed). The
   // rest of the roster are bench. Absent on saves predating benches — backfilled
@@ -425,6 +429,23 @@ export const TRANSFERS_LOG_MAX = 200;
 // cadence at which finances tick (see finance.runFinancialCycle). Tunable; the
 // intent is that lean or winning orgs sustain while expensive-but-losing rosters
 // bleed and eventually fold, with the transfer market bailing out sellable orgs.
+// Brand palette for established orgs — vivid but legible on the dark UI, and
+// kept clear of the CT/T side blues/oranges so a team reads as itself, not a
+// side. pickOrgColor maps an org's id onto one of these, stably.
+export const ORG_COLORS = [
+  "#e8554e", "#e8883a", "#e8c54a", "#9ccc3a", "#3fb98c", "#39a0e8",
+  "#6c7ce8", "#a85ce8", "#e85aa8", "#4ec9b0", "#5c8ce8", "#c0e84a",
+  "#e86c9c", "#7ad14a", "#b07be8", "#e8a23a",
+];
+
+// Stable brand color for an org, derived from a seed (its id) so it never
+// shifts across renders or reloads.
+export function pickOrgColor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return ORG_COLORS[Math.abs(h) % ORG_COLORS.length];
+}
+
 export const STARTING_BALANCE = 250_000;  // seed cash a new org crystallizes with
 export const WAGE_RATE = 0.05;            // per-cycle wage = this × player market value
 export const BASE_SPONSOR = 30_000;       // flat sponsorship every active org draws

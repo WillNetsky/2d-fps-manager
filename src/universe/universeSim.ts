@@ -12,7 +12,7 @@ import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
   STARTING_ELO, TEAM_SIZE, RECRUIT_BOND, STARTING_BALANCE,
-  GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE,
+  GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE, pickOrgColor,
   type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
   type ProvisionalStack, type UniverseTeam, type VetoStep,
 } from "./types.ts";
@@ -319,10 +319,12 @@ export function crystallizeTeam(
   const elo = Math.round(playerIds.reduce((s, id) => s + (elos[id] ?? STARTING_ELO), 0) / playerIds.length);
   let team = ctx.teams.find(t => t.rosterKey === rosterKey);
   if (!team) {
+    const id = `t${ctx.teams.length}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
     team = {
-      id: `t${ctx.teams.length}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
+      id,
       name: generateTeamName(Math.random),
       region,
+      color: pickOrgColor(id),
       country: ctx.byId.get(captainOf(playerIds, elos))?.country,
       playerIds: [...playerIds],
       activeIds: [...playerIds],   // founding five are all active

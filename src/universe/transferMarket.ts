@@ -18,7 +18,7 @@ import type { Player } from "../domain/types.ts";
 import { regionOf } from "../domain/countries.ts";
 import { seedCliqueBonds } from "./chemistry.ts";
 import { formatMoney, signContract } from "./finance.ts";
-import { refreshActiveRoster } from "./roster.ts";
+import { benchOf, refreshActiveRoster } from "./roster.ts";
 import { STARTING_ELO, TEAM_SIZE, ROSTER_MAX, type TransferRecord, type UniverseTeam } from "./types.ts";
 
 const MIN_UPGRADE_GAP = 30;  // elo improvement required to bother signing
@@ -106,6 +106,13 @@ export function runTransferWindow(
     seed(org);
     commit(org);
 
+    // Whoever dropped out of the active five (but stayed on the roster) was
+    // benched by this signing — surface it in the history note.
+    const benched = benchOf(org).filter(id => activeIds.includes(id));
+    const benchedNote = benched.length
+      ? `, benched ${benched.map(id => byId.get(id)?.handle ?? id).join(", ")}`
+      : "";
+
     transfers.push({
       day, playerId: pick.id, playerHandle: signing.handle,
       fromTeamId: pick.from?.id, fromTeamName: pick.from?.name,
@@ -115,7 +122,7 @@ export function runTransferWindow(
       day, playerIds: [...org.playerIds],
       note: (pick.from
         ? `Signed ${signing.handle} from ${pick.from.name} (${formatMoney(pick.fee)})`
-        : `Signed ${signing.handle} (free agent)`) + releasedNote,
+        : `Signed ${signing.handle} (free agent)`) + releasedNote + benchedNote,
     });
   }
 

@@ -31,7 +31,7 @@ import {
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
   EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, STARTING_BALANCE, YEAR_STATS_KEEP,
-  MAJOR_EVERY, MAJOR_FIELD, YEAR_LENGTH,
+  MAJOR_EVERY, MAJOR_FIELD, YEAR_LENGTH, pickOrgColor,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
   type PlayoffState, type RegionPlayoff, type TournamentTitle, type TitleMvp, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
@@ -608,6 +608,7 @@ export class UniverseMode {
     const playerById = new Map(u.players.map(p => [p.id, p] as const));
     for (const t of u.teams ?? []) {
       t.tier ??= "org";
+      t.color ??= pickOrgColor(t.id);
       t.rosterHistory ??= [{ day: t.foundedDay, playerIds: [...t.playerIds], note: "Founded" }];
       t.country ??= playerById.get(captainOf(t.playerIds, u.elos))?.country;
       // Wages/budget postdate the fees-only market: seed spendable cash from the
@@ -1057,6 +1058,7 @@ export class UniverseMode {
     const playerById = new Map(u.players.map(p => [p.id, p] as const));
     const elos = u.elos;
     const teamNameById = new Map((u.teams ?? []).map(t => [t.id, t.name] as const));
+    const teamColorById = new Map((u.teams ?? []).map(t => [t.id, t.color] as const));
 
     // Top performers across all completed matches today. Updates as more
     // matches finish, so even a single sim'd match shows the top of the day.
@@ -1110,7 +1112,7 @@ export class UniverseMode {
 
       const teams = document.createElement("div");
       teams.className = "umc-teams";
-      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.ctTeamId ? teamNameById.get(m.ctTeamId) : undefined, id => this.openTeam(id)));
+      teams.appendChild(rosterColumn("CT", m.ctPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.ctTeamId ? teamNameById.get(m.ctTeamId) : undefined, id => this.openTeam(id), m.ctTeamId ? teamColorById.get(m.ctTeamId) : undefined));
       const vs = document.createElement("div");
       vs.className = "umc-vs";
       if (m.status === "completed") {
@@ -1122,7 +1124,7 @@ export class UniverseMode {
         vs.textContent = "vs";
       }
       teams.appendChild(vs);
-      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.tTeamId ? teamNameById.get(m.tTeamId) : undefined, id => this.openTeam(id)));
+      teams.appendChild(rosterColumn("T", m.tPlayerIds, playerById, elos, m, id => this.openPlayer(id), m.tTeamId ? teamNameById.get(m.tTeamId) : undefined, id => this.openTeam(id), m.tTeamId ? teamColorById.get(m.tTeamId) : undefined));
       card.appendChild(teams);
 
       const actions = document.createElement("div");
@@ -2395,6 +2397,7 @@ function rosterColumn(
   onPick?: (playerId: string) => void,
   teamName?: string,   // crystallized org name; absent => pickup lobby (Team_Handle)
   onTeam?: (teamId: string) => void,
+  teamColor?: string,  // org brand color; overrides the side color for the name
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = `umc-roster ${side === "CT" ? "ct" : "t"}`;
@@ -2439,8 +2442,11 @@ function rosterColumn(
   const teamId = side === "CT" ? matchup.ctTeamId : matchup.tTeamId;
   const displayName = isOrg ? escapeHtml(teamName!) : `Team_${escapeHtml(shortName(captain))}`;
   const clickable = isOrg && teamId && onTeam;
+  // Established orgs render their name in their brand color; pickup lobbies keep
+  // the side color from CSS (.umc-roster.ct/.t).
+  const nameStyle = isOrg && teamColor ? ` style="color:${teamColor}"` : "";
   header.innerHTML =
-    `<div class="umc-team-name${isOrg ? " org" : ""}${clickable ? " clickable" : ""}">${displayName}${stackBadge}</div>` +
+    `<div class="umc-team-name${isOrg ? " org" : ""}${clickable ? " clickable" : ""}"${nameStyle}>${displayName}${stackBadge}</div>` +
     `<div class="umc-team-elo">Avg ${Math.round(avgElo)}</div>`;
   if (clickable) {
     const nameEl = header.querySelector(".umc-team-name") as HTMLElement;
@@ -3575,9 +3581,9 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
   header.className = "utm-header";
   header.innerHTML = `
     <div class="utm-identity">
-      <div class="utm-crest">${titles.length > 0 ? "🏆" : "★"}</div>
+      <div class="utm-crest"${team.color ? ` style="color:${team.color}"` : ""}>${titles.length > 0 ? "🏆" : "★"}</div>
       <div>
-        <div class="utm-name">${team.country ? `${flagEmoji(team.country)} ` : ""}${escapeHtml(team.name)}</div>
+        <div class="utm-name"${team.color ? ` style="color:${team.color}"` : ""}>${team.country ? `${flagEmoji(team.country)} ` : ""}${escapeHtml(team.name)}</div>
         <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · founded day ${team.foundedDay}` +
           `${titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : ""}` +
           `${team.disbandedDay ? ` · <span class="upp-retired">Disbanded (Day ${team.disbandedDay})</span>` : ""}</div>` +
