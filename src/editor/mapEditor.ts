@@ -103,6 +103,7 @@ export class MapEditor {
   private heat: HeatGrids | null = null;
   private heatLayer: HeatLayer = "none";
   private heatLayerSelect!: HTMLSelectElement;
+  private balance!: BalanceMode;
 
   constructor(parent: HTMLElement) {
     this.map = loadCustomMap() ?? makeMap();
@@ -299,7 +300,7 @@ export class MapEditor {
     // Balance tester, hosted in its own sub-panel; tests the live draft map.
     const balanceHost = document.createElement("div");
     analyze.appendChild(balanceHost);
-    new BalanceMode(balanceHost, {
+    this.balance = new BalanceMode(balanceHost, {
       getMap: () => this.map,
       onResult: (heat) => {
         this.heat = heat;
@@ -426,6 +427,17 @@ export class MapEditor {
     this.syncColorInputs();
     this.clearHeat();
     this.draw();
+  }
+
+  // Short reason the balance tester can't simulate the current draft, or null
+  // when it can. Mirrors the playable-map bar (validateAndStage) so the panel's
+  // Run button is only live on a map the sim won't choke on (it crashes without
+  // spawns to place agents at or sites to fight over).
+  private simBlockReason(): string | null {
+    const m = this.map;
+    if (m.ctSpawns.length < 5 || m.tSpawns.length < 5) return "Add ≥5 CT and ≥5 T spawns to run a sim.";
+    if (!m.bombsites.some(s => s.id === "A") || !m.bombsites.some(s => s.id === "B")) return "Place bombsites A and B to run a sim.";
+    return null;
   }
 
   // Drop heatmap data tied to the previous map: loading/creating a different
@@ -689,6 +701,9 @@ export class MapEditor {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+
+    // Keep the balance tester's Run button in step with the draft's validity.
+    this.balance?.setRunnable(this.simBlockReason());
   }
 
   // Overlay the selected heatmap layer. Tiles are colored by the layer's side

@@ -30,6 +30,8 @@ export class BalanceMode {
   private matrixToggle!: HTMLInputElement;
   private seriesToggle!: HTMLInputElement;
   private runBtn!: HTMLButtonElement;
+  private runHint!: HTMLElement;
+  private blockReason: string | null = null;
   private status!: HTMLElement;
   private resultsEl!: HTMLElement;
 
@@ -155,6 +157,12 @@ export class BalanceMode {
     runRow.appendChild(cancel);
     sidebar.appendChild(runRow);
 
+    // Shown when the host map can't be simulated (see setRunnable).
+    this.runHint = document.createElement("div");
+    this.runHint.className = "balance-run-hint";
+    this.runHint.style.display = "none";
+    sidebar.appendChild(this.runHint);
+
     this.status = document.createElement("div");
     this.status.className = "balance-status";
     sidebar.appendChild(this.status);
@@ -173,8 +181,24 @@ export class BalanceMode {
     if (!this.worker) return;
     this.worker.terminate();
     this.worker = null;
-    this.runBtn.disabled = false;
     this.status.textContent = "Cancelled";
+    this.applyRunnable();
+  }
+
+  // The host (map editor) calls this when the draft map changes: `reason` is a
+  // short message when the map can't be simulated (e.g. missing spawns/bombsites),
+  // or null when it can. Disables Run and surfaces the reason while blocked.
+  setRunnable(reason: string | null) {
+    if (reason === this.blockReason) return;
+    this.blockReason = reason;
+    this.applyRunnable();
+  }
+
+  private applyRunnable() {
+    // While a run is in flight the run lifecycle owns the button — don't touch it.
+    if (!this.worker) this.runBtn.disabled = this.blockReason != null;
+    this.runHint.textContent = this.blockReason ?? "";
+    this.runHint.style.display = this.blockReason ? "" : "none";
   }
 
   // Series mode owns the economy and always uses auto buys, so the loadout
@@ -190,6 +214,7 @@ export class BalanceMode {
   }
 
   private run() {
+    if (this.blockReason) { this.status.textContent = this.blockReason; return; }
     const rounds = Math.max(1, Math.min(100000, parseInt(this.roundsInput.value, 10) || 100));
     this.runBtn.disabled = true;
     this.resultsEl.innerHTML = "";
@@ -219,9 +244,9 @@ export class BalanceMode {
           : `Done — ${msg.stats.rounds} rounds in ${elapsed}s`;
         this.renderResults(msg.stats, msg.series);
         this.onResult?.(msg.heat ?? null);
-        this.runBtn.disabled = false;
         this.worker?.terminate();
         this.worker = null;
+        this.applyRunnable();
       } else if (msg.kind === "done-matrix") {
         const elapsed = ((performance.now() - this.runStartedAt) / 1000).toFixed(1);
         const totalRounds = msg.cells.reduce((a, c) => a + c.stats.rounds, 0);
@@ -229,9 +254,9 @@ export class BalanceMode {
         this.renderMatrix(msg.cells);
         // Matrix runs don't collect heat (no single map of positions to show).
         this.onResult?.(null);
-        this.runBtn.disabled = false;
         this.worker?.terminate();
         this.worker = null;
+        this.applyRunnable();
       }
     });
 

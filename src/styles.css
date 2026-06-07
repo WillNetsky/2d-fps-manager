@@ -65,6 +65,7 @@ html, body {
   margin-top: 10px;
 }
 .balance-run-row button { flex: 1; }
+.balance-run-hint { margin-top: 8px; font-size: 12px; color: var(--bad, #e57373); }
 .balance-panel .balance-results {
   margin-top: 12px;
   overflow-x: auto;
