@@ -38,7 +38,7 @@
 - [x] Load saved maps
 - [x] Save as new map
 - [x] Balancer should have the option to sim whole MR12 games, changes "rounds" to "series"
-- [ ] Grid tends to start missing both horizontal and vertical lines
+- [x] Grid tends to start missing both horizontal and vertical lines
 - [x] Heatmaps should clear when loading a new map
 
 ## Universe

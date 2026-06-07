@@ -92,7 +92,9 @@ export class MapEditor {
   private currentTool: Tool = "wall";
   private wallPaintMode: "set" | "clear" = "set"; // determined on mousedown for drag-paint
   private canvas!: HTMLCanvasElement;
+  private canvasWrap!: HTMLDivElement;
   private ctx!: CanvasRenderingContext2D;
+  private cell = 16; // device pixels per tile, recomputed by layoutCanvas()
   private isMouseDown = false;
   private lastTile: Vec2 | null = null;
   private root: HTMLElement;
@@ -248,9 +250,11 @@ export class MapEditor {
     // Canvas area
     const canvasWrap = document.createElement("div");
     canvasWrap.className = "editor-canvas-wrap";
+    this.canvasWrap = canvasWrap;
     this.canvas = document.createElement("canvas");
-    this.canvas.width = this.map.width * this.map.tileSize;
-    this.canvas.height = this.map.height * this.map.tileSize;
+    // Backing-store size is set by layoutCanvas() to match the displayed box
+    // (dpr-aware), so the browser never has to resample the canvas — fractional
+    // resampling is what dropped grid lines.
     this.canvas.className = "editor-canvas";
     canvasWrap.appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d")!;
@@ -263,6 +267,8 @@ export class MapEditor {
     });
     // Prevent context menu so right-drag could later be used
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    // Refit the canvas to the (resized) viewport so it stays crisp.
+    window.addEventListener("resize", () => this.draw());
 
     this.root.appendChild(canvasWrap);
 
@@ -356,13 +362,12 @@ export class MapEditor {
   }
 
   private tileAt(e: MouseEvent): Vec2 | null {
+    // Map the cursor straight from the displayed box to tile coords, so it's
+    // independent of the backing-store resolution / dpr.
     const rect = this.canvas.getBoundingClientRect();
-    const scaleX = this.canvas.width / rect.width;
-    const scaleY = this.canvas.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-    const tx = Math.floor(x / this.map.tileSize);
-    const ty = Math.floor(y / this.map.tileSize);
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const tx = Math.floor((e.clientX - rect.left) / rect.width * this.map.width);
+    const ty = Math.floor((e.clientY - rect.top) / rect.height * this.map.height);
     if (tx < 0 || ty < 0 || tx >= this.map.width || ty >= this.map.height) return null;
     return { x: tx, y: ty };
   }
@@ -632,9 +637,33 @@ export class MapEditor {
 
   // ---- Drawing ----
 
+  // Size the canvas so its backing store equals the displayed box in *device*
+  // pixels: pick the largest whole device-px tile size that fits the wrap (never
+  // upscaling past the map's native tileSize), then set the CSS size to
+  // backing / dpr. The browser then maps backing→CSS at the exact dpr ratio with
+  // no fractional resampling — which is what used to drop 1px grid lines. Only
+  // writes when a value actually changes, so steady-state painting is reflow-free.
+  private layoutCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const availW = Math.max(1, this.canvasWrap.clientWidth - 2) * dpr;
+    const availH = Math.max(1, this.canvasWrap.clientHeight - 2) * dpr;
+    const maxCell = this.map.tileSize * dpr;
+    const cell = Math.max(1, Math.floor(Math.min(
+      availW / this.map.width, availH / this.map.height, maxCell,
+    )));
+    this.cell = cell;
+    const bw = cell * this.map.width, bh = cell * this.map.height;
+    if (this.canvas.width !== bw) this.canvas.width = bw;
+    if (this.canvas.height !== bh) this.canvas.height = bh;
+    const cssW = `${bw / dpr}px`, cssH = `${bh / dpr}px`;
+    if (this.canvas.style.width !== cssW) this.canvas.style.width = cssW;
+    if (this.canvas.style.height !== cssH) this.canvas.style.height = cssH;
+  }
+
   private draw() {
+    this.layoutCanvas();
     const ctx = this.ctx;
-    const ts = this.map.tileSize;
+    const ts = this.cell;
     const floorCol = normalizeHex(this.map.floorColor) ?? "#1a1e27";
     const wallCol = normalizeHex(this.map.wallColor) ?? "#3a414f";
     ctx.fillStyle = "#0a0c10";
@@ -728,7 +757,7 @@ export class MapEditor {
     if (max <= 0) return;
 
     const ctx = this.ctx;
-    const ts = this.map.tileSize;
+    const ts = this.cell;
     for (let i = 0; i < grid.length; i++) {
       const v = grid[i];
       if (v <= 0) continue;
@@ -744,7 +773,7 @@ export class MapEditor {
   private drawZone(tiles: Vec2[], color: string, label: string) {
     if (!tiles.length) return;
     const ctx = this.ctx;
-    const ts = this.map.tileSize;
+    const ts = this.cell;
     for (const tile of tiles) {
       ctx.fillStyle = hexWithAlpha(color, 0.18);
       ctx.fillRect(tile.x * ts, tile.y * ts, ts, ts);
