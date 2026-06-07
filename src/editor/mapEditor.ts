@@ -195,6 +195,7 @@ export class MapEditor {
       this.map = makeMap();
       this.currentName = this.map.name || "Default";
       this.updateNameLabel();
+      this.clearHeat();
       this.draw();
     });
     mkBtn("Clear (all floor)", "", () => { this.clearMap(); this.draw(); });
@@ -423,7 +424,20 @@ export class MapEditor {
     this.map.name = this.currentName;
     this.updateNameLabel();
     this.syncColorInputs();
+    this.clearHeat();
     this.draw();
+  }
+
+  // Drop heatmap data tied to the previous map: loading/creating a different
+  // map invalidates the old sim's death/kill/occupancy grids, so reset the
+  // overlay to "off" and disable the selector until the next sim run.
+  private clearHeat() {
+    this.heat = null;
+    this.heatLayer = "none";
+    if (this.heatLayerSelect) {
+      this.heatLayerSelect.value = "none";
+      this.heatLayerSelect.disabled = true;
+    }
   }
 
   private saveMap(saveAs: boolean) {
@@ -541,6 +555,7 @@ export class MapEditor {
     this.map.name = picked;
     this.updateNameLabel();
     this.syncColorInputs();
+    this.clearHeat();
     this.draw();
   }
 
