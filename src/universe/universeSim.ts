@@ -473,20 +473,17 @@ export function generateMatchups(
     // — so a stacked side never stomps five randoms. Odd teams out sit the day.
     const pairings = pairTeams(teams, eloOf);
 
-    // The strongest pairing plays a Bo3 "tournament" series — but only when it's
-    // STRICTLY stronger than the runner-up (a tie at the top means no clear
-    // headliner, so everyone plays Bo1) and the rotation has ≥3 maps for a
-    // distinct map each game.
+    // Order the board strongest-first so the featured match leads. Every daily
+    // ladder match is a single map (Bo1), org-vs-org and pickup alike — only
+    // tournament brackets play series.
     pairings.sort((a, b) => b.elo - a.elo);
-    const topIsSeries = pairings.length >= 2 && pairings[0].elo > pairings[1].elo && pool >= 3;
 
-    pairings.forEach((pr, pi) => {
+    pairings.forEach((pr) => {
       const aStartsCt = Math.random() < 0.5;
       const ct = aStartsCt ? pr.a : pr.b;
       const t  = aStartsCt ? pr.b : pr.a;
       // Surface every friend-stack (2+ that queued together) in this lobby.
       const parties = [...ct.parties, ...t.parties];
-      const series = pi === 0 && topIsSeries;
       // Org sides carry their id directly. A free-agent premade five enters the
       // stack→org pipeline and is tagged only once it promotes to a tracked org;
       // until then it plays as a pickup lobby.
@@ -501,9 +498,8 @@ export function generateMatchups(
         ctPlayerIds: ct.players.map(p => p.id),
         tPlayerIds:  t.players.map(p => p.id),
         status: "pending",
-        // Bo1 picks its seed/map up front; a series assigns them per game at
-        // sim time (each game has its own).
-        ...(series ? { bestOf: 3 as const } : { seed: newSeed(), mapIndex: Math.floor(Math.random() * pool) }),
+        // Bo1: pick the seed/map up front.
+        seed: newSeed(), mapIndex: Math.floor(Math.random() * pool),
         region,
         ...(parties.length > 0 ? { parties } : {}),
         ...(ctTeamId ? { ctTeamId } : {}),
