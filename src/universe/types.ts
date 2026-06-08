@@ -281,6 +281,11 @@ export interface UniverseTeam {
   // frozen — excluded from invitees, rankings, and "current team" lookups — but
   // kept for history/links (titles, past results). Absent while active.
   disbandedDay?: number;
+  // Consecutive event cycles a PRO org has been under-performing (bottom-third
+  // ranking or a long losing streak). Resets when results recover; at
+  // PRO_PATIENCE_CYCLES the org folds, since pros are expected to win. Only
+  // tracked for pro orgs; absent/0 otherwise.
+  slumpCycles?: number;
 }
 
 export interface PendingDay {
@@ -446,12 +451,25 @@ export function pickOrgColor(seed: string): string {
   return ORG_COLORS[Math.abs(h) % ORG_COLORS.length];
 }
 
-export const STARTING_BALANCE = 250_000;  // seed cash a new org crystallizes with
+export const STARTING_BALANCE = 250_000;  // legacy seed; now only the load-time backfill default
 export const WAGE_RATE = 0.05;            // per-cycle wage = this × player market value
 export const BASE_SPONSOR = 30_000;       // flat sponsorship every active org draws
 export const SPONSOR_PER_RP = 50;         // extra sponsorship per ranking point (results pay)
 export const FOLD_THRESHOLD = -200_000;   // balance below this → the org folds (insolvent)
 export const CONTRACT_LENGTH_DAYS = 112;  // base contract term (~2 seasons); jittered per signing
+
+// ---- pro tier economy ------------------------------------------------------
+// Amateur orgs are player-run and don't pay salaries; they crystallize seeded
+// only with their founder's personal wallet. Once a team's lifetime earnings
+// cross PRO_EARNINGS_THRESHOLD its players expect to be paid — it turns pro (if
+// it can afford the wage bill) or bleeds talent. Pro orgs can also be founded
+// top-down with a big balance and an empty roster they fill from free agency.
+export const PRO_EARNINGS_THRESHOLD = 750_000; // lifetime earnings → players expect pay
+export const ORG_PRIZE_PLAYER_SHARE = 0.70;    // amateur prize fraction split among the five (org keeps the rest)
+export const PRO_STARTING_BALANCE = 2_000_000; // seed for a top-down pro org
+export const UNPAID_MORALE_HIT = 6;            // per-cycle morale loss for unpaid players who expect pay
+export const PRO_ORGS_PER_REGION = 2;          // target top-down pro orgs per region, topped up yearly
+export const PRO_PATIENCE_CYCLES = 6;          // under-performing cycles a pro tolerates before folding
 // How many most-recent years of per-player breakdown to retain in
 // `Universe.yearStats`. Older years drop from the per-year view (their games are
 // still counted in lifetime `careers`), keeping core storage bounded.

@@ -1,4 +1,5 @@
 import type { Player } from "../domain/types.ts";
+import { regionOf } from "../domain/countries.ts";
 
 // Relationship bounds (mirrors the -100..100 scale documented on Player).
 const MAX_REL = 100;
@@ -35,6 +36,65 @@ export function seedCliqueBonds(group: Player[], bond: number): void {
     for (const b of group) {
       if (a.id === b.id) continue;
       a.relationships[b.id] = clampRel(Math.max(a.relationships[b.id] ?? 0, bond));
+    }
+  }
+}
+
+// Seed a starting social graph so a brand-new universe isn't a blank slate. Most
+// players begin already sitting in a friend group of varying tightness — from
+// loose acquaintances (some pairs below FRIEND_THRESHOLD) up to ready-made four-
+// and five-man crews that stack on day one and immediately enter the stack→org
+// climb — with scattered cross-group acquaintances and the odd rivalry between
+// them, plus a minority of friendless newcomers. Region-locked, since friendships
+// only matter within a player's own scene. Call once, at universe creation.
+export function seedInitialRelationships(players: Player[], rng: () => number = Math.random): void {
+  const byRegion = new Map<string, Player[]>();
+  for (const p of players) {
+    const r = regionOf(p.country);
+    (byRegion.get(r) ?? byRegion.set(r, []).get(r)!).push(p);
+  }
+
+  for (const pool of byRegion.values()) {
+    // Fisher–Yates shuffle so cliques aren't correlated with generation order.
+    const order = [...pool];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+
+    // Carve the shuffled pool into friend groups of varying size and cohesion.
+    let i = 0;
+    while (i < order.length) {
+      if (rng() < 0.22) { i++; continue; }            // ~22% start friendless
+      const roll = rng();                             // size: mostly pairs/trios
+      const size = roll < 0.38 ? 2 : roll < 0.66 ? 3 : roll < 0.86 ? 4 : 5;
+      const group = order.slice(i, i + size);
+      i += group.length;
+      if (group.length < 2) break;
+      // Cohesion varies group to group: tight crews sit well above the friendship
+      // bar (they group up); loose ones straddle it (some pairs won't).
+      const base = 30 + rng() * 55;                   // 30..85
+      for (const a of group) for (const b of group) {
+        if (a.id === b.id) continue;
+        const v = Math.round(clampRel(base + (rng() * 2 - 1) * 18));
+        a.relationships[b.id] = Math.max(a.relationships[b.id] ?? 0, v);
+      }
+    }
+
+    // Loose cross-group acquaintances and a few rivalries, so the graph is a
+    // connected web rather than a set of islands.
+    const links = Math.floor(pool.length * 0.6);
+    for (let k = 0; k < links; k++) {
+      const a = pool[Math.floor(rng() * pool.length)];
+      const b = pool[Math.floor(rng() * pool.length)];
+      if (a.id === b.id) continue;
+      const v = Math.round((rng() * 2 - 1) * 35);     // -35..35
+      if (v === 0) continue;
+      a.relationships[b.id] = clampRel((a.relationships[b.id] ?? 0) + v);
+      // Positive bonds are usually mutual; rivalries can be one-sided.
+      if (v > 0 || rng() < 0.5) {
+        b.relationships[a.id] = clampRel((b.relationships[a.id] ?? 0) + Math.round(v * (0.5 + rng() * 0.5)));
+      }
     }
   }
 }

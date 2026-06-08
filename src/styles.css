@@ -1152,6 +1152,9 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .utm-crest { font-size: 2.1rem; }
 .utm-name { font-family: var(--font-display); font-size: 1.5rem; font-weight: 700; }
 .utm-meta { color: var(--muted, #8a93a6); font-size: .85rem; }
+.utm-tier { font-weight: 700; text-transform: uppercase; font-size: .72rem; letter-spacing: .04em; padding: .05rem .35rem; border-radius: .25rem; }
+.utm-tier-pro { color: #0b0e14; background: var(--accent, #e8b84b); }
+.utm-tier-amateur { color: var(--muted, #8a93a6); border: 1px solid var(--muted, #8a93a6); }
 .utm-headline-stats { display: flex; flex-wrap: wrap; gap: 1.1rem; }
 .utm-hl { text-align: center; }
 .utm-hl-label { color: var(--muted, #8a93a6); font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; }
@@ -1556,7 +1559,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Top performers (day MVP cards above the matchup grid) */
 .universe-top-performers {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
-  margin-bottom: 16px;
+  /* Pin the day's top performers so they stay visible while scrolling the board.
+     Opaque background + full-bleed padding hide cards scrolling underneath. */
+  position: sticky; top: 0; z-index: 5;
+  background: var(--bg); padding: 10px 24px; margin: 0 -24px 12px;
 }
 .utp-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 6px;

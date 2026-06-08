@@ -182,6 +182,11 @@ export function makePlayer(region?: Region): Player {
     // Broad spread so the pool mixes social/fun players with ambitious ones.
     ambition,
     money: STARTING_PER_PLAYER,
+    // Career economy starts empty: new players are broke until they earn prize
+    // splits / wages. A freshly crystallized amateur org seeded from a broke
+    // founder is exactly the "can't pay players" state we want.
+    wallet: 0,
+    careerEarnings: 0,
     // Start form at the personality baseline (fun players sit higher/happier).
     mood: baselineMorale,
     morale: baselineMorale,

@@ -5,7 +5,7 @@ import {
 } from "../domain/countries.ts";
 import { loadCustomMap, loadSavedMapsAll, savedMapsList } from "../editor/mapEditor.ts";
 import { defaultMap } from "../domain/defaultMaps.ts";
-import { decayRelationships, seedCliqueBonds } from "./chemistry.ts";
+import { decayRelationships, seedCliqueBonds, seedInitialRelationships } from "./chemistry.ts";
 import { observeMatch } from "./observeMatch.ts";
 import {
   generateMatchups, newSeed, simOneMatchup, foldOutcome, recordMatchupCareers,
@@ -19,7 +19,7 @@ import { runTransferWindow } from "./transferMarket.ts";
 import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
-import { regionPayouts, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, MAJOR_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
+import { regionPayouts, awardPrize, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, MAJOR_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runPayExpectationCycle, runProDiscipline, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
 import { activeLineup, benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
@@ -31,7 +31,7 @@ import {
 import {
   PLAYERS_PER_REGION, MAX_PLAYERS_PER_REGION, STARTING_ELO, TEAM_SIZE,
   EVENT_INTERVAL_DAYS, RANKING_DECAY, RECRUIT_BOND, TITLES_LOG_MAX, TRANSFERS_LOG_MAX, STARTING_BALANCE, YEAR_STATS_KEEP,
-  MAJOR_EVERY, MAJOR_FIELD, YEAR_LENGTH, pickOrgColor,
+  MAJOR_EVERY, MAJOR_FIELD, SWISS_FIELD, YEAR_LENGTH, pickOrgColor,
   type BracketMatch, type Circuit, type CareerStats, type Clutch, type CompletedDay, type GameResult, type Matchup, type PlayerMatchStats,
   type PlayoffState, type RegionPlayoff, type TournamentTitle, type TitleMvp, type Universe, type UniverseTeam, type VetoStep,
 } from "./types.ts";
@@ -432,6 +432,9 @@ export class UniverseMode {
     for (const region of regions) {
       for (let i = 0; i < perRegion; i++) players.push(makePlayer(region));
     }
+    // Seed a starting social graph so day one already has friend groups stacking
+    // (rather than the pool building relationships from a blank slate).
+    seedInitialRelationships(players);
     const elos: Record<string, number> = {};
     for (const p of players) elos[p.id] = STARTING_ELO;
     this.universe = {
@@ -605,6 +608,9 @@ export class UniverseMode {
     // Tiers/roster history postdate the original orgs: every existing tracked team
     // was a crystallized org, so backfill that tier and a founding lineup entry.
     u.stacks ??= [];
+    // Player career economy postdates the original pool — start everyone's wallet
+    // and lifetime income at zero on pre-economy saves.
+    for (const p of u.players) { p.wallet ??= 0; p.careerEarnings ??= 0; }
     const playerById = new Map(u.players.map(p => [p.id, p] as const));
     for (const t of u.teams ?? []) {
       t.tier ??= "org";
@@ -749,10 +755,11 @@ export class UniverseMode {
   }
 
   // Seed a tournament in every region that can field one. Invitees are the top
-  // INVITE_FIELD by ranking points / Elo, drawn from tracked orgs AND recurring
+  // SWISS_FIELD by ranking points / Elo, drawn from tracked orgs AND recurring
   // full-5 friend-stacks — so brackets fill out early and a stack good enough to
   // qualify graduates into a tracked org (it can then win prize money + ranking
-  // points like anyone else). Decays standing points first so the ranking tracks
+  // points like anyone else). Free agents only backfill any slots real teams
+  // leave open. Decays standing points first so the ranking tracks
   // recent form. No-op (just rearm the timer) if nobody can play.
   private startEvent(u: Universe) {
     const c = this.ensureCircuit(u);
@@ -789,7 +796,10 @@ export class UniverseMode {
     const c = this.ensureCircuit(u);
     const byId = new Map(u.players.map(p => [p.id, p] as const));
     const isActive = (id: string) => { const p = byId.get(id); return !!p && !p.retired; };
-    const invitees = eventInvitees(u.teams ?? [], u.stacks ?? [], u.elos, isActive);
+    // Invite up to a full Swiss field of REAL teams (orgs + recurring stacks) by
+    // ranking/Elo; free agents only top up whatever's left (see below). So a
+    // region that already has 16 qualified teams runs an all-real-team event.
+    const invitees = eventInvitees(u.teams ?? [], u.stacks ?? [], u.elos, isActive, SWISS_FIELD);
     const ctx = this.teamCtx(u);
     // Players already committed to a team or seeded stack — never drafted onto a
     // free-agent contender. Grows as contenders form so no one is double-picked.
@@ -809,11 +819,13 @@ export class UniverseMode {
         const team = (u.teams ?? []).find(t => t.id === id);
         if (team) seeded.push(team);
       }
-      // Free-agent contenders: strong ungrouped players band into fresh orgs, but
-      // only while they out-seed the weakest qualified team (no field padding).
-      if (seeded.length >= 2) {
+      // Free-agent contenders fill ONLY the slots real teams left open (up to a
+      // full Swiss field), and only while they out-seed the weakest qualified team
+      // — so a full field of real teams pulls in no free agents at all.
+      const faSlots = SWISS_FIELD - seeded.length;
+      if (seeded.length >= 2 && faSlots > 0) {
         const weakest = Math.min(...seeded.map(t => t.elo ?? STARTING_ELO));
-        for (const roster of freeAgentContenders(region, u.players, u.elos, committed, weakest)) {
+        for (const roster of freeAgentContenders(region, u.players, u.elos, committed, weakest, faSlots)) {
           seedCliqueBonds(roster.map(id => byId.get(id)!).filter(Boolean), RECRUIT_BOND);
           const id = crystallizeTeam(ctx, region, roster, u.elos);
           const team = (u.teams ?? []).find(t => t.id === id);
@@ -842,10 +854,11 @@ export class UniverseMode {
     const sinceDay = day - (u.playoffs?.day ?? 0);
     const titles = (u.titles ??= []);
     for (const rp of u.playoffs?.regions ?? []) {
-      // Prize money: into spendable balance AND the lifetime earnings stat.
+      // Prize money: lifetime earnings always bank the full amount; the cash is
+      // split by tier (pro keeps it all; amateurs split most to players' wallets).
       for (const [teamId, amt] of regionPayouts(rp)) {
         const t = byId.get(teamId);
-        if (t) { t.balance = (t.balance ?? 0) + amt; t.earnings = (t.earnings ?? 0) + amt; }
+        if (t) awardPrize(t, playerById, amt);
       }
       for (const [teamId, pts] of rankingPointsFor(rp)) {
         const t = byId.get(teamId);
@@ -877,12 +890,14 @@ export class UniverseMode {
     // orgs still insolvent. Roster moves flow into rosterHistory → news; the
     // structured transfer log feeds the Market screen.
     const teams = u.teams ?? [];
+    runPayExpectationCycle(teams, u.players, u.elos, day); // successful amateurs turn pro or bleed talent
     runContractCycle(teams, u.players, day); // renew/expire deals; release some to FA
-    runFinancialCycle(teams, u.players);
+    runFinancialCycle(teams, u.players);     // sponsorship; pro wages → player wallets
     const log = (u.transfers ??= []);
     log.push(...runTransferWindow(teams, u.players, u.elos, day));
     if (log.length > TRANSFERS_LOG_MAX) log.splice(0, log.length - TRANSFERS_LOG_MAX);
     runBenchCycle(teams, u.players, u.elos, day); // unhappy bench players walk
+    runProDiscipline(teams, day);            // pros that keep losing fold (failed expectations)
     foldInsolventOrgs(teams, day);
   }
 
@@ -1230,7 +1245,17 @@ export class UniverseMode {
     if (!m || m.status === "completed") return;
     this.runInstantSim(m);
     this.persist();
+    this.renderKeepingScroll();
+  }
+
+  // Re-render in place without yanking the view back to the top. render() rebuilds
+  // the whole body (a fresh scroll container), so capture the current scroll
+  // offset and reapply it to the new .universe-body afterward.
+  private renderKeepingScroll() {
+    const prev = (this.root.querySelector(".universe-body") as HTMLElement | null)?.scrollTop ?? 0;
     this.render();
+    const next = this.root.querySelector(".universe-body") as HTMLElement | null;
+    if (next) next.scrollTop = prev;
   }
 
   // Single-match instant sim (the per-card "Sim" button). One match is cheap, so
@@ -3163,6 +3188,7 @@ function playerPage(
     <div class="upp-headline-stats">
       <div class="upp-hl"><div class="upp-hl-label">Elo</div><div class="upp-hl-val">${elo}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Value</div><div class="upp-hl-val">${formatMoney(p.value ?? 0)}</div></div>
+      <div class="upp-hl"><div class="upp-hl-label">Wallet</div><div class="upp-hl-val">${formatMoney(p.wallet ?? 0)}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Matches</div><div class="upp-hl-val">${career.played}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Record</div><div class="upp-hl-val">${career.wins}-${career.losses}</div></div>
       <div class="upp-hl"><div class="upp-hl-label">Win %</div><div class="upp-hl-val">${career.played > 0 ? Math.round((career.wins / career.played) * 100) : 0}%</div></div>
@@ -3214,6 +3240,7 @@ function playerPage(
   dyn.className = "upp-dyn";
   dyn.innerHTML = `
     <div class="upp-dyn-item"><span>Market value</span><b>${formatMoney(p.value ?? 0)}</b></div>
+    <div class="upp-dyn-item"><span>Career earnings</span><b>${formatMoney(p.careerEarnings ?? 0)}</b></div>
     <div class="upp-dyn-item"><span>Contract</span>${contractHtml}</div>
     <div class="upp-dyn-item"><span>Form</span><b style="color:${ratingColor(p.morale)}" title="${Math.round(p.morale)}/100 morale">${formLabel(p.morale)}</b></div>
     <div class="upp-dyn-item"><span>Values</span><b title="${p.ambition ?? 50}/100 ambition">${valuesLabel(p.ambition ?? 50)}</b></div>
@@ -3584,7 +3611,7 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
       <div class="utm-crest"${team.color ? ` style="color:${team.color}"` : ""}>${titles.length > 0 ? "🏆" : "★"}</div>
       <div>
         <div class="utm-name"${team.color ? ` style="color:${team.color}"` : ""}>${team.country ? `${flagEmoji(team.country)} ` : ""}${escapeHtml(team.name)}</div>
-        <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · founded day ${team.foundedDay}` +
+        <div class="utm-meta">${REGION_LABELS[team.region] ?? team.region} · <span class="utm-tier utm-tier-${team.tier === "pro" ? "pro" : "amateur"}">${team.tier === "pro" ? "Pro" : "Amateur"}</span> · founded day ${team.foundedDay}` +
           `${titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : ""}` +
           `${team.disbandedDay ? ` · <span class="upp-retired">Disbanded (Day ${team.disbandedDay})</span>` : ""}</div>` +
           (leadership ? `<div class="utm-lead">${leadership}</div>` : "") + `
@@ -3597,8 +3624,8 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
       <div class="utm-hl"><div class="utm-hl-label">Round diff</div><div class="utm-hl-val">${diff >= 0 ? "+" : ""}${diff}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Streak</div><div class="utm-hl-val" style="color:${team.streak > 0 ? "var(--good)" : team.streak < 0 ? "var(--bad)" : "inherit"}">${streak}</div></div>
       <div class="utm-hl"><div class="utm-hl-label">Ranking pts</div><div class="utm-hl-val">${Math.round(team.rankingPoints ?? 0)}</div></div>
-      <div class="utm-hl"><div class="utm-hl-label">Balance</div><div class="utm-hl-val" style="color:${(team.balance ?? 0) < 0 ? "var(--bad)" : "var(--good)"}">${formatMoney(team.balance ?? 0)}</div></div>
-      <div class="utm-hl"><div class="utm-hl-label">Wage bill</div><div class="utm-hl-val">${formatMoney(wageBill(team, playerById))}/cyc</div></div>
+      <div class="utm-hl"><div class="utm-hl-label">Balance</div><div class="utm-hl-val" style="color:${(team.balance ?? 0) < 0 ? "var(--bad)" : "var(--good)"}">${formatMoney(team.balance ?? 0)}</div></div>` +
+      (team.tier === "pro" ? `<div class="utm-hl"><div class="utm-hl-label">Wage bill</div><div class="utm-hl-val">${formatMoney(wageBill(team, playerById))}/cyc</div></div>` : "") + `
       <div class="utm-hl"><div class="utm-hl-label">Earnings</div><div class="utm-hl-val">${formatMoney(team.earnings ?? 0)}</div></div>
     </div>`;
   root.appendChild(header);

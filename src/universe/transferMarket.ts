@@ -61,13 +61,15 @@ export function runTransferWindow(
     // signing would push to the bench).
     const activeIds = (org.activeIds ?? org.playerIds.slice(0, TEAM_SIZE));
     const weakElo = Math.min(...activeIds.map(eloOf));
+    // Pros are expected to win, so they chase smaller upgrades (and churn harder).
+    const upgradeGap = org.tier === "pro" ? MIN_UPGRADE_GAP / 2 : MIN_UPGRADE_GAP;
 
     // Best affordable, willing in-region upgrade (free agent or poach).
     let best: { id: string; from?: UniverseTeam; fee: number; elo: number } | null = null;
     const consider = (id: string, from?: UniverseTeam) => {
       if (moved.has(id)) return;
       const e = eloOf(id);
-      if (e < weakElo + MIN_UPGRADE_GAP) return;          // not enough of an upgrade
+      if (e < weakElo + upgradeGap) return;               // not enough of an upgrade
       if (from && teamElo(org) < teamElo(from)) return;   // players don't move to a weaker org
       const fee = from ? valueOf(id) : 0;                 // free agents are free
       if (fee > budget) return;

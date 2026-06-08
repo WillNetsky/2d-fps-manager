@@ -88,7 +88,14 @@ export interface Player {
   ambition: number;
 
   // Dynamic state — updated round to round.
-  money: number;       // per-player bank
+  money: number;       // per-player bank (in-match CS buy economy; reset each match)
+  // Persistent personal career cash, distinct from the in-match `money` bank.
+  // Grows from amateur prize splits and (once on a pro org) wages; spent to seed
+  // an org the player founds. Absent on saves predating the player economy → 0.
+  wallet?: number;
+  // Lifetime personal income (prize splits + wages), a stat for the player page.
+  // Absent on pre-economy saves → 0.
+  careerEarnings?: number;
   // Market value in dollars, derived from elo/age/form. Recomputed once per sim
   // day (see finance.recomputePlayerValues); absent until first computed.
   value?: number;

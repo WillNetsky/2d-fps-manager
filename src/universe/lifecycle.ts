@@ -13,9 +13,15 @@
 
 import type { Player, PlayerStats } from "../domain/types.ts";
 import { regionOf, REGION_ORDER, type Region } from "../domain/countries.ts";
-import { makePlayer } from "../domain/factory.ts";
-import { FRIEND_THRESHOLD } from "./chemistry.ts";
-import { STARTING_ELO, DISBAND_IDLE_DAYS, type UniverseTeam } from "./types.ts";
+import { makePlayer, generateManager } from "../domain/factory.ts";
+import { generateTeamName } from "../domain/teamNames.ts";
+import { FRIEND_THRESHOLD, seedCliqueBonds } from "./chemistry.ts";
+import { signContract } from "./finance.ts";
+import { refreshActiveRoster } from "./roster.ts";
+import {
+  STARTING_ELO, DISBAND_IDLE_DAYS, TEAM_SIZE, pickOrgColor,
+  PRO_ORGS_PER_REGION, PRO_STARTING_BALANCE, type UniverseTeam,
+} from "./types.ts";
 
 // ---- Aging & rating drift -------------------------------------------------
 //
@@ -254,12 +260,71 @@ export function disbandStaleOrgs(teams: UniverseTeam[], players: Player[], day: 
   return disbanded;
 }
 
+// ---- Top-down pro orgs -----------------------------------------------------
+
+// Unlike grassroots orgs (which crystallize from a friend-stack and start broke),
+// a pro org is founded top-down: a backed club with a big balance and a hired
+// manager, but no roster — it signs the best available free agents to field a
+// five. Each season we top every region up to PRO_ORGS_PER_REGION such clubs,
+// provided enough free agents exist to build a competitive lineup. Returns the
+// orgs founded.
+export function spawnProOrgs(
+  teams: UniverseTeam[], players: Player[], elos: Record<string, number>, day: number,
+  rng: () => number = Math.random,
+): UniverseTeam[] {
+  const onOrg = new Set<string>();
+  for (const t of teams) if (!t.disbandedDay) for (const id of t.playerIds) onOrg.add(id);
+
+  const founded: UniverseTeam[] = [];
+  const eloOf = (id: string) => elos[id] ?? STARTING_ELO;
+  for (const region of REGION_ORDER) {
+    let count = teams.filter(t => !t.disbandedDay && t.tier === "pro" && t.region === region).length;
+    while (count < PRO_ORGS_PER_REGION) {
+      const fas = players
+        .filter(p => !p.retired && !onOrg.has(p.id) && regionOf(p.country) === region)
+        .sort((a, b) => eloOf(b.id) - eloOf(a.id));
+      if (fas.length < 3) break; // not enough talent free to build on
+      const signed = fas.slice(0, TEAM_SIZE);
+      const ids = signed.map(p => p.id);
+      const id = `t${teams.length}_${Date.now().toString(36)}${Math.floor(rng() * 1e4).toString(36)}`;
+      const manager = generateManager(region, day);
+      const team: UniverseTeam = {
+        id,
+        name: generateTeamName(rng),
+        region,
+        color: pickOrgColor(id),
+        country: manager.country,
+        manager,
+        playerIds: [...ids],
+        activeIds: [...ids],
+        rosterKey: [...ids].sort().join(","),
+        tier: "pro",
+        rosterHistory: [{ day, playerIds: [...ids], note: "Founded (pro)" }],
+        elo: Math.round(ids.reduce((s, x) => s + eloOf(x), 0) / ids.length),
+        foundedDay: day,
+        lastPlayedDay: day,
+        wins: 0, losses: 0, roundsWon: 0, roundsLost: 0, streak: 0,
+        balance: PRO_STARTING_BALANCE,
+        earnings: 0,
+      };
+      for (const p of signed) { signContract(p, day, rng); onOrg.add(p.id); }
+      seedCliqueBonds(signed, FRIEND_THRESHOLD + 15);
+      refreshActiveRoster(team, elos);
+      teams.push(team);
+      founded.push(team);
+      count++;
+    }
+  }
+  return founded;
+}
+
 // ---- Orchestration --------------------------------------------------------
 
 export interface LifecycleSummary {
   retired: number;
   debuted: number;
   disbanded: number;
+  proOrgsFounded: number;
 }
 
 // Run a full season's lifecycle: age + drift, retire, replenish, reconcile orgs.
@@ -274,7 +339,8 @@ export function runSeasonLifecycle(
   const youth = replenishYouth(players, elos, retiredByRegion, rng);
   reconcileOrgRosters(teams, players, elos, day, rng);
   const disbanded = disbandStaleOrgs(teams, players, day);
+  const proOrgsFounded = spawnProOrgs(teams, players, elos, day, rng).length;
   let retired = 0;
   for (const n of retiredByRegion.values()) retired += n;
-  return { retired, debuted: youth.length, disbanded };
+  return { retired, debuted: youth.length, disbanded, proOrgsFounded };
 }

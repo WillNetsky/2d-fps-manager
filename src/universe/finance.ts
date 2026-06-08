@@ -7,7 +7,8 @@ import { FRIEND_THRESHOLD } from "./chemistry.ts";
 import { benchOf, refreshActiveRoster } from "./roster.ts";
 import {
   STARTING_ELO, TEAM_SIZE, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD,
-  CONTRACT_LENGTH_DAYS, BENCH_MORALE_HIT,
+  CONTRACT_LENGTH_DAYS, BENCH_MORALE_HIT, ORG_PRIZE_PLAYER_SHARE, EVENT_INTERVAL_DAYS,
+  PRO_EARNINGS_THRESHOLD, UNPAID_MORALE_HIT, PRO_PATIENCE_CYCLES,
   type RegionPlayoff, type Universe, type UniverseTeam,
 } from "./types.ts";
 
@@ -82,6 +83,30 @@ export function regionPayouts(rp: RegionPlayoff): Map<string, number> {
   return placementPayouts(rp, rp.intl ? MAJOR_PRIZES : PLAYOFF_PRIZES);
 }
 
+// Credit one team's prize winnings. `earnings` (the lifetime / pay-expectation
+// metric) always banks the full amount. Where the cash lands differs by tier:
+// a PRO org keeps it all in the club balance (it pays salaries from there);
+// an amateur org keeps only a cut (1 - ORG_PRIZE_PLAYER_SHARE) and splits the
+// rest across its active five into their personal wallets — how grassroots
+// players bank the savings that later seed a founded org.
+export function awardPrize(team: UniverseTeam, byId: Map<string, Player>, amt: number): void {
+  team.earnings = (team.earnings ?? 0) + amt;
+  if (team.tier === "pro") {
+    team.balance = (team.balance ?? 0) + amt;
+    return;
+  }
+  team.balance = (team.balance ?? 0) + Math.round(amt * (1 - ORG_PRIZE_PLAYER_SHARE));
+  const active = team.activeIds ?? team.playerIds.slice(0, TEAM_SIZE);
+  if (active.length === 0) { team.balance = (team.balance ?? 0) + Math.round(amt * ORG_PRIZE_PLAYER_SHARE); return; }
+  const share = Math.round((amt * ORG_PRIZE_PLAYER_SHARE) / active.length);
+  for (const id of active) {
+    const p = byId.get(id);
+    if (!p) continue;
+    p.wallet = (p.wallet ?? 0) + share;
+    p.careerEarnings = (p.careerEarnings ?? 0) + share;
+  }
+}
+
 // ---- player market value ---------------------------------------------------
 
 // Below this elo a player has essentially no market value; value scales off the
@@ -141,6 +166,58 @@ export function signContract(p: Player, day: number, rng: () => number = Math.ra
   p.contract = { salary: marketWage(p), until: day + term };
 }
 
+// Once an amateur org's lifetime earnings cross PRO_EARNINGS_THRESHOLD, its
+// players expect to be paid. Each such org either:
+//   - turns PRO, if it can comfortably cover a wage cycle (balance >= 2× the
+//     projected wage bill): tier flips and the roster is put on contracts; OR
+//   - stays amateur and bleeds — every active player loses morale, and an
+//     unhappy, uncontracted player (the more ambitious, the likelier) walks to
+//     free agency, mirroring runBenchCycle's exit roll.
+// Run BEFORE runContractCycle so a freshly promoted org is treated as pro this
+// cycle. Returns the ids that quit over pay.
+export function runPayExpectationCycle(
+  teams: UniverseTeam[], players: Player[], elos: Record<string, number>, day: number,
+  rng: () => number = Math.random,
+): string[] {
+  const byId = new Map(players.map(p => [p.id, p] as const));
+  const quit: string[] = [];
+  for (const t of teams) {
+    if (t.disbandedDay || t.playerIds.length === 0) continue;
+    if (t.tier !== "org" || (t.earnings ?? 0) < PRO_EARNINGS_THRESHOLD) continue;
+
+    const bill = wageBill(t, byId); // projected, off market wages (no contracts yet)
+    if ((t.balance ?? 0) >= bill * 2) {
+      t.tier = "pro";
+      for (const id of t.playerIds) { const p = byId.get(id); if (p) signContract(p, day, rng); }
+      (t.rosterHistory ??= []).push({ day, playerIds: [...t.playerIds], note: "Turned professional" });
+      continue;
+    }
+
+    // Can't afford it — the squad stews, and the unhappiest may leave.
+    let changed = false;
+    const active = t.activeIds ?? t.playerIds.slice(0, TEAM_SIZE);
+    for (const id of active) {
+      const p = byId.get(id);
+      if (!p) continue;
+      p.morale = Math.max(0, Math.min(100, p.morale - UNPAID_MORALE_HIT));
+    }
+    for (const id of [...t.playerIds]) {
+      if (t.playerIds.length <= 1) break;
+      const p = byId.get(id);
+      if (!p || p.contract) continue;
+      const wantsOut = p.morale < 45;
+      if (wantsOut && rng() < 0.2 + p.ambition / 200) {
+        t.playerIds = t.playerIds.filter(x => x !== id);
+        quit.push(id);
+        changed = true;
+        (t.rosterHistory ??= []).push({ day, playerIds: [...t.playerIds], note: `${p.handle} left — unpaid` });
+      }
+    }
+    if (changed) { refreshActiveRoster(t, elos); t.rosterKey = [...(t.activeIds ?? t.playerIds)].sort().join(","); }
+  }
+  return quit;
+}
+
 // Reconcile contracts once per cycle:
 //   - invariant: only players on an active org hold a contract (free agents /
 //     folded players have theirs cleared);
@@ -155,13 +232,15 @@ export function runContractCycle(
   teams: UniverseTeam[], players: Player[], day: number, rng: () => number = Math.random,
 ): string[] {
   const byId = new Map(players.map(p => [p.id, p] as const));
-  const onActiveOrg = new Set<string>();
-  for (const t of teams) if (!t.disbandedDay) for (const id of t.playerIds) onActiveOrg.add(id);
-  for (const p of players) if (p.contract && !onActiveOrg.has(p.id)) delete p.contract;
+  // Only players on an active PRO org hold a contract: amateur orgs don't pay,
+  // so their players (and free agents / folded players) carry none.
+  const onPaidOrg = new Set<string>();
+  for (const t of teams) if (!t.disbandedDay && t.tier === "pro") for (const id of t.playerIds) onPaidOrg.add(id);
+  for (const p of players) if (p.contract && !onPaidOrg.has(p.id)) delete p.contract;
 
   const freed: string[] = [];
   for (const t of teams) {
-    if (t.disbandedDay || t.playerIds.length === 0) continue;
+    if (t.disbandedDay || t.playerIds.length === 0 || t.tier !== "pro") continue;
     let released = 0;
     const expiring = t.playerIds
       .map(id => byId.get(id)).filter((p): p is Player => !!p)
@@ -199,15 +278,54 @@ export function sponsorIncome(team: UniverseTeam): number {
   return BASE_SPONSOR + Math.round((team.rankingPoints ?? 0) * SPONSOR_PER_RP);
 }
 
-// Run one cycle of finances over every active org: credit sponsorship, debit the
-// wage bill. Mutates `balance` in place. Prize money is added separately (before
-// this) so winnings are spendable. Call once per event cycle.
+// Run one cycle of finances over every active org: credit sponsorship, and —
+// for PRO orgs only — debit the wage bill, paying each wage into the player's
+// personal wallet (so salary actually reaches the player). Amateur orgs are
+// player-run and pay no salaries; they just draw sponsorship. Mutates `balance`
+// in place. Prize money is added separately (before this) so winnings are
+// spendable. Call once per event cycle.
 export function runFinancialCycle(teams: UniverseTeam[], players: Player[]): void {
   const byId = new Map(players.map(p => [p.id, p] as const));
   for (const t of teams) {
     if (t.disbandedDay || t.playerIds.length === 0) continue;
-    t.balance = (t.balance ?? 0) + sponsorIncome(t) - wageBill(t, byId);
+    t.balance = (t.balance ?? 0) + sponsorIncome(t);
+    if (t.tier !== "pro") continue; // amateurs don't pay players
+    for (const id of t.playerIds) {
+      const p = byId.get(id);
+      if (!p) continue;
+      const wage = wageOf(p);
+      t.balance = (t.balance ?? 0) - wage;
+      p.wallet = (p.wallet ?? 0) + wage;
+      p.careerEarnings = (p.careerEarnings ?? 0) + wage;
+    }
   }
+}
+
+// Pro orgs are expected to win. Track each pro org's run of under-performance —
+// sitting in the bottom third of active orgs by ranking points, or on a losing
+// streak (streak <= -3). The counter resets the moment results recover; once it
+// reaches PRO_PATIENCE_CYCLES the org folds (its backers pull out), freeing the
+// roster to the market. Newly founded pros get a grace period to establish a
+// ranking before the clock starts. Call after the transfer window / bench cycle,
+// before the insolvency fold. Returns the orgs that folded on expectations.
+const PRO_GRACE_DAYS = EVENT_INTERVAL_DAYS * 3; // settle-in window for a new pro org
+export function runProDiscipline(teams: UniverseTeam[], day: number): UniverseTeam[] {
+  const active = teams.filter(t => !t.disbandedDay && t.playerIds.length > 0);
+  const ranked = [...active].map(t => t.rankingPoints ?? 0).sort((a, b) => a - b);
+  const cutoff = ranked.length ? ranked[Math.floor(ranked.length / 3)] : 0; // bottom-third line
+  const folded: UniverseTeam[] = [];
+  for (const t of active) {
+    if (t.tier !== "pro") continue;
+    if (day - t.foundedDay < PRO_GRACE_DAYS) continue; // give new clubs time to rank up
+    const underperforming = (t.rankingPoints ?? 0) <= cutoff || (t.streak ?? 0) <= -3;
+    t.slumpCycles = underperforming ? (t.slumpCycles ?? 0) + 1 : 0;
+    if ((t.slumpCycles ?? 0) >= PRO_PATIENCE_CYCLES) {
+      t.disbandedDay = day;
+      (t.rosterHistory ??= []).push({ day, playerIds: [], note: "Folded — failed expectations" });
+      folded.push(t);
+    }
+  }
+  return folded;
 }
 
 // Fold every active org whose balance has fallen below FOLD_THRESHOLD. Marks the

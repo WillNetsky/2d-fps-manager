@@ -11,7 +11,7 @@ import { applyMatchElo } from "./elo.ts";
 import { applyMatchChemistry, FRIEND_THRESHOLD } from "./chemistry.ts";
 import { applyMatchForm } from "./form.ts";
 import {
-  STARTING_ELO, TEAM_SIZE, RECRUIT_BOND, STARTING_BALANCE,
+  STARTING_ELO, TEAM_SIZE, RECRUIT_BOND,
   GAMES_TO_ORG, DRIVEN_AMBITION, DRIVEN_CORE_SIZE, pickOrgColor,
   type CareerStats, type Clutch, type GameResult, type Matchup, type PendingDay, type PlayerMatchStats,
   type ProvisionalStack, type UniverseTeam, type VetoStep,
@@ -320,23 +320,30 @@ export function crystallizeTeam(
   let team = ctx.teams.find(t => t.rosterKey === rosterKey);
   if (!team) {
     const id = `t${ctx.teams.length}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+    const founderId = captainOf(playerIds, elos); // a player leads a grassroots team — no hired coach
+    // A grassroots org is seeded only with its founder's personal savings (which
+    // they invest into the club). Early on that's near nothing — amateur orgs are
+    // cash-poor and can't pay salaries until prize money builds the balance.
+    const founder = ctx.byId.get(founderId);
+    const seed = founder?.wallet ?? 0;
+    if (founder) founder.wallet = 0;
     team = {
       id,
       name: generateTeamName(Math.random),
       region,
       color: pickOrgColor(id),
-      country: ctx.byId.get(captainOf(playerIds, elos))?.country,
+      country: ctx.byId.get(founderId)?.country,
       playerIds: [...playerIds],
       activeIds: [...playerIds],   // founding five are all active
       rosterKey,
       tier: "org",
-      founderId: captainOf(playerIds, elos), // a player leads a grassroots team — no hired coach
+      founderId,
       rosterHistory: [{ day: ctx.day, playerIds: [...playerIds], note: "Founded" }],
       elo,
       foundedDay: ctx.day,
       lastPlayedDay: ctx.day,
       wins: 0, losses: 0, roundsWon: 0, roundsLost: 0, streak: 0,
-      balance: STARTING_BALANCE,
+      balance: seed,
     };
     ctx.teams.push(team);
   } else {
