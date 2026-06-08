@@ -44,10 +44,10 @@
 ## Universe
 - [x] Pool of players
 - [x] They play casual games (that are tracked) and skill up from them
-- [ ] Professional Teams 
+- [x] Professional Teams 
 - [x] Tournament prize money
 - [x] Player's value money
-- [ ] Something to spend money on (better equipment? buy a team?)
+- [x] Something to spend money on (better equipment? buy a team?)
 - [x] Player pages should show their handle before their real names
 - [x] Player pages relationship display should show "Handle" Real Name
 - [x] Team pages should also show when they benched a player in the Roster history

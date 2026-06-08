@@ -286,6 +286,10 @@ export interface UniverseTeam {
   // PRO_PATIENCE_CYCLES the org folds, since pros are expected to win. Only
   // tracked for pro orgs; absent/0 otherwise.
   slumpCycles?: number;
+  // Org facilities (each level 0..FACILITY_MAX) the org invests its surplus into;
+  // they accelerate the roster's seasonal development (see facilities.ts). Absent
+  // → all level 0; reads go through facilityLevel(), so no migration is needed.
+  facilities?: { training?: number; analysts?: number; sportsScience?: number };
 }
 
 export interface PendingDay {

@@ -5,6 +5,7 @@
 import type { Player } from "../domain/types.ts";
 import { FRIEND_THRESHOLD } from "./chemistry.ts";
 import { benchOf, refreshActiveRoster } from "./roster.ts";
+import { facilityUpkeep } from "./facilities.ts";
 import {
   STARTING_ELO, TEAM_SIZE, WAGE_RATE, BASE_SPONSOR, SPONSOR_PER_RP, FOLD_THRESHOLD,
   CONTRACT_LENGTH_DAYS, BENCH_MORALE_HIT, ORG_PRIZE_PLAYER_SHARE, EVENT_INTERVAL_DAYS,
@@ -288,7 +289,7 @@ export function runFinancialCycle(teams: UniverseTeam[], players: Player[]): voi
   const byId = new Map(players.map(p => [p.id, p] as const));
   for (const t of teams) {
     if (t.disbandedDay || t.playerIds.length === 0) continue;
-    t.balance = (t.balance ?? 0) + sponsorIncome(t);
+    t.balance = (t.balance ?? 0) + sponsorIncome(t) - facilityUpkeep(t); // facilities cost upkeep every cycle
     if (t.tier !== "pro") continue; // amateurs don't pay players
     for (const id of t.playerIds) {
       const p = byId.get(id);

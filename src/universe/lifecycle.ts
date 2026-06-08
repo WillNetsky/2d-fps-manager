@@ -17,6 +17,7 @@ import { makePlayer, generateManager } from "../domain/factory.ts";
 import { generateTeamName } from "../domain/teamNames.ts";
 import { FRIEND_THRESHOLD, seedCliqueBonds } from "./chemistry.ts";
 import { signContract } from "./finance.ts";
+import { developmentBonus, type DevBonus } from "./facilities.ts";
 import { refreshActiveRoster, rosterSnapshot, syncActiveRoster } from "./roster.ts";
 import {
   STARTING_ELO, DISBAND_IDLE_DAYS, TEAM_SIZE, pickOrgColor,
@@ -77,20 +78,29 @@ function clampStat(v: number): number {
 
 // Age every active player a year and drift their ratings. Stats are stored as
 // floats here (sub-1 deltas matter over a career); UI rounds for display.
-export function advancePlayerCareers(players: Player[], rng: () => number = Math.random): void {
+// `devById` (optional) carries each rostered player's org-facility bonus: a per-
+// category growth bonus plus a multiplier on decline (negative deltas). Players
+// with no entry (free agents, or a universe without facilities) develop unchanged.
+export function advancePlayerCareers(
+  players: Player[], rng: () => number = Math.random,
+  devById: Map<string, DevBonus> = new Map(),
+): void {
   for (const p of players) {
     if (p.retired) continue;
     p.age += 1;
+    const dev = devById.get(p.id);
     const jitter = () => (rng() * 2 - 1) * 0.5; // ±0.5 so cohorts don't move in lockstep
-    const apply = (keys: StatKey[], delta: number) => {
-      for (const k of keys) p.stats[k] = clampStat(p.stats[k] + delta + jitter());
+    // Soften decline first (Sports Science), then add the facility growth bonus.
+    const apply = (keys: StatKey[], delta: number, bonus = 0) => {
+      const d = (delta < 0 && dev ? delta * dev.declineMult : delta) + bonus;
+      for (const k of keys) p.stats[k] = clampStat(p.stats[k] + d + jitter());
     };
-    apply(PHYSICAL, physicalDelta(p.age));
-    apply(AIM, aimDelta(p.age));
-    apply(COGNITIVE, experienceDelta(p.age));
-    apply(TEAM, experienceDelta(p.age) * 0.8);
-    apply(UTILITY, experienceDelta(p.age) * 0.6);
-    apply(MENTAL, mentalDelta(p.age));
+    apply(PHYSICAL, physicalDelta(p.age), dev?.physical);
+    apply(AIM, aimDelta(p.age), dev?.aim);
+    apply(COGNITIVE, experienceDelta(p.age), dev?.cognitive);
+    apply(TEAM, experienceDelta(p.age) * 0.8, dev?.team);
+    apply(UTILITY, experienceDelta(p.age) * 0.6, dev?.utility);
+    apply(MENTAL, mentalDelta(p.age), dev?.mental);
   }
 }
 
@@ -346,7 +356,14 @@ export function runSeasonLifecycle(
   players: Player[], elos: Record<string, number>, teams: UniverseTeam[], day: number,
   rng: () => number = Math.random,
 ): LifecycleSummary {
-  advancePlayerCareers(players, rng);
+  // Org facilities accelerate their roster's development this season.
+  const devById = new Map<string, DevBonus>();
+  for (const t of teams) {
+    if (t.disbandedDay) continue;
+    const bonus = developmentBonus(t);
+    for (const id of t.playerIds) devById.set(id, bonus);
+  }
+  advancePlayerCareers(players, rng, devById);
   const retiredByRegion = rollRetirements(players, elos, day, rng);
   const youth = replenishYouth(players, elos, retiredByRegion, rng);
   reconcileOrgRosters(teams, players, elos, day, rng);

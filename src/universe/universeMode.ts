@@ -20,6 +20,7 @@ import { buildNews, type NewsCategory } from "./news.ts";
 import { buildStorylines } from "./storylines.ts";
 import { hltvRating1 } from "./rating.ts";
 import { regionPayouts, awardPrize, recomputePlayerValues, formatMoney, PLAYOFF_PRIZES, MAJOR_PRIZES, wageBill, marketWage, runContractCycle, runFinancialCycle, runPayExpectationCycle, runProDiscipline, runBenchCycle, foldInsolventOrgs } from "./finance.ts";
+import { runFacilityCycle, FACILITIES, FACILITY_MAX, facilityLevel, facilityUpkeep } from "./facilities.ts";
 import { activeLineup, benchOf, iglOf, refreshActiveRoster } from "./roster.ts";
 import { generateTeamName, reserveTeamNames, resetTeamNames } from "../domain/teamNames.ts";
 import SimWorker from "./universeSimWorker.ts?worker";
@@ -897,6 +898,7 @@ export class UniverseMode {
     const log = (u.transfers ??= []);
     log.push(...runTransferWindow(teams, u.players, u.elos, day));
     if (log.length > TRANSFERS_LOG_MAX) log.splice(0, log.length - TRANSFERS_LOG_MAX);
+    runFacilityCycle(teams, u.players, day); // invest surplus into player-development facilities
     runBenchCycle(teams, u.players, u.elos, day); // unhappy bench players walk
     runProDiscipline(teams, day);            // pros that keep losing fold (failed expectations)
     foldInsolventOrgs(teams, day);
@@ -3673,6 +3675,32 @@ function teamPage(team: UniverseTeam, u: Universe, h: TeamPageHandlers): HTMLEle
     rosterSection.appendChild(benchEl);
   }
   root.appendChild(rosterSection);
+
+  // ----- Facilities (AI-managed; develop the roster, cost upkeep) -----
+  {
+    const fac = document.createElement("div");
+    fac.className = "utm-section";
+    const upkeep = facilityUpkeep(team);
+    fac.innerHTML = `<h3 class="utm-section-h">Facilities` +
+      (upkeep > 0 ? ` <span class="utm-sub">${formatMoney(upkeep)}/cyc upkeep</span>` : "") + `</h3>`;
+    const list = document.createElement("div");
+    list.className = "utm-facilities";
+    for (const f of FACILITIES) {
+      const lvl = facilityLevel(team, f.key);
+      const pips = Array.from({ length: FACILITY_MAX }, (_, i) =>
+        `<span class="utm-fac-pip${i < lvl ? " on" : ""}"></span>`).join("");
+      const row = document.createElement("div");
+      row.className = "utm-fac-row";
+      row.innerHTML =
+        `<div class="utm-fac-info"><span class="utm-fac-name">${f.label}</span>` +
+        `<span class="utm-fac-blurb">${f.blurb}</span></div>` +
+        `<div class="utm-fac-pips" title="Level ${lvl} / ${FACILITY_MAX}">${pips}` +
+        `<span class="utm-fac-lvl">${lvl}/${FACILITY_MAX}</span></div>`;
+      list.appendChild(row);
+    }
+    fac.appendChild(list);
+    root.appendChild(fac);
+  }
 
   // ----- Former members (everyone the club has ever signed, who's since left) -----
   const everSigned = new Set<string>();
