@@ -16,6 +16,32 @@ export function refreshActiveRoster(team: UniverseTeam, elos: Record<string, num
   team.rosterKey = [...team.activeIds].sort().join(",");
 }
 
+// Snapshot of who's on the roster and in the active 5, taken BEFORE a membership
+// change so syncActiveRoster can tell genuine bench/promote moves apart from the
+// signing/departure that triggered them.
+export interface RosterSnapshot { members: Set<string>; active: Set<string>; }
+export function rosterSnapshot(team: UniverseTeam): RosterSnapshot {
+  return {
+    members: new Set(team.playerIds),
+    active: new Set(team.activeIds ?? team.playerIds.slice(0, TEAM_SIZE)),
+  };
+}
+
+// Re-pick the active 5 (see refreshActiveRoster) and report who moved between the
+// bench and the active roster — counting only players who were ALREADY on the
+// roster before the change, so a brand-new signing isn't reported as a promotion
+// and a departed player isn't reported as benched. Pass the pre-change snapshot.
+export function syncActiveRoster(
+  team: UniverseTeam, elos: Record<string, number>, before: RosterSnapshot,
+): { benched: string[]; promoted: string[] } {
+  refreshActiveRoster(team, elos);
+  const nowActive = new Set(team.activeIds ?? []);
+  const members = new Set(team.playerIds);
+  const benched = [...before.active].filter(id => members.has(id) && !nowActive.has(id));
+  const promoted = [...nowActive].filter(id => before.members.has(id) && !before.active.has(id));
+  return { benched, promoted };
+}
+
 // Rostered players outside the Active 5 (filtered to current members).
 export function benchOf(team: UniverseTeam): string[] {
   const members = new Set(team.playerIds);

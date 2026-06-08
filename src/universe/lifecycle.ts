@@ -17,7 +17,7 @@ import { makePlayer, generateManager } from "../domain/factory.ts";
 import { generateTeamName } from "../domain/teamNames.ts";
 import { FRIEND_THRESHOLD, seedCliqueBonds } from "./chemistry.ts";
 import { signContract } from "./finance.ts";
-import { refreshActiveRoster } from "./roster.ts";
+import { refreshActiveRoster, rosterSnapshot, syncActiveRoster } from "./roster.ts";
 import {
   STARTING_ELO, DISBAND_IDLE_DAYS, TEAM_SIZE, pickOrgColor,
   PRO_ORGS_PER_REGION, PRO_STARTING_BALANCE, type UniverseTeam,
@@ -185,7 +185,14 @@ export function reconcileOrgRosters(
     const retirees = team.playerIds.filter(id => byId.get(id)?.retired);
     if (retirees.length === 0) continue;
 
+    const handles = (ids: string[]) => ids.map(id => byId.get(id)?.handle ?? id).join(", ");
+    const movesNote = (m: { benched: string[]; promoted: string[] }) =>
+      (m.benched.length ? `, benched ${handles(m.benched)}` : "") +
+      (m.promoted.length ? `, promoted ${handles(m.promoted)}` : "");
+
     for (const retireeId of retirees) {
+      const before = rosterSnapshot(team);
+      const retiree = byId.get(retireeId);
       const survivors = team.playerIds.filter(id => id !== retireeId && !byId.get(id)?.retired);
       const target = avgElo(survivors, elos);
 
@@ -206,19 +213,24 @@ export function reconcileOrgRosters(
         // No free agent (shouldn't happen after youth intake): drop the retiree
         // anyway. The org plays short / dormant until it re-forms — rare.
         team.playerIds = survivors;
+        const moves = syncActiveRoster(team, elos, before); // a bench player may step up
+        (team.rosterHistory ??= []).push({
+          day, playerIds: [...survivors],
+          note: `${retiree?.handle ?? "Player"} retired${movesNote(moves)}`,
+        });
         continue;
       }
 
-      const retiree = byId.get(retireeId);
       const signing = best;
       onOrg.add(signing.id);
       team.playerIds = [...survivors, signing.id];
       bondInto(signing, survivors.map(id => byId.get(id)!).filter(Boolean));
 
+      const moves = syncActiveRoster(team, elos, before);
       (team.rosterHistory ??= []).push({
         day,
         playerIds: [...team.playerIds],
-        note: `Signed ${signing.handle}${retiree ? `, ${retiree.handle} retired` : ""}`,
+        note: `Signed ${signing.handle}${retiree ? `, ${retiree.handle} retired` : ""}${movesNote(moves)}`,
       });
     }
 

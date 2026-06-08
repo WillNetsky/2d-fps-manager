@@ -18,7 +18,7 @@ import type { Player } from "../domain/types.ts";
 import { regionOf } from "../domain/countries.ts";
 import { seedCliqueBonds } from "./chemistry.ts";
 import { formatMoney, signContract } from "./finance.ts";
-import { benchOf, refreshActiveRoster } from "./roster.ts";
+import { refreshActiveRoster, rosterSnapshot, syncActiveRoster } from "./roster.ts";
 import { STARTING_ELO, TEAM_SIZE, ROSTER_MAX, type TransferRecord, type UniverseTeam } from "./types.ts";
 
 const MIN_UPGRADE_GAP = 30;  // elo improvement required to bother signing
@@ -43,12 +43,20 @@ export function runTransferWindow(
   const freeAgentsIn = (region: string): Player[] =>
     players.filter(p => !p.retired && !onOrg.has(p.id) && !moved.has(p.id) && regionOf(p.country) === region);
 
+  const updateElo = (org: UniverseTeam): void => {
+    if (org.playerIds.length) org.elo = Math.round(org.playerIds.reduce((s, id) => s + eloOf(id), 0) / org.playerIds.length);
+  };
   const commit = (org: UniverseTeam): void => {
-    org.elo = Math.round(org.playerIds.reduce((s, id) => s + eloOf(id), 0) / org.playerIds.length);
+    updateElo(org);
     refreshActiveRoster(org, elos); // re-pick the best 5 active; rest are bench
   };
   const seed = (org: UniverseTeam): void =>
     seedCliqueBonds(org.playerIds.map(id => byId.get(id)!).filter(Boolean), SIGNING_BOND);
+  const handles = (ids: string[]): string => ids.map(id => byId.get(id)?.handle ?? id).join(", ");
+  // Append bench/promote moves (existing roster members only) to a history note.
+  const movesNote = (m: { benched: string[]; promoted: string[] }): string =>
+    (m.benched.length ? `, benched ${handles(m.benched)}` : "") +
+    (m.promoted.length ? `, promoted ${handles(m.promoted)}` : "");
 
   // --- Buying pass: richest first (prize money = buying power) ---
   const buyers = [...active].sort((a, b) =>
@@ -85,11 +93,19 @@ export function runTransferWindow(
 
     // Execute: pay the fee, pull the player onto the roster (bench-aware).
     const signing = byId.get(pick.id)!;
+    const buyerBefore = rosterSnapshot(org);
     if (pick.from) {
+      const sellerBefore = rosterSnapshot(pick.from);
       pick.from.playerIds = pick.from.playerIds.filter(id => id !== pick.id);
       pick.from.balance = (pick.from.balance ?? 0) + pick.fee; // selling org banks the fee
       org.balance = (org.balance ?? 0) - pick.fee;
-      commit(pick.from); // bench promotes into the seller's active five
+      updateElo(pick.from);
+      // Bench may promote into the seller's active five — record the sale + move.
+      const sellerMoves = syncActiveRoster(pick.from, elos, sellerBefore);
+      (pick.from.rosterHistory ??= []).push({
+        day, playerIds: [...pick.from.playerIds],
+        note: `Sold ${signing.handle} to ${org.name} (${formatMoney(pick.fee)})${movesNote(sellerMoves)}`,
+      });
     }
     org.playerIds = [...org.playerIds, pick.id];
     onOrg.add(pick.id);
@@ -106,14 +122,10 @@ export function runTransferWindow(
       releasedNote = `, released ${byId.get(worst)?.handle ?? worst}`;
     }
     seed(org);
-    commit(org);
-
-    // Whoever dropped out of the active five (but stayed on the roster) was
-    // benched by this signing — surface it in the history note.
-    const benched = benchOf(org).filter(id => activeIds.includes(id));
-    const benchedNote = benched.length
-      ? `, benched ${benched.map(id => byId.get(id)?.handle ?? id).join(", ")}`
-      : "";
+    updateElo(org);
+    // Re-pick the active five; the signing (and any over-cap release) can bench an
+    // existing member or promote a benched one — surface both in the note.
+    const buyerMoves = syncActiveRoster(org, elos, buyerBefore);
 
     transfers.push({
       day, playerId: pick.id, playerHandle: signing.handle,
@@ -124,7 +136,7 @@ export function runTransferWindow(
       day, playerIds: [...org.playerIds],
       note: (pick.from
         ? `Signed ${signing.handle} from ${pick.from.name} (${formatMoney(pick.fee)})`
-        : `Signed ${signing.handle} (free agent)`) + releasedNote + benchedNote,
+        : `Signed ${signing.handle} (free agent)`) + releasedNote + movesNote(buyerMoves),
     });
   }
 
