@@ -40,13 +40,20 @@ export function seedCliqueBonds(group: Player[], bond: number): void {
   }
 }
 
+// How strongly friend groups cluster by nationality: when adding a member to a
+// clique, this is the chance it's drawn from the anchor's own country (the rest
+// of the time it's anyone in the region). High, so cliques are overwhelmingly
+// same-country with the occasional foreign teammate.
+const SAME_COUNTRY_BIAS = 0.9;
+
 // Seed a starting social graph so a brand-new universe isn't a blank slate. Most
 // players begin already sitting in a friend group of varying tightness — from
 // loose acquaintances (some pairs below FRIEND_THRESHOLD) up to ready-made four-
 // and five-man crews that stack on day one and immediately enter the stack→org
 // climb — with scattered cross-group acquaintances and the odd rivalry between
-// them, plus a minority of friendless newcomers. Region-locked, since friendships
-// only matter within a player's own scene. Call once, at universe creation.
+// them, plus a minority of friendless newcomers. Friend groups cluster heavily by
+// nationality (countrymen stick together); region-locked overall, since
+// friendships only matter within a player's own scene. Call once, at creation.
 export function seedInitialRelationships(players: Player[], rng: () => number = Math.random): void {
   const byRegion = new Map<string, Player[]>();
   for (const p of players) {
@@ -55,30 +62,50 @@ export function seedInitialRelationships(players: Player[], rng: () => number = 
   }
 
   for (const pool of byRegion.values()) {
-    // Fisher–Yates shuffle so cliques aren't correlated with generation order.
-    const order = [...pool];
-    for (let i = order.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      [order[i], order[j]] = [order[j], order[i]];
+    // Draw players from per-country queues so cliques form mostly within a
+    // country. Each queue is shuffled; popping removes a player from the pool.
+    const byCountry = new Map<string, Player[]>();
+    for (const p of pool) (byCountry.get(p.country) ?? byCountry.set(p.country, []).get(p.country)!).push(p);
+    for (const q of byCountry.values()) {
+      for (let i = q.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [q[i], q[j]] = [q[j], q[i]]; }
     }
+    const drawFrom = (country: string): Player | undefined => {
+      const q = byCountry.get(country);
+      return q && q.length ? q.pop() : undefined;
+    };
+    const drawAny = (): Player | undefined => {
+      const live = [...byCountry.values()].filter(q => q.length);
+      if (live.length === 0) return undefined;
+      return live[Math.floor(rng() * live.length)].pop();
+    };
 
-    // Carve the shuffled pool into friend groups of varying size and cohesion.
-    let i = 0;
-    while (i < order.length) {
-      if (rng() < 0.22) { i++; continue; }            // ~22% start friendless
-      const roll = rng();                             // size: mostly pairs/trios
+    // Carve the pool into friend groups of varying size and cohesion, each drawn
+    // mostly from a single country (the anchor's).
+    let anchor = drawAny();
+    while (anchor) {
+      if (rng() < 0.22) { anchor = drawAny(); continue; } // ~22% start friendless
+      const roll = rng();                                 // size: mostly pairs/trios
       const size = roll < 0.38 ? 2 : roll < 0.66 ? 3 : roll < 0.86 ? 4 : 5;
-      const group = order.slice(i, i + size);
-      i += group.length;
-      if (group.length < 2) break;
-      // Cohesion varies group to group: tight crews sit well above the friendship
-      // bar (they group up); loose ones straddle it (some pairs won't).
-      const base = 30 + rng() * 55;                   // 30..85
-      for (const a of group) for (const b of group) {
-        if (a.id === b.id) continue;
-        const v = Math.round(clampRel(base + (rng() * 2 - 1) * 18));
-        a.relationships[b.id] = Math.max(a.relationships[b.id] ?? 0, v);
+      const group = [anchor];
+      while (group.length < size) {
+        // Heavily favor the anchor's countrymen; sometimes pull in a foreigner.
+        const member = rng() < SAME_COUNTRY_BIAS
+          ? (drawFrom(anchor.country) ?? drawAny())
+          : (drawAny() ?? drawFrom(anchor.country));
+        if (!member) break;
+        group.push(member);
       }
+      if (group.length >= 2) {
+        // Cohesion varies group to group: tight crews sit well above the friendship
+        // bar (they group up); loose ones straddle it (some pairs won't).
+        const base = 30 + rng() * 55;                     // 30..85
+        for (const a of group) for (const b of group) {
+          if (a.id === b.id) continue;
+          const v = Math.round(clampRel(base + (rng() * 2 - 1) * 18));
+          a.relationships[b.id] = Math.max(a.relationships[b.id] ?? 0, v);
+        }
+      }
+      anchor = drawAny();
     }
 
     // Loose cross-group acquaintances and a few rivalries, so the graph is a
