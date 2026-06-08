@@ -754,12 +754,13 @@ export class UniverseMode {
     if (!u.playoffs) this.runDueLifecycle(u, done.day);
   }
 
-  // Seed a tournament in every region that can field one. Invitees are the top
-  // SWISS_FIELD by ranking points / Elo, drawn from tracked orgs AND recurring
-  // full-5 friend-stacks — so brackets fill out early and a stack good enough to
-  // qualify graduates into a tracked org (it can then win prize money + ranking
-  // points like anyone else). Free agents only backfill any slots real teams
-  // leave open. Decays standing points first so the ranking tracks
+  // Seed a tournament in every region that can field one. Invitees fill a Swiss
+  // field split between ranking-point qualifiers (the established teams) and open
+  // Elo qualifiers (so new/surging teams break in on merit) — see eventInvitees —
+  // drawn from tracked orgs AND recurring full-5 friend-stacks, so brackets fill
+  // out early and a stack good enough to qualify graduates into a tracked org (it
+  // can then win prize money + ranking points like anyone else). Free agents only
+  // backfill any slots real teams leave open. Decays standing points first so the ranking tracks
   // recent form. No-op (just rearm the timer) if nobody can play.
   private startEvent(u: Universe) {
     const c = this.ensureCircuit(u);

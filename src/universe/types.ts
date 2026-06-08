@@ -482,6 +482,11 @@ export const YEAR_STATS_KEEP = 12;
 export const SWISS_FIELD = 16;
 export const SWISS_TARGET = 3;
 export const BRACKET_FIELD = 8;
+// Of the SWISS_FIELD slots, this many go to the top teams by ranking points
+// (established teams); the rest are open qualifiers filled by Elo from everyone
+// else — the merit path that lets new/high-Elo teams break into the circuit
+// instead of the same field recycling every event.
+export const RANKING_QUALIFY_SLOTS = 8;
 
 // Majors: the marquee international event. Every MAJOR_EVERY-th event slot is a
 // Major instead of the regional circuits — one cross-region bracket of the

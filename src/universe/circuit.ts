@@ -8,7 +8,7 @@ import { regionOf, REGION_ORDER, type Region } from "../domain/countries.ts";
 import type { Player } from "../domain/types.ts";
 import { placementPayouts, type PlacementTiers } from "./finance.ts";
 import {
-  INVITE_FIELD, YEAR_LENGTH, STARTING_ELO, TEAM_SIZE, FA_CONTENDER_MARGIN,
+  INVITE_FIELD, SWISS_FIELD, RANKING_QUALIFY_SLOTS, YEAR_LENGTH, STARTING_ELO, TEAM_SIZE, FA_CONTENDER_MARGIN,
   type ProvisionalStack, type RegionPlayoff, type UniverseTeam,
 } from "./types.ts";
 
@@ -41,13 +41,24 @@ function inviteeStrength(inv: Invitee, elos: Record<string, number>): { pts: num
   return { pts: 0, elo };
 }
 
-// Per region, the top `n` invitees for the next event in seed order: every
-// tracked org plus every recurring full-5 stack whose roster is currently active.
+// A stable per-invitee key, so equal-strength ties sort deterministically.
+function inviteeKey(inv: Invitee): string {
+  return inv.kind === "team" ? inv.team.id : inv.stack.rosterKey;
+}
+
+// Per region, the field for the next event (up to `n`), drawn from every tracked
+// org plus every recurring full-5 stack whose roster is currently active. The
+// field is split two ways to keep it from stagnating into the same teams forever:
+//   - the top `rankingSlots` qualify by RANKING POINTS (Elo breaks ties) — the
+//     established teams hold their place;
+//   - the rest are OPEN QUALIFIERS, filled by Elo from everyone left — so a new
+//     or surging team (even on zero ranking points) can break in on merit.
 // Regions that can't field a bracket (< 2 invitees) are skipped. Feeds startEvent,
 // which crystallizes any chosen stacks before handing seeds to startPlayoffs.
 export function eventInvitees(
   teams: UniverseTeam[], stacks: ProvisionalStack[],
-  elos: Record<string, number>, isActive: (id: string) => boolean, n = INVITE_FIELD,
+  elos: Record<string, number>, isActive: (id: string) => boolean,
+  n = SWISS_FIELD, rankingSlots = RANKING_QUALIFY_SLOTS,
 ): Map<Region, Invitee[]> {
   const byRegion = new Map<Region, Invitee[]>();
   const add = (region: Region, inv: Invitee) =>
@@ -56,15 +67,28 @@ export function eventInvitees(
   for (const s of stacks) {
     if (s.playerIds.length === TEAM_SIZE && s.playerIds.every(isActive)) add(s.region, { kind: "stack", stack: s });
   }
+  const eloOf = (inv: Invitee) => inviteeStrength(inv, elos).elo;
   const out = new Map<Region, Invitee[]>();
   for (const region of REGION_ORDER) {
     const pool = byRegion.get(region);
     if (!pool || pool.length < 2) continue;
+
+    // Phase 1: ranking-point qualifiers (Elo, then key, break ties).
     pool.sort((a, b) => {
       const sa = inviteeStrength(a, elos), sb = inviteeStrength(b, elos);
-      return sa.pts !== sb.pts ? sb.pts - sa.pts : sb.elo - sa.elo;
+      return sa.pts !== sb.pts ? sb.pts - sa.pts
+        : sa.elo !== sb.elo ? sb.elo - sa.elo
+        : inviteeKey(a).localeCompare(inviteeKey(b));
     });
-    out.set(region, pool.slice(0, n));
+    const byPoints = pool.slice(0, rankingSlots);
+
+    // Phase 2: open qualifiers — strongest remaining teams by Elo.
+    const taken = new Set(byPoints);
+    const byElo = pool.filter(inv => !taken.has(inv))
+      .sort((a, b) => eloOf(b) - eloOf(a) || inviteeKey(a).localeCompare(inviteeKey(b)))
+      .slice(0, Math.max(0, n - byPoints.length));
+
+    out.set(region, [...byPoints, ...byElo]);
   }
   return out;
 }
